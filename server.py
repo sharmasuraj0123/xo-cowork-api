@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -30,6 +30,10 @@ load_dotenv()
 # External Chat API base URL (xo-swarm-api or similar)
 CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://localhost:5001")
 
+# Optional: token for xo-swarm-api auth. If set, requests send Authorization: Bearer <token>.
+# When you enable auth on your API, set this (e.g. in .env) or Cowork's push/fetch will get 401/403.
+CHAT_API_TOKEN = os.getenv("CHAT_API_TOKEN", "").strip() or None
+
 # Claude Code CLI path (defaults to 'claude' assuming it's in PATH)
 CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
 
@@ -44,8 +48,7 @@ CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "300"))  # 5 minutes default
 # Session Management
 # =============================================================================
 
-# In-memory session storage: { project_id: session_id }
-# In production, consider using Redis or database
+
 session_store: Dict[str, str] = {}
 
 
@@ -69,9 +72,6 @@ def clear_session(project_id: str) -> None:
         print(f"🗑️ Cleared session for project {project_id}")
 
 
-# =============================================================================
-# Pydantic Models
-# =============================================================================
 
 class AskQuestionRequest(BaseModel):
     """Request model for ask_question endpoints"""
@@ -81,25 +81,16 @@ class AskQuestionRequest(BaseModel):
     message_type: Optional[str] = "@xo"
 
 
-class AskQuestionResponse(BaseModel):
-    """Response model for ask_question endpoint"""
-    id: Optional[str] = None
-    message: str
-    project_id: str
-    user_id: str
-    session_id: Optional[str] = None
-    timestamp: str
-
-
 # =============================================================================
 # External Chat API Client
 # =============================================================================
 
 class ChatAPIClient:
-    """Client for external Chat API endpoints."""
+    """Client for external Chat API endpoints. Uses CHAT_API_TOKEN if set (Bearer)."""
 
-    def __init__(self, base_url: str = CHAT_API_BASE_URL):
+    def __init__(self, base_url: str = CHAT_API_BASE_URL, token: Optional[str] = CHAT_API_TOKEN):
         self.base_url = base_url.rstrip("/")
+        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     async def push_message(
         self,
@@ -119,7 +110,7 @@ class ChatAPIClient:
 
         try:
             async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                response = await client.post(url, json=payload)
+                response = await client.post(url, json=payload, headers=self._headers)
                 if response.status_code == 200:
                     print(f"✅ Pushed message: project={project_id}, type={message_type}")
                     return response.json()
@@ -141,7 +132,7 @@ class ChatAPIClient:
 
         try:
             async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                response = await client.get(url, params=params)
+                response = await client.get(url, params=params, headers=self._headers)
                 if response.status_code == 200:
                     data = response.json()
                     messages = data.get("messages", [])
@@ -367,6 +358,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
+    print(f"   Chat API auth: {'enabled (Bearer token)' if CHAT_API_TOKEN else 'not set'}")
     print(f"   Claude CLI: {CLAUDE_CLI_PATH}")
     print(f"   Timeout: {CLAUDE_TIMEOUT}s")
     yield
