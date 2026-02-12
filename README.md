@@ -117,6 +117,97 @@ DELETE /sessions/{project_id}
 
 Clears the session for a specific project.
 
+### XO Browser Auth (for protected xo-swarm-api)
+
+#### 1) Start auth flow
+
+```bash
+curl -X POST http://localhost:5002/xo-auth/start \
+  -H "Content-Type: application/json" \
+  -d '{"client_reference":"cowork-demo"}'
+```
+
+Response includes:
+- `authorize_url` (open this in browser)
+- `auth_session_id`
+- `poll_token`
+
+#### 2) Open `authorize_url` in browser
+
+User logs in through Clerk. XO backend handles callback.
+
+#### 3) Poll status
+
+```bash
+curl "http://localhost:5002/xo-auth/status/<auth_session_id>?poll_token=<poll_token>"
+```
+
+Wait for `status: "authorized"`.
+
+#### 4) Consume and store token
+
+```bash
+curl -X POST http://localhost:5002/xo-auth/consume \
+  -H "Content-Type: application/json" \
+  -d '{"auth_session_id":"<auth_session_id>","poll_token":"<poll_token>"}'
+```
+
+Cowork stores the token in-memory and uses it automatically for outgoing calls to xo-swarm-api.
+
+#### 5) Verify token/user mapping
+
+```bash
+curl http://localhost:5002/xo-auth/whoami
+```
+
+### Direct XO Swarm API auth flow (without cowork wrapper)
+
+If you want to authenticate directly against `xo-swarm-api` (for debugging or integration docs), use these steps:
+
+#### Step 1) Start browser auth
+
+```bash
+curl -X POST http://localhost:5001/auth/browser/start \
+  -H "Content-Type: application/json" \
+  -d '{"client_reference":"direct-test"}'
+```
+
+Copy from response:
+- `authorize_url`
+- `auth_session_id`
+- `poll_token`
+
+#### Step 2) Open `authorize_url` in browser
+
+User logs in/consents in Clerk.
+
+#### Step 3) Poll status
+
+```bash
+curl "http://localhost:5001/auth/browser/status/<auth_session_id>?poll_token=<poll_token>"
+```
+
+Wait until response has `status: "authorized"`.
+
+#### Step 4) Consume token
+
+```bash
+curl -X POST http://localhost:5001/auth/browser/consume \
+  -H "Content-Type: application/json" \
+  -d '{"auth_session_id":"<auth_session_id>","poll_token":"<poll_token>"}'
+```
+
+Copy `access_token` from response.
+
+#### Step 5) Validate token and get user id
+
+```bash
+curl http://localhost:5001/get-user-id \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
 ### Ask Question (Non-Streaming)
 
 ```bash
@@ -184,6 +275,11 @@ data: {"done": true}
 | `CLAUDE_CLI_PATH` | Path to Claude CLI | `claude` |
 | `CLAUDE_TIMEOUT` | CLI timeout (seconds) | `300` |
 | `CHAT_API_BASE_URL` | External Chat API URL | `http://localhost:5001` |
+| `CHAT_API_TOKEN` | Optional static Bearer token fallback | unset |
+| `XO_AUTH_START_PATH` | XO backend start auth path | `/auth/browser/start` |
+| `XO_AUTH_STATUS_PATH` | XO backend status path | `/auth/browser/status` |
+| `XO_AUTH_CONSUME_PATH` | XO backend consume path | `/auth/browser/consume` |
+| `XO_GET_USER_ID_PATH` | XO backend user-id path | `/get-user-id` |
 
 ## Testing
 
