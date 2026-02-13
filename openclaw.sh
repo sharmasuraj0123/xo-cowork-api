@@ -8,7 +8,7 @@
 # Required env vars (set in .env):
 #     TELEGRAM_BOT_TOKEN      - Telegram bot token from BotFather
 #     OPENCLAW_GATEWAY_TOKEN  - Gateway auth token
-#     CLAUDE_SETUP_TOKEN      - Token from 'claude setup-token' (Claude Pro/Max)
+#     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
 #
 # Optional env vars:
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
@@ -153,8 +153,8 @@ validate_env() {
         log_error "TELEGRAM_BOT_TOKEN is not set (required when TELEGRAM_ENABLED=true)"
         missing=1
     fi
-    if [ -z "${CLAUDE_SETUP_TOKEN:-}" ]; then
-        log_error "CLAUDE_SETUP_TOKEN is not set (run 'claude setup-token' to generate)"
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        log_error "ANTHROPIC_API_KEY is not set"
         missing=1
     fi
     if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
@@ -515,19 +515,6 @@ GUARDEOF
 }
 
 # ==============================================================
-# Setup: Register Claude setup-token (if provided)
-# ==============================================================
-register_claude_token() {
-    log "Registering Claude setup-token with OpenClaw..."
-    if echo "$CLAUDE_SETUP_TOKEN" | openclaw models auth paste-token --provider anthropic 2>/dev/null; then
-        log_success "Claude setup-token registered"
-    else
-        log_error "Failed to register Claude setup-token"
-        exit 1
-    fi
-}
-
-# ==============================================================
 # Setup: Full setup + start
 # ==============================================================
 run_setup() {
@@ -537,7 +524,6 @@ run_setup() {
     install_env
     enable_channels
     install_cli
-    register_claude_token
     log "Running config doctor..."
     if openclaw doctor --fix --yes 2>/dev/null; then
         log_success "Config validated"
