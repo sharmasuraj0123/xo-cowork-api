@@ -1,5 +1,5 @@
 ---
-name: agentic-backend
+name: agno-agentic-backend
 description: Build or refactor backend systems using FastAPI and Agno with production-safe architecture, reliability, and testing.
 ---
 
