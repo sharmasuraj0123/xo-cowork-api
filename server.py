@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import httpx
 import uvicorn
 from claude_code_client import ClaudeCodeClient
+from codex_code_client import CodexCodeClient
 
 # Load environment variables
 load_dotenv()
@@ -39,12 +40,19 @@ CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://localhost:5001")
 
 # Claude Code CLI path (defaults to 'claude' assuming it's in PATH)
 CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
+# Codex CLI path (defaults to 'codex' assuming it's in PATH)
+CODEX_CLI_PATH = os.getenv("CODEX_CLI_PATH", "codex")
 
 # HTTP client timeout settings
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 # Claude Code timeout (in seconds) - allow longer for complex queries
 CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "300"))  # 5 minutes default
+# Codex timeout (in seconds)
+CODEX_TIMEOUT = int(os.getenv("CODEX_TIMEOUT", str(CLAUDE_TIMEOUT)))
+
+# Runtime provider switch: claude | codex
+AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().lower()
 
 
 # =============================================================================
@@ -162,11 +170,16 @@ class ChatAPIClient:
 chat_client = ChatAPIClient()
 
 
-# Global Claude Code client
-claude_client = ClaudeCodeClient(
-    cli_path=CLAUDE_CLI_PATH,
-    timeout_seconds=CLAUDE_TIMEOUT,
-)
+if AI_PROVIDER == "codex":
+    ai_client = CodexCodeClient(
+        cli_path=CODEX_CLI_PATH,
+        timeout_seconds=CODEX_TIMEOUT,
+    )
+else:
+    ai_client = ClaudeCodeClient(
+        cli_path=CLAUDE_CLI_PATH,
+        timeout_seconds=CLAUDE_TIMEOUT,
+    )
 
 
 # =============================================================================
@@ -205,9 +218,11 @@ async def lifespan(app: FastAPI):
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
     print(f"   Chat API auth: {'enabled (dynamic token or CHAT_API_TOKEN)' if (get_auth_token() or CHAT_API_TOKEN) else 'not set'}")
-    print(f"   Claude CLI: {CLAUDE_CLI_PATH}")
-    print(f"   Timeout: {CLAUDE_TIMEOUT}s")
+    print(f"   AI Provider: {AI_PROVIDER}")
+    print(f"   Claude CLI: {CLAUDE_CLI_PATH} (timeout={CLAUDE_TIMEOUT}s)")
+    print(f"   Codex CLI: {CODEX_CLI_PATH} (timeout={CODEX_TIMEOUT}s)")
     print("   Skills: .claude/skills (Claude-native)")
+    print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
     yield
     print("👋 Shutting down XO Cowork API Server...")
 
@@ -247,7 +262,9 @@ async def health_check():
         "timestamp": datetime.datetime.now().isoformat(),
         "chat_api_url": CHAT_API_BASE_URL,
         "auth": get_auth_state(),
+        "ai_provider": AI_PROVIDER,
         "claude_cli": CLAUDE_CLI_PATH,
+        "codex_cli": CODEX_CLI_PATH,
         "active_sessions": len(session_store)
     }
 
@@ -273,7 +290,7 @@ async def delete_session(project_id: str):
 @app.post("/ask_question")
 async def ask_question(data: AskQuestionRequest):
     """
-    Send a question to Claude Code (non-streaming).
+    Send a question to configured AI CLI provider (non-streaming).
 
     - First message creates a new session
     - Subsequent messages resume the existing session
@@ -290,8 +307,8 @@ async def ask_question(data: AskQuestionRequest):
         else:
             print(f"🔄 Resuming session {session_id} for project: {data.project_name}")
 
-        # Send to Claude Code
-        response = await claude_client.ask(
+        # Send to selected AI provider CLI
+        response = await ai_client.ask(
             question=data.question,
             session_id=session_id,
             is_new_session=is_new,
@@ -335,13 +352,11 @@ async def ask_question(data: AskQuestionRequest):
 @app.post("/ask_question_streaming")
 async def ask_question_streaming(data: AskQuestionRequest):
     """
-    Send a question to Claude Code (streaming).
+    Send a question to configured AI CLI provider (streaming).
 
     Returns SSE stream of response tokens.
 
-    Claude Code stream-json events include:
-    - {"type": "assistant", "message": {...}} - Assistant message chunks
-    - {"type": "result", "result": "..."} - Final result
+    Streaming returns normalized token events.
     """
     try:
         # Check if this is a new session
@@ -362,56 +377,29 @@ async def ask_question_streaming(data: AskQuestionRequest):
         async def generate_stream():
             nonlocal stream_success
             try:
-                async for event in claude_client.ask_streaming(
+                async for event in ai_client.ask_streaming(
                     question=data.question,
                     session_id=session_id,
                     is_new_session=is_new,
                     agent_type=data.agent_type,
                 ):
-                    # Handle different event types from Claude Code
+                    # Handle normalized provider event types
                     event_type = event.get("type", "")
 
-                    if event_type == "assistant":
-                        # Assistant message with content
-                        message = event.get("message", {})
-                        content = message.get("content", [])
-                        for block in content:
-                            if block.get("type") == "text":
-                                text = block.get("text", "")
-                                if text:
-                                    full_response_parts.append(text)
-                                    yield f"data: {json.dumps({'type': 'token', 'token': text})}\n\n"
-
-                    elif event_type == "content_block_delta":
-                        # Streaming delta
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                full_response_parts.append(text)
-                                yield f"data: {json.dumps({'type': 'token', 'token': text})}\n\n"
-
-                    elif event_type == "result":
-                        # Final result
-                        result = event.get("result", "")
-                        if result and not full_response_parts:
-                            full_response_parts.append(result)
-                            yield f"data: {json.dumps({'type': 'token', 'token': result})}\n\n"
+                    if event_type == "token":
+                        text = event.get("token", "")
+                        if text:
+                            full_response_parts.append(text)
+                            yield f"data: {json.dumps({'type': 'token', 'token': text})}\n\n"
 
                     elif event_type == "error":
                         stream_success = False  # Mark as failed
                         yield f"data: {json.dumps({'type': 'error', 'error': event.get('error', 'Unknown error')})}\n\n"
 
-                    elif event_type == "text":
-                        # Raw text fallback
-                        content = event.get("content", "")
-                        if content:
-                            full_response_parts.append(content)
-                            yield f"data: {json.dumps({'type': 'token', 'token': content})}\n\n"
-
-                # Send done event
-                yield f"data: {json.dumps({'done': True})}\n\n"
-                stream_success = True
+                    elif event_type == "done":
+                        # Provider signals completion.
+                        stream_success = True
+                        yield f"data: {json.dumps({'done': True})}\n\n"
 
             except Exception as e:
                 print(f"❌ Stream generation error: {str(e)}")

@@ -4,7 +4,6 @@ Centralized Claude Code client with Claude-native skills support.
 
 import asyncio
 import json
-import os
 from typing import Optional, Dict, Any, AsyncGenerator
 
 
@@ -102,7 +101,14 @@ class ClaudeCodeClient:
         is_new_session: bool = False,
         agent_type: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Stream response from Claude Code CLI using stream-json format."""
+        """
+        Stream response from Claude Code CLI using normalized token events.
+
+        Emits events:
+        - {"type": "token", "token": "..."}
+        - {"type": "error", "error": "..."}
+        - {"type": "done"}
+        """
         prompt = self._build_prompt(question=question, agent_type=agent_type)
         cmd = [self.cli_path]
 
@@ -124,6 +130,7 @@ class ClaudeCodeClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            saw_token = False
 
             while True:
                 try:
@@ -145,9 +152,43 @@ class ClaudeCodeClient:
 
                 try:
                     event = json.loads(line_str)
-                    yield event
                 except json.JSONDecodeError:
-                    yield {"type": "text", "content": line_str}
+                    event = {"type": "text", "content": line_str}
+
+                event_type = event.get("type", "")
+
+                if event_type == "assistant":
+                    message = event.get("message", {})
+                    content = message.get("content", [])
+                    for block in content:
+                        if block.get("type") == "text":
+                            text = block.get("text", "")
+                            if text:
+                                saw_token = True
+                                yield {"type": "token", "token": text}
+
+                elif event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            saw_token = True
+                            yield {"type": "token", "token": text}
+
+                elif event_type == "result":
+                    result = event.get("result", "")
+                    if result and not saw_token:
+                        saw_token = True
+                        yield {"type": "token", "token": result}
+
+                elif event_type == "text":
+                    content = event.get("content", "")
+                    if content:
+                        saw_token = True
+                        yield {"type": "token", "token": content}
+
+                elif event_type == "error":
+                    yield {"type": "error", "error": event.get("error", "Unknown error")}
 
             await process.wait()
 
@@ -156,8 +197,10 @@ class ClaudeCodeClient:
                 error_msg = stderr.decode().strip()
                 if error_msg:
                     print(f"❌ Stream stderr: {error_msg}")
+                    yield {"type": "error", "error": error_msg}
 
             print("✅ Stream completed")
+            yield {"type": "done"}
 
         except Exception as e:
             print(f"❌ Stream error: {str(e)}")
