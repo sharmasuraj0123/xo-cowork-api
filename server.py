@@ -46,10 +46,6 @@ HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # Claude Code timeout (in seconds) - allow longer for complex queries
 CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "300"))  # 5 minutes default
 
-# Instruction-backed agent configuration
-CLAUDE_INSTRUCTIONS_DIR = os.getenv("CLAUDE_INSTRUCTIONS_DIR", "instructions")
-CLAUDE_DEFAULT_AGENT = os.getenv("CLAUDE_DEFAULT_AGENT", "default")
-
 
 # =============================================================================
 # Session Management
@@ -170,8 +166,6 @@ chat_client = ChatAPIClient()
 claude_client = ClaudeCodeClient(
     cli_path=CLAUDE_CLI_PATH,
     timeout_seconds=CLAUDE_TIMEOUT,
-    instructions_dir=CLAUDE_INSTRUCTIONS_DIR,
-    default_agent=CLAUDE_DEFAULT_AGENT,
 )
 
 
@@ -213,8 +207,7 @@ async def lifespan(app: FastAPI):
     print(f"   Chat API auth: {'enabled (dynamic token or CHAT_API_TOKEN)' if (get_auth_token() or CHAT_API_TOKEN) else 'not set'}")
     print(f"   Claude CLI: {CLAUDE_CLI_PATH}")
     print(f"   Timeout: {CLAUDE_TIMEOUT}s")
-    print(f"   Instructions dir: {CLAUDE_INSTRUCTIONS_DIR}")
-    print(f"   Default agent: {CLAUDE_DEFAULT_AGENT}")
+    print("   Skills: .claude/skills (Claude-native)")
     yield
     print("👋 Shutting down XO Cowork API Server...")
 

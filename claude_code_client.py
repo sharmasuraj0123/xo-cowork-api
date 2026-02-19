@@ -1,90 +1,45 @@
 """
-Centralized Claude Code client with instruction-based agent profiles.
+Centralized Claude Code client with Claude-native skills support.
 """
 
 import asyncio
 import json
 import os
-from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
 
 
 class ClaudeCodeClient:
-    """Interface for Claude Code CLI with instruction-backed agents."""
+    """Interface for Claude Code CLI with optional skill selection."""
 
     def __init__(
         self,
         cli_path: str = "claude",
         timeout_seconds: int = 300,
-        instructions_dir: str = "instructions",
-        default_agent: str = "default",
     ):
         self.cli_path = cli_path
         self.timeout_seconds = timeout_seconds
-        self.instructions_dir = Path(instructions_dir)
-        self.default_agent = default_agent
 
-    def _ensure_instructions_dir(self) -> None:
-        """Create instructions directory if it does not exist."""
-        self.instructions_dir.mkdir(parents=True, exist_ok=True)
-
-    def _load_agent_instructions(self) -> Dict[str, str]:
+    @staticmethod
+    def _skill_name(agent_type: Optional[str]) -> Optional[str]:
         """
-        Load instruction files into a map:
-        - instructions/<agent>.md
-        - instructions/<agent>.txt
+        Convert optional frontend agent_type into a Claude skill name.
+
+        Keeps backward compatibility with existing API clients while routing to
+        Claude-native skills under .claude/skills.
         """
-        self._ensure_instructions_dir()
-        instructions: Dict[str, str] = {}
-
-        for file_path in self.instructions_dir.iterdir():
-            if not file_path.is_file():
-                continue
-            if file_path.suffix.lower() not in {".md", ".txt"}:
-                continue
-
-            agent_name = file_path.stem.strip()
-            if not agent_name:
-                continue
-
-            try:
-                content = file_path.read_text(encoding="utf-8").strip()
-                if content:
-                    instructions[agent_name] = content
-            except Exception as e:
-                print(f"⚠️ Failed to read instruction file {file_path}: {str(e)}")
-
-        return instructions
-
-    def list_agents(self) -> list:
-        """List available agents from instruction files."""
-        return sorted(self._load_agent_instructions().keys())
+        if not agent_type:
+            return None
+        normalized = agent_type.strip().lower().replace("_", "-")
+        return normalized or None
 
     def _build_prompt(self, question: str, agent_type: Optional[str]) -> str:
         """
-        Build final prompt using selected agent instructions.
-
-        Fallback order:
-        1) requested agent_type
-        2) default_agent
-        3) no instruction (raw question)
+        Build prompt using Claude-native skill invocation when agent_type is set.
         """
-        selected_agent = (agent_type or "").strip() or self.default_agent
-        instructions = self._load_agent_instructions()
-
-        instruction_text = instructions.get(selected_agent)
-        if instruction_text is None and selected_agent != self.default_agent:
-            instruction_text = instructions.get(self.default_agent)
-
-        if not instruction_text:
+        skill_name = self._skill_name(agent_type)
+        if not skill_name:
             return question
-
-        # Keep a stable, explicit format so instruction files are easy to reason about.
-        return (
-            f"{instruction_text}\n\n"
-            "User request:\n"
-            f"{question}"
-        )
+        return f"/{skill_name} {question}"
 
     async def ask(
         self,
