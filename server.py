@@ -25,6 +25,7 @@ load_dotenv()
 
 from routers.auth import (
     CHAT_API_TOKEN,
+    consume_auth_flow,
     get_auth_token,
     get_auth_state,
     router as auth_router,
@@ -223,6 +224,24 @@ async def lifespan(app: FastAPI):
     print(f"   Codex CLI: {CODEX_CLI_PATH} (timeout={CODEX_TIMEOUT}s)")
     print("   Skills: .claude/skills (Claude-native)")
     print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
+    startup_auth_session_id = os.getenv("XO_AUTH_SESSION_ID", "").strip()
+    startup_poll_token = os.getenv("XO_POLL_TOKEN", "").strip()
+    if startup_auth_session_id and startup_poll_token:
+        print("   XO startup consume: configured, attempting token consume")
+        try:
+            await consume_auth_flow(
+                auth_session_id=startup_auth_session_id,
+                poll_token=startup_poll_token,
+            )
+            print("✅ XO startup consume succeeded")
+        except HTTPException as e:
+            print(f"⚠️ XO startup consume failed: status={e.status_code}, detail={e.detail}")
+        except Exception as e:
+            print(f"⚠️ XO startup consume failed unexpectedly: {str(e)}")
+    elif startup_auth_session_id or startup_poll_token:
+        print(
+            "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
+        )
     yield
     print("👋 Shutting down XO Cowork API Server...")
 

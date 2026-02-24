@@ -107,6 +107,75 @@ class XOAuthConsumeRequest(BaseModel):
 router = APIRouter(prefix="/xo-auth", tags=["auth"])
 
 
+def resolve_consume_credentials(
+    auth_session_id: Optional[str], poll_token: Optional[str]
+) -> tuple[str, str]:
+    """
+    Resolve consume credentials with body-first, env-fallback strategy.
+    """
+    resolved_auth_session_id = (auth_session_id or "").strip() or os.getenv(
+        "XO_AUTH_SESSION_ID", ""
+    ).strip()
+    resolved_poll_token = (poll_token or "").strip() or os.getenv(
+        "XO_POLL_TOKEN", ""
+    ).strip()
+    if not resolved_auth_session_id or not resolved_poll_token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "Missing auth_session_id/poll_token. "
+                    "Provide in request body or set XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
+                )
+            },
+        )
+    return resolved_auth_session_id, resolved_poll_token
+
+
+async def consume_auth_flow(auth_session_id: str, poll_token: str) -> Dict[str, Any]:
+    """
+    Call XO consume endpoint and store returned access token in-memory.
+    """
+    url = f"{CHAT_API_BASE_URL.rstrip('/')}{XO_AUTH_CONSUME_PATH}"
+    payload = {"auth_session_id": auth_session_id, "poll_token": poll_token}
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail={"error": "Failed to consume auth flow", "upstream": response.text},
+            )
+
+        result = response.json()
+        access_token = result.get("access_token")
+        if not access_token:
+            raise HTTPException(
+                status_code=500, detail={"error": "No access token in consume response"}
+            )
+
+        set_auth_token(
+            access_token=access_token,
+            refresh_token=result.get("refresh_token"),
+            expires_in=result.get("expires_in"),
+            user_id=result.get("user_id"),
+            auth_session_id=result.get("auth_session_id"),
+        )
+        return {
+            "success": True,
+            "message": "Authentication completed and token stored",
+            "user_id": result.get("user_id"),
+            "expires_in": result.get("expires_in"),
+            "scope": result.get("scope"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail={"error": f"Failed to consume auth flow: {str(e)}"}
+        )
+
+
 @router.post("/start")
 async def xo_auth_start(data: XOAuthStartRequest):
     """
@@ -165,61 +234,10 @@ async def xo_auth_consume(data: XOAuthConsumeRequest):
     - XO_AUTH_SESSION_ID
     - XO_POLL_TOKEN
     """
-    auth_session_id = (data.auth_session_id or "").strip() or os.getenv(
-        "XO_AUTH_SESSION_ID", ""
-    ).strip()
-    poll_token = (data.poll_token or "").strip() or os.getenv(
-        "XO_POLL_TOKEN", ""
-    ).strip()
-    if not auth_session_id or not poll_token:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    "Missing auth_session_id/poll_token. "
-                    "Provide in request body or set XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
-                )
-            },
-        )
-
-    url = f"{CHAT_API_BASE_URL.rstrip('/')}{XO_AUTH_CONSUME_PATH}"
-    payload = {"auth_session_id": auth_session_id, "poll_token": poll_token}
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            response = await client.post(url, json=payload)
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail={"error": "Failed to consume auth flow", "upstream": response.text},
-            )
-
-        result = response.json()
-        access_token = result.get("access_token")
-        if not access_token:
-            raise HTTPException(
-                status_code=500, detail={"error": "No access token in consume response"}
-            )
-
-        set_auth_token(
-            access_token=access_token,
-            refresh_token=result.get("refresh_token"),
-            expires_in=result.get("expires_in"),
-            user_id=result.get("user_id"),
-            auth_session_id=result.get("auth_session_id"),
-        )
-        return {
-            "success": True,
-            "message": "Authentication completed and token stored",
-            "user_id": result.get("user_id"),
-            "expires_in": result.get("expires_in"),
-            "scope": result.get("scope"),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail={"error": f"Failed to consume auth flow: {str(e)}"}
-        )
+    auth_session_id, poll_token = resolve_consume_credentials(
+        data.auth_session_id, data.poll_token
+    )
+    return await consume_auth_flow(auth_session_id, poll_token)
 
 
 @router.get("/whoami")
