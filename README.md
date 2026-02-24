@@ -153,6 +153,8 @@ curl -X POST http://localhost:5002/xo-auth/consume \
 ```
 
 Cowork stores the token in-memory and uses it automatically for outgoing calls to xo-swarm-api.
+If request body values are omitted, cowork falls back to `XO_AUTH_SESSION_ID` and
+`XO_POLL_TOKEN` from environment variables.
 
 #### 5) Verify token/user mapping
 
@@ -280,6 +282,8 @@ data: {"done": true}
 | `XO_AUTH_STATUS_PATH` | XO backend status path | `/auth/browser/status` |
 | `XO_AUTH_CONSUME_PATH` | XO backend consume path | `/auth/browser/consume` |
 | `XO_GET_USER_ID_PATH` | XO backend user-id path | `/get-user-id` |
+| `XO_AUTH_SESSION_ID` | Optional fallback `auth_session_id` for `/xo-auth/consume` | unset |
+| `XO_POLL_TOKEN` | Optional fallback `poll_token` for `/xo-auth/consume` | unset |
 
 ## Testing
 

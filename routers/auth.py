@@ -100,8 +100,8 @@ class XOAuthStartRequest(BaseModel):
 class XOAuthConsumeRequest(BaseModel):
     """Consume completed browser auth flow."""
 
-    auth_session_id: str
-    poll_token: str
+    auth_session_id: Optional[str] = None
+    poll_token: Optional[str] = None
 
 
 router = APIRouter(prefix="/xo-auth", tags=["auth"])
@@ -160,9 +160,30 @@ async def xo_auth_status(auth_session_id: str, poll_token: str):
 async def xo_auth_consume(data: XOAuthConsumeRequest):
     """
     Consume auth flow and store token in-memory for outgoing XO backend calls.
+
+    Request body values take precedence. If missing, fallback to env:
+    - XO_AUTH_SESSION_ID
+    - XO_POLL_TOKEN
     """
+    auth_session_id = (data.auth_session_id or "").strip() or os.getenv(
+        "XO_AUTH_SESSION_ID", ""
+    ).strip()
+    poll_token = (data.poll_token or "").strip() or os.getenv(
+        "XO_POLL_TOKEN", ""
+    ).strip()
+    if not auth_session_id or not poll_token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "Missing auth_session_id/poll_token. "
+                    "Provide in request body or set XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
+                )
+            },
+        )
+
     url = f"{CHAT_API_BASE_URL.rstrip('/')}{XO_AUTH_CONSUME_PATH}"
-    payload = {"auth_session_id": data.auth_session_id, "poll_token": data.poll_token}
+    payload = {"auth_session_id": auth_session_id, "poll_token": poll_token}
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             response = await client.post(url, json=payload)
