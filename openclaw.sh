@@ -209,7 +209,10 @@ enable_channels() {
             --arg ui_origin "$control_ui_origin" \
             '{
                 gateway: {
-                    mode: "local"
+                    mode: "local",
+                    controlUi: {
+                        dangerouslyDisableDeviceAuth: true
+                    }
                 },
                 commands: { native: "auto", nativeSkills: "auto" },
                 channels: {
@@ -240,7 +243,8 @@ enable_channels() {
   "gateway": {
     "mode": "local",
     "controlUi": {
-      "allowedOrigins": ["${control_ui_origin}"]
+      "allowedOrigins": ["${control_ui_origin}"],
+      "dangerouslyDisableDeviceAuth": true
     }
   },
   "commands": { "native": "auto", "nativeSkills": "auto" },
@@ -261,7 +265,12 @@ EOJSON
         else
             cat > "$CONFIG_FILE" <<'EOJSON'
 {
-  "gateway": { "mode": "local" },
+  "gateway": {
+    "mode": "local",
+    "controlUi": {
+      "dangerouslyDisableDeviceAuth": true
+    }
+  },
   "commands": { "native": "auto", "nativeSkills": "auto" },
   "channels": {
     "telegram": {
@@ -296,9 +305,9 @@ ensure_gateway_mode() {
         if command -v jq &>/dev/null; then
             local tmp
             if [ -n "$control_ui_origin" ]; then
-                tmp=$(jq --arg origin "$control_ui_origin" '. + {gateway: {mode: "local", controlUi: {allowedOrigins: [$origin]}}}' "$CONFIG_FILE")
+                tmp=$(jq --arg origin "$control_ui_origin" '. + {gateway: {mode: "local", controlUi: {allowedOrigins: [$origin], dangerouslyDisableDeviceAuth: true}}}' "$CONFIG_FILE")
             else
-                tmp=$(jq '. + {gateway: {mode: "local"}}' "$CONFIG_FILE")
+                tmp=$(jq '. + {gateway: {mode: "local", controlUi: {dangerouslyDisableDeviceAuth: true}}}' "$CONFIG_FILE")
             fi
             echo "$tmp" > "$CONFIG_FILE"
         else
