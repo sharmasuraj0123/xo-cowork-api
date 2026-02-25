@@ -136,6 +136,11 @@ async def consume_auth_flow(auth_session_id: str, poll_token: str) -> Dict[str, 
     """
     Call XO consume endpoint and store returned access token in-memory.
     """
+    # If CHAT_API_BASE_URL points at localhost:5001, override it to api-swarm-beta.xo.builders
+    global CHAT_API_BASE_URL
+    if CHAT_API_BASE_URL.strip().startswith("http://localhost:5001") or CHAT_API_BASE_URL.strip().startswith("http://127.0.0.1:5001"):
+        CHAT_API_BASE_URL = "https://api-swarm-beta.xo.builders"
+    
     url = f"{CHAT_API_BASE_URL.rstrip('/')}{XO_AUTH_CONSUME_PATH}"
     payload = {"auth_session_id": auth_session_id, "poll_token": poll_token}
     try:
