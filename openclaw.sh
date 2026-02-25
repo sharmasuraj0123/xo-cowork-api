@@ -198,6 +198,7 @@ enable_channels() {
 
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
     local allow_from="${TELEGRAM_ALLOW_FROM:-}"
+    local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
 
     if command -v jq &>/dev/null; then
         # Build config safely with jq
@@ -205,8 +206,11 @@ enable_channels() {
         config=$(jq -n \
             --argjson tg_enabled "$telegram_enabled" \
             --arg allow_from "$allow_from" \
+            --arg ui_origin "$control_ui_origin" \
             '{
-                gateway: { mode: "local" },
+                gateway: {
+                    mode: "local"
+                },
                 commands: { native: "auto", nativeSkills: "auto" },
                 channels: {
                     telegram: {
@@ -223,11 +227,39 @@ enable_channels() {
             }
             | if $allow_from != "" then
                 .channels.telegram.allowFrom = [$allow_from]
+              else . end
+            | if $ui_origin != "" then
+                .gateway.controlUi.allowedOrigins = [$ui_origin]
               else . end')
         echo "$config" > "$CONFIG_FILE"
     else
         # Fallback: heredoc (no string concatenation)
-        cat > "$CONFIG_FILE" <<'EOJSON'
+        if [ -n "$control_ui_origin" ]; then
+            cat > "$CONFIG_FILE" <<EOJSON
+{
+  "gateway": {
+    "mode": "local",
+    "controlUi": {
+      "allowedOrigins": ["${control_ui_origin}"]
+    }
+  },
+  "commands": { "native": "auto", "nativeSkills": "auto" },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "open",
+      "allowFrom": ["*"],
+      "groupPolicy": "allowlist",
+      "streamMode": "partial"
+    }
+  },
+  "plugins": { "entries": { "telegram": { "enabled": true } } },
+  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
+  "messages": { "ackReactionScope": "group-mentions" }
+}
+EOJSON
+        else
+            cat > "$CONFIG_FILE" <<'EOJSON'
 {
   "gateway": { "mode": "local" },
   "commands": { "native": "auto", "nativeSkills": "auto" },
@@ -245,6 +277,7 @@ enable_channels() {
   "messages": { "ackReactionScope": "group-mentions" }
 }
 EOJSON
+        fi
         # Patch in allow_from and enabled state if needed
         if [ "$telegram_enabled" = "false" ]; then
             log_warn "jq not available — Telegram enabled defaults to true in fallback config. Install jq for full config support."
@@ -258,10 +291,15 @@ EOJSON
 # Setup: Ensure gateway.mode is set
 # ==============================================================
 ensure_gateway_mode() {
+    local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
     if [ -f "$CONFIG_FILE" ] && ! grep -q '"gateway"' "$CONFIG_FILE"; then
         if command -v jq &>/dev/null; then
             local tmp
-            tmp=$(jq '. + {gateway: {mode: "local"}}' "$CONFIG_FILE")
+            if [ -n "$control_ui_origin" ]; then
+                tmp=$(jq --arg origin "$control_ui_origin" '. + {gateway: {mode: "local", controlUi: {allowedOrigins: [$origin]}}}' "$CONFIG_FILE")
+            else
+                tmp=$(jq '. + {gateway: {mode: "local"}}' "$CONFIG_FILE")
+            fi
             echo "$tmp" > "$CONFIG_FILE"
         else
             local tmpfile
