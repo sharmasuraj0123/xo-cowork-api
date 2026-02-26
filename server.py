@@ -37,7 +37,7 @@ from routers.auth import (
 # =============================================================================
 
 # External Chat API base URL (xo-swarm-api or similar)
-CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://localhost:5001")
+CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders")
 
 # Claude Code CLI path (defaults to 'claude' assuming it's in PATH)
 CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")

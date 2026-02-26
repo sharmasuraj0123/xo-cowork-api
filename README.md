@@ -69,7 +69,7 @@ PORT=5002
 CLAUDE_CLI_PATH=/Users/yourname/.local/bin/claude
 
 # Optional: External Chat API for message persistence
-CHAT_API_BASE_URL=http://localhost:5001
+CHAT_API_BASE_URL=https://api-swarm-beta.xo.builders
 
 # Claude Code timeout in seconds
 CLAUDE_TIMEOUT=300
@@ -278,7 +278,7 @@ data: {"done": true}
 | `PORT` | Server port | `5002` |
 | `CLAUDE_CLI_PATH` | Path to Claude CLI | `claude` |
 | `CLAUDE_TIMEOUT` | CLI timeout (seconds) | `300` |
-| `CHAT_API_BASE_URL` | External Chat API URL | `http://localhost:5001` |
+| `CHAT_API_BASE_URL` | External Chat API URL | `https://api-swarm-beta.xo.builders` |
 | `CHAT_API_TOKEN` | Optional static Bearer token fallback | unset |
 | `XO_AUTH_START_PATH` | XO backend start auth path | `/auth/browser/start` |
 | `XO_AUTH_STATUS_PATH` | XO backend status path | `/auth/browser/status` |

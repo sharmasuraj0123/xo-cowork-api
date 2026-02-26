@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 
 # External Chat API base URL (xo-swarm-api or similar)
-CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://localhost:5001")
+CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders")
 
 # Optional static token fallback for xo-swarm-api auth.
 # Browser auth flow can populate token dynamically at runtime.
