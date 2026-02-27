@@ -106,15 +106,16 @@ clean_stale_pid() {
     fi
 }
 
-# Find orphan "openclaw gateway run" processes not managed by our wrapper
+# Find orphan gateway processes not managed by our wrapper
 find_orphan_gateways() {
     local managed_wrapper_pid=""
     if [ -f "$PID_FILE" ]; then
         managed_wrapper_pid=$(cat "$PID_FILE" 2>/dev/null || true)
     fi
 
+    # Search for both the command form and the binary name
     local gw_pids
-    gw_pids=$(pgrep -f "openclaw gateway run" 2>/dev/null || true)
+    gw_pids=$(( pgrep -f "openclaw gateway run" 2>/dev/null; pgrep -x "openclaw-gateway" 2>/dev/null ) | sort -u)
     [ -z "$gw_pids" ] && return
 
     for gw_pid in $gw_pids; do
@@ -386,9 +387,13 @@ _launch_gateway_loop() {
         cleanup() {
             echo "[$(date "+%Y-%m-%d %H:%M:%S")] Shutting down (signal received)..."
             if [ -n "$gateway_pid" ] && kill -0 "$gateway_pid" 2>/dev/null; then
+                # Kill the command and all its children (including openclaw-gateway binary)
+                pkill -P "$gateway_pid" 2>/dev/null || true
                 kill "$gateway_pid" 2>/dev/null
                 wait "$gateway_pid" 2>/dev/null
             fi
+            # Also kill any remaining openclaw-gateway binary processes
+            pkill -x "openclaw-gateway" 2>/dev/null || true
             rm -f "$pid_file"
             exit 0
         }
