@@ -12,7 +12,6 @@
 #
 # Optional env vars:
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
-#     TELEGRAM_ALLOW_FROM     - Telegram user ID to restrict DMs to (optional)
 #     OPENCLAW_MAX_RESTARTS   - max consecutive restarts (default: 10)
 #     OPENCLAW_RESTART_DELAY  - seconds between restarts (default: 5)
 #     OPENCLAW_RESTART_WINDOW - seconds of uptime to reset counter (default: 300)
@@ -83,9 +82,14 @@ acquire_lock() {
         return 0
     fi
     exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        log_error "Another openclaw.sh operation is in progress"
-        exit 1
+    if ! flock -w 5 9; then
+        log_warn "Lock held, cleaning stale lock and retrying..."
+        rm -f "$LOCK_FILE"
+        exec 9>"$LOCK_FILE"
+        if ! flock -n 9; then
+            log_error "Another openclaw.sh operation is in progress"
+            exit 1
+        fi
     fi
     LOCK_ACQUIRED=1
 }
@@ -197,7 +201,6 @@ enable_channels() {
     fi
 
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
-    local allow_from="${TELEGRAM_ALLOW_FROM:-}"
     local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
 
     if command -v jq &>/dev/null; then
@@ -205,7 +208,6 @@ enable_channels() {
         local config
         config=$(jq -n \
             --argjson tg_enabled "$telegram_enabled" \
-            --arg allow_from "$allow_from" \
             --arg ui_origin "$control_ui_origin" \
             '{
                 gateway: {
@@ -228,9 +230,6 @@ enable_channels() {
                 agents: { defaults: { maxConcurrent: 4, subagents: { maxConcurrent: 8 } } },
                 messages: { ackReactionScope: "group-mentions" }
             }
-            | if $allow_from != "" then
-                .channels.telegram.allowFrom = [$allow_from]
-              else . end
             | if $ui_origin != "" then
                 .gateway.controlUi.allowedOrigins = [$ui_origin]
               else . end')
@@ -358,27 +357,26 @@ install_cli() {
 # ==============================================================
 is_running() {
     clean_stale_pid
-    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    else
+        return 1
+    fi
 }
 
 # ==============================================================
-# Gateway: Start (background with auto-restart + signal traps)
+# Gateway: Launch background auto-restart loop (shared by start/restart)
 # ==============================================================
-start_gateway() {
-    acquire_lock
-
-    if is_running; then
-        echo -e "${YELLOW}Gateway is already running (PID: $(cat "$PID_FILE"))${NC}"
-        return 0
-    fi
-
-    # Kill any orphan gateway processes (e.g. user ran "openclaw gateway run" directly)
-    kill_orphan_gateways
-
+_launch_gateway_loop() {
     rotate_log
     echo -e "${GREEN}Starting OpenClaw Gateway...${NC}"
 
     nohup bash -c '
+        # Close inherited lock FD so flock is released when parent exits
+        exec 9>&-
+
         pid_file="'"$PID_FILE"'"
         log_file="'"$LOG_FILE"'"
         log_max_size='"$LOG_MAX_SIZE"'
@@ -442,8 +440,25 @@ start_gateway() {
 
     local pid=$!
     echo "$pid" > "$PID_FILE"
-    echo -e "${GREEN}Gateway auto-runner started (PID: $pid)${NC}"
+    echo -e "${GREEN}Gateway running (PID: $pid)${NC}"
     echo -e "Logs: ${YELLOW}$LOG_FILE${NC}"
+}
+
+# ==============================================================
+# Gateway: Start
+# ==============================================================
+start_gateway() {
+    acquire_lock
+
+    if is_running; then
+        echo -e "${YELLOW}Gateway is already running (PID: $(cat "$PID_FILE"))${NC}"
+        return 0
+    fi
+
+    # Kill any orphan gateway processes (e.g. user ran "openclaw gateway run" directly)
+    kill_orphan_gateways
+
+    _launch_gateway_loop
 }
 
 # ==============================================================
@@ -519,6 +534,45 @@ status_gateway() {
 }
 
 # ==============================================================
+# Gateway: Restart (single operation — stop + wait + start)
+# ==============================================================
+restart_gateway() {
+    acquire_lock
+
+    if is_running; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        echo -e "${RED}Stopping gateway (PID: $pid) for restart...${NC}"
+
+        kill "$pid" 2>/dev/null
+
+        # Wait up to 10s for graceful shutdown
+        for i in $(seq 1 10); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+
+        # Force kill if still alive
+        if kill -0 "$pid" 2>/dev/null; then
+            log_warn "Graceful shutdown failed, force killing..."
+            kill -9 "$pid" 2>/dev/null
+            pkill -9 -P "$pid" 2>/dev/null || true
+        fi
+
+        rm -f "$PID_FILE"
+    fi
+
+    # Kill any orphan gateway processes
+    kill_orphan_gateways
+
+    # Small delay to let ports release
+    sleep 1
+
+    # Start fresh
+    _launch_gateway_loop
+}
+
+# ==============================================================
 # Gateway: Logs
 # ==============================================================
 show_logs() {
@@ -589,7 +643,7 @@ case "${1:-setup}" in
     setup)   run_setup ;;
     start)   start_gateway ;;
     stop)    stop_gateway ;;
-    restart) stop_gateway; sleep 2; start_gateway ;;
+    restart) restart_gateway ;;
     status)  status_gateway ;;
     logs)    show_logs ;;
     *)       echo "Usage: $0 {setup|start|stop|restart|status|logs}"; exit 1 ;;
