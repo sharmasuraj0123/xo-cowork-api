@@ -432,9 +432,10 @@ async def ask_question_streaming(data: AskQuestionRequest):
                     session_store[data.project_name] = session_id
                     print(f"📝 Stored session {session_id} for project {data.project_name}")
 
-                # Save to chat storage
+                # Save full chat only after successful stream completion.
+                # This avoids persisting partial responses when streaming errors out.
                 final_response = "".join(full_response_parts)
-                if final_response:
+                if stream_success and final_response:
                     await save_chat_messages(
                         project_id=data.project_name,
                         user_id=data.user_id,
@@ -443,6 +444,8 @@ async def ask_question_streaming(data: AskQuestionRequest):
                         message_type=data.message_type
                     )
                     print(f"✅ Saved response ({len(final_response)} chars)")
+                elif final_response and not stream_success:
+                    print("⚠️ Skipped chat save due to incomplete streaming response")
 
         return StreamingResponse(
             generate_stream(),
