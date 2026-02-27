@@ -40,7 +40,8 @@ from routers.auth import (
 CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders")
 
 # Claude Code CLI path (defaults to 'claude' assuming it's in PATH)
-CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
+# CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
+CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "/home/coder/.local/bin/claude")
 # Codex CLI path (defaults to 'codex' assuming it's in PATH)
 CODEX_CLI_PATH = os.getenv("CODEX_CLI_PATH", "codex")
 
