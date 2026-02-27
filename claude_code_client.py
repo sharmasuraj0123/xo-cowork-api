@@ -4,6 +4,7 @@ Centralized Claude Code client with Claude-native skills support.
 
 import asyncio
 import json
+import os
 from typing import Optional, Dict, Any, AsyncGenerator
 
 
@@ -14,9 +15,15 @@ class ClaudeCodeClient:
         self,
         cli_path: str = "claude",
         timeout_seconds: int = 300,
+        permission_mode: Optional[str] = None,
+        working_directory: Optional[str] = None,
+        allowed_directories: Optional[list] = None,
     ):
         self.cli_path = cli_path
         self.timeout_seconds = timeout_seconds
+        self.permission_mode = permission_mode or os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions")
+        self.working_directory = working_directory or os.getenv("AI_WORKSPACE_ROOT", "/home/coder")
+        self.allowed_directories = allowed_directories or [self.working_directory]
 
     @staticmethod
     def _skill_name(agent_type: Optional[str]) -> Optional[str]:
@@ -40,6 +47,23 @@ class ClaudeCodeClient:
             return question
         return f"/{skill_name} {question}"
 
+    def _base_cmd(self, session_id: Optional[str], is_new_session: bool) -> list:
+        cmd = [self.cli_path]
+
+        if is_new_session:
+            cmd.extend(["--session-id", session_id])
+        else:
+            cmd.extend(["--resume", session_id])
+
+        if self.permission_mode:
+            cmd.extend(["--permission-mode", self.permission_mode])
+
+        for directory in self.allowed_directories:
+            if directory:
+                cmd.extend(["--add-dir", directory])
+
+        return cmd
+
     async def ask(
         self,
         question: str,
@@ -49,12 +73,7 @@ class ClaudeCodeClient:
     ) -> str:
         """Send a question to Claude Code CLI (non-streaming)."""
         prompt = self._build_prompt(question=question, agent_type=agent_type)
-        cmd = [self.cli_path]
-
-        if is_new_session:
-            cmd.extend(["--session-id", session_id])
-        else:
-            cmd.extend(["--resume", session_id])
+        cmd = self._base_cmd(session_id=session_id, is_new_session=is_new_session)
 
         cmd.append("--print")
         cmd.extend(["--output-format", "json"])
@@ -67,6 +86,7 @@ class ClaudeCodeClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_directory,
             )
 
             stdout, stderr = await asyncio.wait_for(
@@ -110,12 +130,7 @@ class ClaudeCodeClient:
         - {"type": "done"}
         """
         prompt = self._build_prompt(question=question, agent_type=agent_type)
-        cmd = [self.cli_path]
-
-        if is_new_session:
-            cmd.extend(["--session-id", session_id])
-        else:
-            cmd.extend(["--resume", session_id])
+        cmd = self._base_cmd(session_id=session_id, is_new_session=is_new_session)
 
         cmd.append("--print")
         cmd.append("--verbose")
@@ -129,6 +144,7 @@ class ClaudeCodeClient:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=self.working_directory,
             )
             saw_token = False
 

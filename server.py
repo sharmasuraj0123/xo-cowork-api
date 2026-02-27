@@ -55,6 +55,8 @@ CODEX_TIMEOUT = int(os.getenv("CODEX_TIMEOUT", str(CLAUDE_TIMEOUT)))
 
 # Runtime provider switch: claude | codex
 AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().lower()
+CLAUDE_PERMISSION_MODE = os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+AI_WORKSPACE_ROOT = os.getenv("AI_WORKSPACE_ROOT", "/home/coder").strip()
 
 
 # =============================================================================
@@ -181,6 +183,9 @@ else:
     ai_client = ClaudeCodeClient(
         cli_path=CLAUDE_CLI_PATH,
         timeout_seconds=CLAUDE_TIMEOUT,
+        permission_mode=CLAUDE_PERMISSION_MODE,
+        working_directory=AI_WORKSPACE_ROOT,
+        allowed_directories=[AI_WORKSPACE_ROOT],
     )
 
 
@@ -222,6 +227,8 @@ async def lifespan(app: FastAPI):
     print(f"   Chat API auth: {'enabled (dynamic token or CHAT_API_TOKEN)' if (get_auth_token() or CHAT_API_TOKEN) else 'not set'}")
     print(f"   AI Provider: {AI_PROVIDER}")
     print(f"   Claude CLI: {CLAUDE_CLI_PATH} (timeout={CLAUDE_TIMEOUT}s)")
+    print(f"   Claude Permission Mode: {CLAUDE_PERMISSION_MODE}")
+    print(f"   AI Workspace Root: {AI_WORKSPACE_ROOT}")
     print(f"   Codex CLI: {CODEX_CLI_PATH} (timeout={CODEX_TIMEOUT}s)")
     print("   Skills: .claude/skills (Claude-native)")
     print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
