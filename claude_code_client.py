@@ -24,6 +24,10 @@ class ClaudeCodeClient:
         self.permission_mode = permission_mode or os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions")
         self.working_directory = working_directory or os.getenv("AI_WORKSPACE_ROOT", "/home/coder")
         self.allowed_directories = allowed_directories or [self.working_directory]
+        # Maps API-level logical session IDs to provider-native conversation IDs.
+        self._session_map: Dict[str, str] = {}
+        # Enforce OAuth token auth for Claude subprocesses.
+        self._required_oauth_env_key = "CLAUDE_CODE_OAUTH_TOKEN"
 
     @staticmethod
     def _skill_name(agent_type: Optional[str]) -> Optional[str]:
@@ -47,22 +51,76 @@ class ClaudeCodeClient:
             return question
         return f"/{skill_name} {question}"
 
+    def _resolve_session_id(self, session_id: Optional[str]) -> Optional[str]:
+        if not session_id:
+            return None
+        return self._session_map.get(session_id, session_id)
+
+    @staticmethod
+    def _extract_session_id(payload: Any) -> Optional[str]:
+        """Best-effort extraction of provider-native session/conversation id."""
+        keys = {"session_id", "sessionId", "conversation_id", "conversationId"}
+
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            for value in payload.values():
+                discovered = ClaudeCodeClient._extract_session_id(value)
+                if discovered:
+                    return discovered
+            return None
+
+        if isinstance(payload, list):
+            for item in payload:
+                discovered = ClaudeCodeClient._extract_session_id(item)
+                if discovered:
+                    return discovered
+            return None
+
+        return None
+
     def _base_cmd(self, session_id: Optional[str], is_new_session: bool) -> list:
         cmd = [self.cli_path]
 
-        if is_new_session:
-            cmd.extend(["--session-id", session_id])
-        else:
-            cmd.extend(["--resume", session_id])
+        if not is_new_session:
+            resolved_session_id = self._resolve_session_id(session_id)
+            if not resolved_session_id:
+                raise Exception("Claude resume requires a session_id")
+            cmd.extend(["--resume", resolved_session_id])
 
         if self.permission_mode:
-            cmd.extend(["--permission-mode", self.permission_mode])
+            if self.permission_mode == "bypassPermissions":
+                cmd.append("--dangerously-skip-permissions")
+            else:
+                cmd.extend(["--permission-mode", self.permission_mode])
 
         for directory in self.allowed_directories:
             if directory:
                 cmd.extend(["--add-dir", directory])
 
         return cmd
+
+    def _build_subprocess_env(self) -> Dict[str, str]:
+        """
+        Build subprocess env that strictly uses CLAUDE_CODE_OAUTH_TOKEN auth.
+        """
+        oauth_token = (os.getenv(self._required_oauth_env_key, "") or "").strip()
+        if not oauth_token:
+            raise Exception(
+                f"Missing required env var: {self._required_oauth_env_key}. "
+                "Cowork enforces OAuth-token auth for Claude."
+            )
+
+        env = os.environ.copy()
+        env[self._required_oauth_env_key] = oauth_token
+
+        # Prevent fallback to other Anthropic auth modes.
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("ANTHROPIC_OAUTH_API_KEY", None)
+
+        return env
 
     async def ask(
         self,
@@ -82,11 +140,13 @@ class ClaudeCodeClient:
         print(f"🚀 Running: {' '.join(cmd[:6])} ...")
 
         try:
+            subprocess_env = self._build_subprocess_env()
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_directory,
+                env=subprocess_env,
             )
 
             stdout, stderr = await asyncio.wait_for(
@@ -100,12 +160,17 @@ class ClaudeCodeClient:
                 raise Exception(f"Claude Code failed: {error_msg}")
 
             output = stdout.decode().strip()
+            native_session_id: Optional[str] = None
 
             try:
                 result = json.loads(output)
                 response_text = result.get("result", output)
+                native_session_id = self._extract_session_id(result)
             except json.JSONDecodeError:
                 response_text = output
+
+            if is_new_session and session_id and native_session_id:
+                self._session_map[session_id] = native_session_id
 
             print(f"✅ Claude Code responded ({len(response_text)} chars)")
             return response_text
@@ -140,13 +205,16 @@ class ClaudeCodeClient:
         print(f"🚀 Streaming: {' '.join(cmd[:7])} ...")
 
         try:
+            subprocess_env = self._build_subprocess_env()
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_directory,
+                env=subprocess_env,
             )
             saw_token = False
+            native_session_id: Optional[str] = None
 
             while True:
                 try:
@@ -168,6 +236,9 @@ class ClaudeCodeClient:
 
                 try:
                     event = json.loads(line_str)
+                    extracted = self._extract_session_id(event)
+                    if extracted:
+                        native_session_id = extracted
                 except json.JSONDecodeError:
                     event = {"type": "text", "content": line_str}
 
@@ -214,6 +285,9 @@ class ClaudeCodeClient:
                 if error_msg:
                     print(f"❌ Stream stderr: {error_msg}")
                     yield {"type": "error", "error": error_msg}
+
+            if is_new_session and session_id and native_session_id:
+                self._session_map[session_id] = native_session_id
 
             print("✅ Stream completed")
             yield {"type": "done"}
