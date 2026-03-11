@@ -279,13 +279,18 @@ data: {"done": true}
 | `CLAUDE_CLI_PATH` | Path to Claude CLI | `claude` |
 | `CLAUDE_TIMEOUT` | CLI timeout (seconds) | `300` |
 | `CHAT_API_BASE_URL` | External Chat API URL | `https://api-swarm-beta.xo.builders` |
-| `CHAT_API_TOKEN` | Optional static Bearer token fallback | unset |
 | `XO_AUTH_START_PATH` | XO backend start auth path | `/auth/browser/start` |
 | `XO_AUTH_STATUS_PATH` | XO backend status path | `/auth/browser/status` |
 | `XO_AUTH_CONSUME_PATH` | XO backend consume path | `/auth/browser/consume` |
 | `XO_GET_USER_ID_PATH` | XO backend user-id path | `/get-user-id` |
 | `XO_AUTH_SESSION_ID` | Optional fallback for `/xo-auth/consume`; with `XO_POLL_TOKEN` enables one startup auto-consume attempt | unset |
 | `XO_POLL_TOKEN` | Optional fallback for `/xo-auth/consume`; with `XO_AUTH_SESSION_ID` enables one startup auto-consume attempt | unset |
+| `XO_API_KEY` | [Clerk user API key](https://clerk.com/docs/guides/development/machine-auth/api-keys) (long-lived). When set, used for all chat API auth; no consume. When unset, auth uses session + poll and consume. **Requires xo-swarm-api to verify Clerk API keys.** | unset |
+
+### Auth flow
+
+- **If `XO_API_KEY` is set:** All chat API requests use this key as Bearer token. No consume flow; no need for `XO_AUTH_SESSION_ID` or `XO_POLL_TOKEN`.
+- **If `XO_API_KEY` is not set:** Auth uses the consume flow. Set `XO_AUTH_SESSION_ID` and `XO_POLL_TOKEN` (or POST `/xo-auth/consume` with body); at startup the app runs consume once and uses the returned JWT (expires ~1 day).
 
 ## Testing
 

@@ -15,9 +15,10 @@ from pydantic import BaseModel
 # External Chat API base URL (xo-swarm-api or similar)
 CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders")
 
-# Optional static token fallback for xo-swarm-api auth.
-# Browser auth flow can populate token dynamically at runtime.
-CHAT_API_TOKEN = os.getenv("CHAT_API_TOKEN", "").strip() or None
+# Clerk user API key (long-lived). When set, used as Bearer token for all chat API calls;
+# no consume flow. When not set, auth uses XO_AUTH_SESSION_ID + XO_POLL_TOKEN and consume.
+# Requires xo-swarm-api to verify Clerk API keys (Bearer ak_xxx).
+XO_API_KEY = os.getenv("XO_API_KEY", "").strip() or None
 
 # XO backend browser-auth endpoints (new flow)
 XO_AUTH_START_PATH = os.getenv("XO_AUTH_START_PATH", "/auth/browser/start")
@@ -31,7 +32,7 @@ HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 auth_lock = threading.Lock()
 auth_state: Dict[str, Any] = {
-    "access_token": CHAT_API_TOKEN,
+    "access_token": None,
     "refresh_token": None,
     "expires_at": None,
     "user_id": None,
@@ -72,7 +73,12 @@ def clear_auth_token() -> None:
 
 
 def get_auth_token() -> Optional[str]:
-    """Get active access token for outbound calls."""
+    """
+    Get active access token for outbound calls to xo-swarm-api.
+    When XO_API_KEY is set it is used (no consume). Otherwise in-memory token from consume.
+    """
+    if XO_API_KEY:
+        return XO_API_KEY
     with auth_lock:
         return auth_state.get("access_token")
 
@@ -81,12 +87,16 @@ def get_auth_state() -> Dict[str, Any]:
     """Return a safe auth state snapshot (without exposing token value)."""
     with auth_lock:
         token = auth_state.get("access_token")
+    # When XO_API_KEY is set it is used for all requests; otherwise session token from consume.
+    source = "api_key" if XO_API_KEY else ("session" if token else "none")
+    effective_token = XO_API_KEY or token
+    with auth_lock:
         return {
-            "authenticated": bool(token),
+            "authenticated": bool(effective_token),
             "user_id": auth_state.get("user_id"),
             "expires_at": auth_state.get("expires_at"),
             "auth_session_id": auth_state.get("auth_session_id"),
-            "token_source": "dynamic_or_env" if token else "none",
+            "token_source": source,
         }
 
 

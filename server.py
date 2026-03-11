@@ -26,7 +26,7 @@ from codex_code_client import CodexCodeClient
 load_dotenv()
 
 from routers.auth import (
-    CHAT_API_TOKEN,
+    XO_API_KEY,
     consume_auth_flow,
     get_auth_token,
     get_auth_state,
@@ -203,12 +203,11 @@ class AskQuestionRequest(BaseModel):
 class ChatAPIClient:
     """Client for external Chat API endpoints."""
 
-    def __init__(self, base_url: str = CHAT_API_BASE_URL, token: Optional[str] = CHAT_API_TOKEN):
+    def __init__(self, base_url: str = CHAT_API_BASE_URL):
         self.base_url = base_url.rstrip("/")
-        self._fallback_token = token
 
     def _headers(self) -> Dict[str, str]:
-        token = get_auth_token() or self._fallback_token
+        token = get_auth_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def push_message(
@@ -324,7 +323,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
-    print(f"   Chat API auth: {'enabled (dynamic token or CHAT_API_TOKEN)' if (get_auth_token() or CHAT_API_TOKEN) else 'not set'}")
+    _tok = get_auth_token()
+    _src = get_auth_state().get("token_source", "none")
+    print(f"   Chat API auth: {'enabled (' + _src + ')' if _tok else 'not set'}")
     print(f"   Stage: {STAGE}")
     print(f"   AI Provider: {AI_PROVIDER}")
     print(f"   Claude CLI: {CLAUDE_CLI_PATH} (timeout={CLAUDE_TIMEOUT}s)")
@@ -335,8 +336,10 @@ async def lifespan(app: FastAPI):
     print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
     startup_auth_session_id = os.getenv("XO_AUTH_SESSION_ID", "").strip()
     startup_poll_token = os.getenv("XO_POLL_TOKEN", "").strip()
-    if startup_auth_session_id and startup_poll_token:
-        print("   XO startup consume: configured, attempting token consume")
+    if XO_API_KEY:
+        print("   XO auth: using XO_API_KEY (no consume)")
+    elif startup_auth_session_id and startup_poll_token:
+        print("   XO startup consume: attempting token consume")
         try:
             await consume_auth_flow(
                 auth_session_id=startup_auth_session_id,
