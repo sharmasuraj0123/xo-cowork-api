@@ -11,6 +11,7 @@
 #     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
 #
 # Optional env vars:
+#     OPENCLAW_VERSION        - specific version to install (default: latest)
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
 #     OPENCLAW_MAX_RESTARTS   - max consecutive restarts (default: 10)
 #     OPENCLAW_RESTART_DELAY  - seconds between restarts (default: 5)
@@ -54,6 +55,7 @@ load_env "$SCRIPT_DIR/.env"
 load_env "$OPENCLAW_DIR/.env"
 
 # --- Settings ---
+OPENCLAW_VERSION="latest"
 RESTART_DELAY="${OPENCLAW_RESTART_DELAY:-5}"
 MAX_RESTARTS="${OPENCLAW_MAX_RESTARTS:-10}"
 RESTART_WINDOW="${OPENCLAW_RESTART_WINDOW:-300}"
@@ -361,24 +363,29 @@ ensure_gateway_mode() {
 # Setup: Install OpenClaw CLI
 # ==============================================================
 install_cli() {
-    log "Installing OpenClaw CLI (non-interactive)..."
+    local version="$OPENCLAW_VERSION"
+    log "Installing OpenClaw CLI @ ${version}..."
     export PATH="$HOME/.local/bin:$HOME/.openclaw/bin:$PATH"
 
     if command -v openclaw &>/dev/null; then
-        log_success "OpenClaw CLI already installed: $(which openclaw)"
+        local current_ver
+        current_ver=$(openclaw --version 2>/dev/null || echo "unknown")
+        log_success "OpenClaw CLI already installed (${current_ver}): $(which openclaw)"
         return 0
     fi
 
+    if npm install -g "openclaw@${version}"; then
+        log_success "OpenClaw CLI installed (${version})"
+    else
+        log_error "Failed to install OpenClaw CLI @ ${version}"
+        exit 1
+    fi
+
+    # Run onboard/daemon setup non-interactively
     export OPENCLAW_NO_ONBOARD=1
     export OPENCLAW_NO_PROMPT=1
     export OPENCLAW_DISABLE_BONJOUR=1
-
-    if curl -fsSL https://openclaw.ai/install.sh | bash; then
-        log_success "OpenClaw CLI installed"
-    else
-        log_error "Failed to install OpenClaw CLI"
-        exit 1
-    fi
+    openclaw onboard --install-daemon 2>/dev/null || true
 
     # Refresh PATH
     export PATH="$HOME/.local/bin:$HOME/.openclaw/bin:$PATH"
