@@ -381,12 +381,6 @@ install_cli() {
         exit 1
     fi
 
-    # Run onboard/daemon setup non-interactively
-    export OPENCLAW_NO_ONBOARD=1
-    export OPENCLAW_NO_PROMPT=1
-    export OPENCLAW_DISABLE_BONJOUR=1
-    openclaw onboard --install-daemon 2>/dev/null || true
-
     # Refresh PATH
     export PATH="$HOME/.local/bin:$HOME/.openclaw/bin:$PATH"
 
