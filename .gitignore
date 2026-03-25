@@ -50,3 +50,4 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+ARCHITECTURE.md
