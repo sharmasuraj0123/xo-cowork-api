@@ -202,13 +202,24 @@ enable_channels() {
     fi
 
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
+    local whatsapp_enabled="${WHATSAPP_ENABLED:-false}"
     local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
+
+    # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
+    if [ -n "${ENABLED_CHANNELS:-}" ]; then
+        echo "$ENABLED_CHANNELS" | grep -q '"telegram"' && telegram_enabled=true || telegram_enabled=false
+        echo "$ENABLED_CHANNELS" | grep -q '"whatsapp"' && whatsapp_enabled=true || whatsapp_enabled=false
+    fi
+
+    # Ensure WhatsApp credentials directory exists
+    mkdir -p "$OPENCLAW_DIR/credentials/whatsapp/default"
 
     if command -v jq &>/dev/null; then
         # Build config safely with jq
         local config
         config=$(jq -n \
             --argjson tg_enabled "$telegram_enabled" \
+            --argjson wa_enabled "$whatsapp_enabled" \
             --arg ui_origin "$control_ui_origin" \
             '{
                 gateway: {
@@ -225,9 +236,18 @@ enable_channels() {
                         allowFrom: ["*"],
                         groupPolicy: "allowlist",
                         streamMode: "partial"
+                    },
+                    whatsapp: {
+                        enabled: $wa_enabled,
+                        dmPolicy: "open",
+                        selfChatMode: false,
+                        allowFrom: ["*"],
+                        groupPolicy: "allowlist",
+                        debounceMs: 0,
+                        mediaMaxMb: 50
                     }
                 },
-                plugins: { entries: { telegram: { enabled: $tg_enabled } } },
+                plugins: { entries: { telegram: { enabled: $tg_enabled }, whatsapp: { enabled: $wa_enabled } } },
                 agents: { defaults: { maxConcurrent: 4, subagents: { maxConcurrent: 8 } } },
                 messages: { ackReactionScope: "group-mentions" }
             }
@@ -255,9 +275,18 @@ enable_channels() {
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
       "streamMode": "partial"
+    },
+    "whatsapp": {
+      "enabled": false,
+      "dmPolicy": "open",
+      "selfChatMode": false,
+      "allowFrom": ["*"],
+      "groupPolicy": "allowlist",
+      "debounceMs": 0,
+      "mediaMaxMb": 50
     }
   },
-  "plugins": { "entries": { "telegram": { "enabled": true } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -279,9 +308,18 @@ EOJSON
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
       "streamMode": "partial"
+    },
+    "whatsapp": {
+      "enabled": false,
+      "dmPolicy": "open",
+      "selfChatMode": false,
+      "allowFrom": ["*"],
+      "groupPolicy": "allowlist",
+      "debounceMs": 0,
+      "mediaMaxMb": 50
     }
   },
-  "plugins": { "entries": { "telegram": { "enabled": true } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
