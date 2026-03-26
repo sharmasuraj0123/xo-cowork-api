@@ -376,7 +376,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
-
+app.include_router(openclaw_usage_router)
 
 # =============================================================================
 # Endpoints
