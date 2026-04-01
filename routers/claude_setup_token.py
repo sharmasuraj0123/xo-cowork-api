@@ -70,9 +70,14 @@ def _merge_and_extract_token(partial: str, continuation: str) -> Optional[str]:
     return match.group(0) if match and len(match.group(0)) >= _MIN_FULL_TOKEN_LEN else None
 
 
-def _default_env_path() -> str:
+def _project_env_path() -> str:
     """Project root .env (same repo as this router), so persist works regardless of cwd."""
     return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parent.parent / ".env")
+
+
+def _openclaw_env_path() -> str:
+    """~/.openclaw/.env used by the openclaw gateway."""
+    return str(Path.home() / ".openclaw" / ".env")
 
 
 def _read_token_from_cli_credentials() -> Optional[str]:
@@ -106,30 +111,45 @@ def _read_token_from_cli_credentials() -> Optional[str]:
     return None
 
 
-def _persist_token_to_env_file(token: str) -> None:
-    """
-    Add or update CLAUDE_CODE_OAUTH_TOKEN in .env so it persists across restarts.
-    Also safe for token values that contain '=' or '#' by quoting.
-    """
-    env_path = _default_env_path()
+def _upsert_env_key(env_path: str, key: str, value: str) -> None:
+    """Insert or update a single KEY="value" in a .env file. Creates file if missing."""
     if not os.path.isfile(env_path):
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
         with open(env_path, "w") as f:
-            f.write(f'CLAUDE_CODE_OAUTH_TOKEN="{token}"\n')
+            f.write(f'{key}="{value}"\n')
         return
     lines: list[str] = []
-    key = "CLAUDE_CODE_OAUTH_TOKEN"
     found = False
     with open(env_path, "r") as f:
         for raw in f:
             if raw.strip().startswith(f"{key}="):
-                lines.append(f'{key}="{token}"\n')
+                lines.append(f'{key}="{value}"\n')
                 found = True
             else:
                 lines.append(raw)
     if not found:
-        lines.append(f'\n{key}="{token}"\n')
+        lines.append(f'\n{key}="{value}"\n')
     with open(env_path, "w") as f:
         f.writelines(lines)
+
+
+# Keys to persist with the same token value
+_TOKEN_ENV_KEYS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+
+
+def _persist_token_to_env_files(token: str) -> None:
+    """
+    Write CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY to:
+      1. Project .env  (xo-cowork-api/.env)
+      2. OpenClaw .env  (~/.openclaw/.env)
+    """
+    env_paths = [_project_env_path(), _openclaw_env_path()]
+    for env_path in env_paths:
+        for key in _TOKEN_ENV_KEYS:
+            try:
+                _upsert_env_key(env_path, key, token)
+            except OSError as e:
+                print(f"[setup-token] Failed to write {key} to {env_path}: {e}")
 
 
 def _resolve_claude_cli_path() -> str:
@@ -539,24 +559,20 @@ async def claude_setup_token():
                     if value == 0:
                         fallback_token = _read_token_from_cli_credentials()
                         if fallback_token:
-                            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = fallback_token
-                            try:
-                                _persist_token_to_env_file(fallback_token)
-                                print(f"[setup-token] token persisted to .env from CLI credentials (len={len(fallback_token)})")
-                            except OSError as e:
-                                print(f"[setup-token] .env write failed: {e}")
+                            for k in _TOKEN_ENV_KEYS:
+                                os.environ[k] = fallback_token
+                            _persist_token_to_env_files(fallback_token)
+                            print(f"[setup-token] token persisted from CLI credentials (len={len(fallback_token)})")
                     clear_session()
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
                     break
                 # On success, CLI may print the OAuth token (~108 chars); CLI often wraps at 80 chars
                 if kind == "stdout":
                     def persist_token(t: str) -> None:
-                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = t
-                        try:
-                            _persist_token_to_env_file(t)
-                            print(f"[setup-token] token persisted to .env from stdout (len={len(t)})")
-                        except OSError as e:
-                            print(f"[setup-token] .env write failed: {e}")
+                        for k in _TOKEN_ENV_KEYS:
+                            os.environ[k] = t
+                        _persist_token_to_env_files(t)
+                        print(f"[setup-token] token persisted (len={len(t)})")
 
                     if token_buffer is not None:
                         if _is_continuation_line(value):
