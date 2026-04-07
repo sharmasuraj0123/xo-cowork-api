@@ -13,6 +13,10 @@
 #     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
 #     OPENAI_API_KEY          - OpenAI API key for Codex/GPT model
 #
+# Slack (optional — enables Slack channel):
+#     SLACK_BOT_TOKEN         - Slack Bot User OAuth Token (xoxb-...)
+#     SLACK_APP_TOKEN         - Slack App-Level Token (xapp-...)
+#
 # Optional env vars:
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
 #     OPENCLAW_MAX_RESTARTS   - max consecutive restarts (default: 10)
@@ -206,12 +210,19 @@ enable_channels() {
 
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
     local whatsapp_enabled="${WHATSAPP_ENABLED:-false}"
+    local slack_enabled="${SLACK_ENABLED:-false}"
     local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
 
     # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
     if [ -n "${ENABLED_CHANNELS:-}" ]; then
         echo "$ENABLED_CHANNELS" | grep -q '"telegram"' && telegram_enabled=true || telegram_enabled=false
         echo "$ENABLED_CHANNELS" | grep -q '"whatsapp"' && whatsapp_enabled=true || whatsapp_enabled=false
+        echo "$ENABLED_CHANNELS" | grep -q '"slack"' && slack_enabled=true || slack_enabled=false
+    fi
+
+    # Auto-enable Slack if tokens are provided
+    if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
+        slack_enabled=true
     fi
 
     # Ensure WhatsApp credentials directory exists
@@ -230,9 +241,12 @@ enable_channels() {
         config=$(jq -n \
             --argjson tg_enabled "$telegram_enabled" \
             --argjson wa_enabled "$whatsapp_enabled" \
+            --argjson slack_enabled "$slack_enabled" \
             --arg ui_origin "$control_ui_origin" \
             --arg primary_model "$primary_model" \
             --arg has_openai "$([ -n "${OPENAI_API_KEY:-}" ] && echo true || echo false)" \
+            --arg slack_bot_token "${SLACK_BOT_TOKEN:-}" \
+            --arg slack_app_token "${SLACK_APP_TOKEN:-}" \
             '{
                 gateway: {
                     mode: "local",
@@ -274,6 +288,18 @@ enable_channels() {
               else . end
             | if $has_openai == "true" then
                 .plugins.entries.openai = { config: { personality: "off" } }
+              else . end
+            | if $slack_enabled == true then
+                .channels.slack = {
+                    enabled: true,
+                    mode: "socket",
+                    appToken: $slack_app_token,
+                    botToken: $slack_bot_token,
+                    dmPolicy: "open",
+                    allowFrom: ["*"],
+                    groupPolicy: "allowlist"
+                }
+                | .plugins.entries.slack = { enabled: true }
               else . end')
         echo "$config" > "$CONFIG_FILE"
     else
@@ -282,6 +308,21 @@ enable_channels() {
         local openai_plugin=""
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             openai_plugin=", \"openai\": { \"config\": { \"personality\": \"off\" } }"
+        fi
+        local slack_plugin=""
+        local slack_channel=""
+        if [ "$slack_enabled" = "true" ] && [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
+            slack_plugin=", \"slack\": { \"enabled\": true }"
+            slack_channel=",
+    \"slack\": {
+      \"enabled\": true,
+      \"mode\": \"socket\",
+      \"appToken\": \"${SLACK_APP_TOKEN}\",
+      \"botToken\": \"${SLACK_BOT_TOKEN}\",
+      \"dmPolicy\": \"open\",
+      \"allowFrom\": [\"*\"],
+      \"groupPolicy\": \"allowlist\"
+    }"
         fi
 
         if [ -n "$control_ui_origin" ]; then
@@ -311,9 +352,9 @@ enable_channels() {
       "groupPolicy": "allowlist",
       "debounceMs": 0,
       "mediaMaxMb": 50
-    }
+    }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -344,9 +385,9 @@ EOJSON
       "groupPolicy": "allowlist",
       "debounceMs": 0,
       "mediaMaxMb": 50
-    }
+    }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -358,7 +399,7 @@ EOJSON
         fi
     fi
 
-    log_success "Channels configured (telegram: ${telegram_enabled})"
+    log_success "Channels configured (telegram: ${telegram_enabled}, whatsapp: ${whatsapp_enabled}, slack: ${slack_enabled})"
 }
 
 # ==============================================================
