@@ -8,7 +8,10 @@
 # Required env vars (set in .env):
 #     TELEGRAM_BOT_TOKEN      - Telegram bot token from BotFather
 #     OPENCLAW_GATEWAY_TOKEN  - Gateway auth token
+#
+# Model provider (at least one required):
 #     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
+#     OPENAI_API_KEY          - OpenAI API key for Codex/GPT model
 #
 # Optional env vars:
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
@@ -158,8 +161,8 @@ validate_env() {
         log_error "TELEGRAM_BOT_TOKEN is not set (required when TELEGRAM_ENABLED=true)"
         missing=1
     fi
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        log_error "ANTHROPIC_API_KEY is not set"
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        log_error "No model provider key set. Set ANTHROPIC_API_KEY or OPENAI_API_KEY (or both)."
         missing=1
     fi
     if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
@@ -214,6 +217,13 @@ enable_channels() {
     # Ensure WhatsApp credentials directory exists
     mkdir -p "$OPENCLAW_DIR/credentials/whatsapp/default"
 
+    # Determine primary model based on available API keys
+    local primary_model="anthropic/claude-opus-4-6"
+    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        primary_model="openai/gpt-5.4"
+    fi
+    log "Primary model provider: $primary_model"
+
     if command -v jq &>/dev/null; then
         # Build config safely with jq
         local config
@@ -221,6 +231,8 @@ enable_channels() {
             --argjson tg_enabled "$telegram_enabled" \
             --argjson wa_enabled "$whatsapp_enabled" \
             --arg ui_origin "$control_ui_origin" \
+            --arg primary_model "$primary_model" \
+            --arg has_openai "$([ -n "${OPENAI_API_KEY:-}" ] && echo true || echo false)" \
             '{
                 gateway: {
                     mode: "local",
@@ -248,15 +260,30 @@ enable_channels() {
                     }
                 },
                 plugins: { entries: { telegram: { enabled: $tg_enabled }, whatsapp: { enabled: $wa_enabled } } },
-                agents: { defaults: { maxConcurrent: 4, subagents: { maxConcurrent: 8 } } },
+                agents: {
+                    defaults: {
+                        maxConcurrent: 4,
+                        subagents: { maxConcurrent: 8 },
+                        model: { primary: $primary_model }
+                    }
+                },
                 messages: { ackReactionScope: "group-mentions" }
             }
             | if $ui_origin != "" then
                 .gateway.controlUi.allowedOrigins = [$ui_origin]
+              else . end
+            | if $has_openai == "true" then
+                .plugins.entries.openai = { config: { personality: "off" } }
               else . end')
         echo "$config" > "$CONFIG_FILE"
     else
         # Fallback: heredoc (no string concatenation)
+        local model_line="\"primary\": \"${primary_model}\""
+        local openai_plugin=""
+        if [ -n "${OPENAI_API_KEY:-}" ]; then
+            openai_plugin=", \"openai\": { \"config\": { \"personality\": \"off\" } }"
+        fi
+
         if [ -n "$control_ui_origin" ]; then
             cat > "$CONFIG_FILE" <<EOJSON
 {
@@ -286,13 +313,13 @@ enable_channels() {
       "mediaMaxMb": 50
     }
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
-  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${openai_plugin} } },
+  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
 EOJSON
         else
-            cat > "$CONFIG_FILE" <<'EOJSON'
+            cat > "$CONFIG_FILE" <<EOJSON
 {
   "gateway": {
     "mode": "local",
@@ -319,8 +346,8 @@ EOJSON
       "mediaMaxMb": 50
     }
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
-  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${openai_plugin} } },
+  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
 EOJSON
