@@ -228,21 +228,14 @@ enable_channels() {
     # Ensure WhatsApp credentials directory exists
     mkdir -p "$OPENCLAW_DIR/credentials/whatsapp/default"
 
-    # Determine primary model: explicit MODEL_PROVIDER wins, else auto-detect from keys
+    # Determine primary model by which API keys are present:
+    #   only OpenAI     → openai
+    #   only Anthropic  → anthropic
+    #   both / neither  → anthropic (default)
     local primary_model="anthropic/claude-opus-4-6"
-    case "${MODEL_PROVIDER:-}" in
-        openai)
-            primary_model="openai/gpt-5.4"
-            ;;
-        anthropic)
-            primary_model="anthropic/claude-opus-4-6"
-            ;;
-        *)
-            if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-                primary_model="openai/gpt-5.4"
-            fi
-            ;;
-    esac
+    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        primary_model="openai/gpt-5.4"
+    fi
     log "Primary model provider: $primary_model"
 
     if command -v jq &>/dev/null; then
@@ -410,6 +403,39 @@ EOJSON
     fi
 
     log_success "Channels configured (telegram: ${telegram_enabled}, whatsapp: ${whatsapp_enabled}, slack: ${slack_enabled})"
+}
+
+# ==============================================================
+# Setup: Ensure primary model matches MODEL_PROVIDER (idempotent)
+# ==============================================================
+ensure_primary_model() {
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    # Key-based rule:
+    #   only OpenAI     → openai
+    #   only Anthropic  → anthropic
+    #   both / neither  → anthropic (default)
+    local desired_model="anthropic/claude-opus-4-6"
+    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        desired_model="openai/gpt-5.4"
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        log_warn "jq not available — cannot patch primary model"
+        return 0
+    fi
+
+    local current
+    current=$(jq -r '.agents.defaults.model.primary // ""' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$current" = "$desired_model" ]; then
+        log "Primary model already set to $desired_model"
+        return 0
+    fi
+
+    local tmp
+    tmp=$(jq --arg m "$desired_model" '.agents.defaults.model.primary = $m' "$CONFIG_FILE")
+    echo "$tmp" > "$CONFIG_FILE"
+    log_success "Primary model updated: $current → $desired_model"
 }
 
 # ==============================================================
@@ -753,6 +779,7 @@ run_setup() {
         log_warn "openclaw doctor not available or config needs manual review"
     fi
     ensure_gateway_mode
+    ensure_primary_model
     install_gateway_guard
     start_gateway
 }
