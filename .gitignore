@@ -3,6 +3,8 @@
 .env.local
 .env.*.local
 
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -50,3 +52,7 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Runtime data (usage sync watermark, etc.)
+data/
+docs/

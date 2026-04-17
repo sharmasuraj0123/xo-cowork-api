@@ -8,7 +8,14 @@
 # Required env vars (set in .env):
 #     TELEGRAM_BOT_TOKEN      - Telegram bot token from BotFather
 #     OPENCLAW_GATEWAY_TOKEN  - Gateway auth token
+#
+# Model provider (at least one required):
 #     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
+#     OPENAI_API_KEY          - OpenAI API key for Codex/GPT model
+#
+# Slack (optional — enables Slack channel):
+#     SLACK_BOT_TOKEN         - Slack Bot User OAuth Token (xoxb-...)
+#     SLACK_APP_TOKEN         - Slack App-Level Token (xapp-...)
 #
 # Optional env vars:
 #     TELEGRAM_ENABLED        - enable/disable Telegram channel (default: true)
@@ -158,8 +165,8 @@ validate_env() {
         log_error "TELEGRAM_BOT_TOKEN is not set (required when TELEGRAM_ENABLED=true)"
         missing=1
     fi
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        log_error "ANTHROPIC_API_KEY is not set"
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        log_error "No model provider key set. Set ANTHROPIC_API_KEY or OPENAI_API_KEY (or both)."
         missing=1
     fi
     if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
@@ -203,16 +210,33 @@ enable_channels() {
 
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
     local whatsapp_enabled="${WHATSAPP_ENABLED:-false}"
+    local slack_enabled="${SLACK_ENABLED:-false}"
     local control_ui_origin="${OPENCLAW_CONTROL_UI_ORIGIN:-}"
 
     # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
     if [ -n "${ENABLED_CHANNELS:-}" ]; then
         echo "$ENABLED_CHANNELS" | grep -q '"telegram"' && telegram_enabled=true || telegram_enabled=false
         echo "$ENABLED_CHANNELS" | grep -q '"whatsapp"' && whatsapp_enabled=true || whatsapp_enabled=false
+        echo "$ENABLED_CHANNELS" | grep -q '"slack"' && slack_enabled=true || slack_enabled=false
+    fi
+
+    # Auto-enable Slack if tokens are provided
+    if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
+        slack_enabled=true
     fi
 
     # Ensure WhatsApp credentials directory exists
     mkdir -p "$OPENCLAW_DIR/credentials/whatsapp/default"
+
+    # Determine primary model by which API keys are present:
+    #   only OpenAI     → openai
+    #   only Anthropic  → anthropic
+    #   both / neither  → anthropic (default)
+    local primary_model="anthropic/claude-opus-4-6"
+    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        primary_model="openai/gpt-5.4"
+    fi
+    log "Primary model provider: $primary_model"
 
     if command -v jq &>/dev/null; then
         # Build config safely with jq
@@ -220,7 +244,12 @@ enable_channels() {
         config=$(jq -n \
             --argjson tg_enabled "$telegram_enabled" \
             --argjson wa_enabled "$whatsapp_enabled" \
+            --argjson slack_enabled "$slack_enabled" \
             --arg ui_origin "$control_ui_origin" \
+            --arg primary_model "$primary_model" \
+            --arg has_openai "$([ -n "${OPENAI_API_KEY:-}" ] && echo true || echo false)" \
+            --arg slack_bot_token "${SLACK_BOT_TOKEN:-}" \
+            --arg slack_app_token "${SLACK_APP_TOKEN:-}" \
             '{
                 gateway: {
                     mode: "local",
@@ -248,15 +277,57 @@ enable_channels() {
                     }
                 },
                 plugins: { entries: { telegram: { enabled: $tg_enabled }, whatsapp: { enabled: $wa_enabled } } },
-                agents: { defaults: { maxConcurrent: 4, subagents: { maxConcurrent: 8 } } },
+                agents: {
+                    defaults: {
+                        maxConcurrent: 4,
+                        subagents: { maxConcurrent: 8 },
+                        model: { primary: $primary_model }
+                    }
+                },
                 messages: { ackReactionScope: "group-mentions" }
             }
             | if $ui_origin != "" then
                 .gateway.controlUi.allowedOrigins = [$ui_origin]
+              else . end
+            | if $has_openai == "true" then
+                .plugins.entries.openai = { config: { personality: "off" } }
+              else . end
+            | if $slack_enabled == true then
+                .channels.slack = {
+                    enabled: true,
+                    mode: "socket",
+                    appToken: $slack_app_token,
+                    botToken: $slack_bot_token,
+                    dmPolicy: "open",
+                    allowFrom: ["*"],
+                    groupPolicy: "allowlist"
+                }
+                | .plugins.entries.slack = { enabled: true }
               else . end')
         echo "$config" > "$CONFIG_FILE"
     else
         # Fallback: heredoc (no string concatenation)
+        local model_line="\"primary\": \"${primary_model}\""
+        local openai_plugin=""
+        if [ -n "${OPENAI_API_KEY:-}" ]; then
+            openai_plugin=", \"openai\": { \"config\": { \"personality\": \"off\" } }"
+        fi
+        local slack_plugin=""
+        local slack_channel=""
+        if [ "$slack_enabled" = "true" ] && [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
+            slack_plugin=", \"slack\": { \"enabled\": true }"
+            slack_channel=",
+    \"slack\": {
+      \"enabled\": true,
+      \"mode\": \"socket\",
+      \"appToken\": \"${SLACK_APP_TOKEN}\",
+      \"botToken\": \"${SLACK_BOT_TOKEN}\",
+      \"dmPolicy\": \"open\",
+      \"allowFrom\": [\"*\"],
+      \"groupPolicy\": \"allowlist\"
+    }"
+        fi
+
         if [ -n "$control_ui_origin" ]; then
             cat > "$CONFIG_FILE" <<EOJSON
 {
@@ -284,15 +355,15 @@ enable_channels() {
       "groupPolicy": "allowlist",
       "debounceMs": 0,
       "mediaMaxMb": 50
-    }
+    }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
-  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
 EOJSON
         else
-            cat > "$CONFIG_FILE" <<'EOJSON'
+            cat > "$CONFIG_FILE" <<EOJSON
 {
   "gateway": {
     "mode": "local",
@@ -317,10 +388,10 @@ EOJSON
       "groupPolicy": "allowlist",
       "debounceMs": 0,
       "mediaMaxMb": 50
-    }
+    }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false } } },
-  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 } } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
 EOJSON
@@ -331,7 +402,40 @@ EOJSON
         fi
     fi
 
-    log_success "Channels configured (telegram: ${telegram_enabled})"
+    log_success "Channels configured (telegram: ${telegram_enabled}, whatsapp: ${whatsapp_enabled}, slack: ${slack_enabled})"
+}
+
+# ==============================================================
+# Setup: Ensure primary model matches MODEL_PROVIDER (idempotent)
+# ==============================================================
+ensure_primary_model() {
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    # Key-based rule:
+    #   only OpenAI     → openai
+    #   only Anthropic  → anthropic
+    #   both / neither  → anthropic (default)
+    local desired_model="anthropic/claude-opus-4-6"
+    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        desired_model="openai/gpt-5.4"
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        log_warn "jq not available — cannot patch primary model"
+        return 0
+    fi
+
+    local current
+    current=$(jq -r '.agents.defaults.model.primary // ""' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$current" = "$desired_model" ]; then
+        log "Primary model already set to $desired_model"
+        return 0
+    fi
+
+    local tmp
+    tmp=$(jq --arg m "$desired_model" '.agents.defaults.model.primary = $m' "$CONFIG_FILE")
+    echo "$tmp" > "$CONFIG_FILE"
+    log_success "Primary model updated: $current → $desired_model"
 }
 
 # ==============================================================
@@ -675,6 +779,7 @@ run_setup() {
         log_warn "openclaw doctor not available or config needs manual review"
     fi
     ensure_gateway_mode
+    ensure_primary_model
     install_gateway_guard
     start_gateway
 }

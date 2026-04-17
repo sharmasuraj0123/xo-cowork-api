@@ -3,6 +3,7 @@ XO Cowork API Server
 FastAPI server that interfaces with local Claude Code CLI.
 """
 
+import asyncio
 import os
 import json
 import datetime
@@ -33,7 +34,13 @@ from routers.auth import (
     router as auth_router,
 )
 from routers.claude_setup_token import router as claude_setup_token_router
+from routers.codex_setup import router as codex_setup_router
 from routers.openclaw_usage import router as openclaw_usage_router
+try:
+    from services.usage_sync import start_usage_sync_scheduler
+except Exception as _usage_import_err:
+    start_usage_sync_scheduler = None
+    print(f"⚠️ Usage sync module failed to load (non-fatal): {_usage_import_err}")
 
 
 # =============================================================================
@@ -356,7 +363,25 @@ async def lifespan(app: FastAPI):
         print(
             "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
         )
+
+    # Start daily usage sync background task
+    _sync_task = None
+    if start_usage_sync_scheduler:
+        try:
+            _sync_task = asyncio.create_task(start_usage_sync_scheduler())
+            print("   Usage sync: background task started")
+        except Exception as e:
+            print(f"⚠️ Usage sync failed to start (non-fatal): {e}")
+
     yield
+
+    # Cleanup background task
+    if _sync_task:
+        _sync_task.cancel()
+        try:
+            await _sync_task
+        except asyncio.CancelledError:
+            pass
     print("👋 Shutting down XO Cowork API Server...")
 
 
@@ -376,6 +401,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
+app.include_router(codex_setup_router)
 app.include_router(openclaw_usage_router)
 
 # =============================================================================
