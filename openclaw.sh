@@ -654,6 +654,23 @@ stop_gateway() {
     # Also kill any orphan gateway processes
     kill_orphan_gateways
 
+    # Explicitly kill the openclaw-gateway binary in case it was orphaned
+    pkill -x "openclaw-gateway" 2>/dev/null || true
+    sleep 1
+    if pgrep -x "openclaw-gateway" >/dev/null 2>&1; then
+        log_warn "openclaw-gateway binary still alive, force killing..."
+        pkill -9 -x "openclaw-gateway" 2>/dev/null || true
+    fi
+
+    # Wait up to 5s for port 18789 to be released
+    for i in $(seq 1 5); do
+        if ! ss -tlnp 2>/dev/null | grep -q ':18789 ' && \
+           ! netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
+            break
+        fi
+        sleep 1
+    done
+
     echo -e "${GREEN}Stopped.${NC}"
 }
 
@@ -712,8 +729,22 @@ restart_gateway() {
     # Kill any orphan gateway processes
     kill_orphan_gateways
 
-    # Small delay to let ports release
+    # Explicitly kill the openclaw-gateway binary in case it was orphaned
+    pkill -x "openclaw-gateway" 2>/dev/null || true
     sleep 1
+    if pgrep -x "openclaw-gateway" >/dev/null 2>&1; then
+        log_warn "openclaw-gateway binary still alive, force killing..."
+        pkill -9 -x "openclaw-gateway" 2>/dev/null || true
+    fi
+
+    # Wait up to 5s for port 18789 to be released
+    for i in $(seq 1 5); do
+        if ! ss -tlnp 2>/dev/null | grep -q ':18789 ' && \
+           ! netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
+            break
+        fi
+        sleep 1
+    done
 
     # Start fresh
     _launch_gateway_loop
