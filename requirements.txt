@@ -19,3 +19,4 @@ anyio>=4.2.0
 
 # Optional: For production deployment
 gunicorn>=21.2.0
+python-multipart>=0.0.20

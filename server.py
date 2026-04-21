@@ -404,6 +404,11 @@ app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)
 app.include_router(openclaw_usage_router)
 
+# Cowork Agent API (migrated from bridge/) — serves the xo-cowork frontend.
+from routers.cowork_agent import all_routers as cowork_agent_routers
+for _r in cowork_agent_routers:
+    app.include_router(_r)
+
 # =============================================================================
 # Endpoints
 # =============================================================================

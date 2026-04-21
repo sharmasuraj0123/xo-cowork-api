@@ -11,6 +11,7 @@
 - Keep endpoint handlers in `routers/` via `APIRouter`.
 - Keep business logic in focused clients/services (thin route handlers).
 - Preserve request/response contracts unless explicitly asked to change.
+- Routes that serve the xo-cowork frontend live under `routers/cowork_agent/`, with shared helpers under `services/cowork_agent/`.
 
 ## Coding standards
 
