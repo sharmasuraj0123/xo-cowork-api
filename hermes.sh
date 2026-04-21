@@ -137,7 +137,7 @@ find_orphan_gateways() {
     fi
 
     local gw_pids
-    gw_pids=$(pgrep -f "hermes gateway start" 2>/dev/null | sort -u || true)
+    gw_pids=$(( pgrep -f "hermes gateway run" 2>/dev/null; pgrep -f "hermes gateway start" 2>/dev/null ) | sort -u || true)
     [ -z "$gw_pids" ] && return
 
     for gw_pid in $gw_pids; do
@@ -377,6 +377,9 @@ display:
   inline_diffs: true
   dashboard:
     theme: default
+    host: 0.0.0.0
+    allowed_hosts:
+      - "*"
 
 # ── Memory ─────────────────────────────────────────────────────────────────
 memory:
@@ -420,6 +423,9 @@ session_reset:
 
 # ── Channels ───────────────────────────────────────────────────────────────
 telegram:
+  dm_policy: open
+  allow_from:
+    - "*"
   channel_prompts: {}
 
 discord:
@@ -427,9 +433,15 @@ discord:
   free_response_channels: ""
   auto_thread: true
   reactions: true
+  dm_policy: open
+  allow_from:
+    - "*"
   channel_prompts: {}
 
 slack:
+  dm_policy: open
+  allow_from:
+    - "*"
   channel_prompts: {}
 
 # ── Skills ─────────────────────────────────────────────────────────────────
@@ -586,11 +598,11 @@ install_gateway_guard() {
 
     log "Installing gateway guard..."
     sudo tee "$guard_file" > /dev/null <<GUARDEOF
-# Intercept "hermes gateway start" to prevent unmanaged gateway processes.
+# Intercept "hermes gateway start/run" to prevent unmanaged gateway processes.
 # All gateway lifecycle should go through hermes.sh (start/stop/restart).
 hermes() {
-    if [ "\$1" = "gateway" ] && [ "\${2:-}" = "start" ]; then
-        echo "⚠  Do not run 'hermes gateway start' directly."
+    if [ "\$1" = "gateway" ] && { [ "\${2:-}" = "start" ] || [ "\${2:-}" = "run" ] || [ "\${2:-}" = "restart" ]; }; then
+        echo "⚠  Do not run 'hermes gateway $2' directly (no systemd in this container)."
         echo "   Use the managed gateway instead:"
         echo ""
         echo "     ${setup_dir}/hermes.sh start    # start gateway + dashboard"
@@ -685,7 +697,9 @@ _launch_gateway_loop() {
             echo "[$(date "+%Y-%m-%d %H:%M:%S")] Starting gateway (attempt $((restart_count + 1)))..."
 
             cd "$hermes_dir"
-            "$hermes_bin" gateway start --api 2>&1 &
+            # Use "gateway run" (foreground) instead of "gateway start" (systemd).
+            # No systemd/loginctl in this container — hermes.sh manages the lifecycle.
+            "$hermes_bin" gateway run 2>&1 &
             gateway_pid=$!
             wait "$gateway_pid"
             exit_code=$?
@@ -731,7 +745,7 @@ _launch_dashboard() {
         hermes_bin="'"$hermes_bin"'"
         hermes_dir="'"$HERMES_DIR"'"
         cd "$hermes_dir"
-        "$hermes_bin" dashboard --port '"$HERMES_DASH_PORT"' 2>&1
+        "$hermes_bin" dashboard --host 0.0.0.0 --port '"$HERMES_DASH_PORT"' 2>&1
     ' >> "$DASH_LOG_FILE" 2>&1 &
 
     local pid=$!
