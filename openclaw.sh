@@ -248,6 +248,7 @@ enable_channels() {
             --arg ui_origin "$control_ui_origin" \
             --arg primary_model "$primary_model" \
             --arg has_openai "$([ -n "${OPENAI_API_KEY:-}" ] && echo true || echo false)" \
+            --arg has_anthropic "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" \
             --arg slack_bot_token "${SLACK_BOT_TOKEN:-}" \
             --arg slack_app_token "${SLACK_APP_TOKEN:-}" \
             '{
@@ -264,7 +265,7 @@ enable_channels() {
                         dmPolicy: "open",
                         allowFrom: ["*"],
                         groupPolicy: "allowlist",
-                        streamMode: "partial"
+                        streaming: { mode: "partial" }
                     },
                     whatsapp: {
                         enabled: $wa_enabled,
@@ -289,6 +290,9 @@ enable_channels() {
             | if $ui_origin != "" then
                 .gateway.controlUi.allowedOrigins = [$ui_origin]
               else . end
+            | if $has_anthropic == "true" then
+                .plugins.entries.anthropic = { enabled: true }
+              else . end
             | if $has_openai == "true" then
                 .plugins.entries.openai = { config: { personality: "off" } }
               else . end
@@ -311,6 +315,10 @@ enable_channels() {
         local openai_plugin=""
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             openai_plugin=", \"openai\": { \"config\": { \"personality\": \"off\" } }"
+        fi
+        local anthropic_plugin=""
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            anthropic_plugin=", \"anthropic\": { \"enabled\": true }"
         fi
         local slack_plugin=""
         local slack_channel=""
@@ -345,7 +353,7 @@ enable_channels() {
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
-      "streamMode": "partial"
+      "streaming": { "mode": "partial" }
     },
     "whatsapp": {
       "enabled": false,
@@ -357,7 +365,7 @@ enable_channels() {
       "mediaMaxMb": 50
     }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${anthropic_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -378,7 +386,7 @@ EOJSON
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
-      "streamMode": "partial"
+      "streaming": { "mode": "partial" }
     },
     "whatsapp": {
       "enabled": false,
@@ -390,7 +398,7 @@ EOJSON
       "mediaMaxMb": 50
     }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${anthropic_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -406,7 +414,8 @@ EOJSON
 }
 
 # ==============================================================
-# Setup: Ensure primary model matches MODEL_PROVIDER (idempotent)
+# Setup: Ensure primary model matches key availability (idempotent)
+# Runs after `openclaw doctor --fix` to restore model config if stripped.
 # ==============================================================
 ensure_primary_model() {
     [ -f "$CONFIG_FILE" ] || return 0
