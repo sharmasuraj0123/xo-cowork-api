@@ -414,40 +414,6 @@ EOJSON
 }
 
 # ==============================================================
-# Setup: Ensure primary model matches key availability (idempotent)
-# Runs after `openclaw doctor --fix` to restore model config if stripped.
-# ==============================================================
-ensure_primary_model() {
-    [ -f "$CONFIG_FILE" ] || return 0
-
-    # Key-based rule:
-    #   only OpenAI     → openai
-    #   only Anthropic  → anthropic
-    #   both / neither  → anthropic (default)
-    local desired_model="anthropic/claude-opus-4-6"
-    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        desired_model="openai/gpt-5.4"
-    fi
-
-    if ! command -v jq &>/dev/null; then
-        log_warn "jq not available — cannot patch primary model"
-        return 0
-    fi
-
-    local current
-    current=$(jq -r '.agents.defaults.model.primary // ""' "$CONFIG_FILE" 2>/dev/null)
-    if [ "$current" = "$desired_model" ]; then
-        log "Primary model already set to $desired_model"
-        return 0
-    fi
-
-    local tmp
-    tmp=$(jq --arg m "$desired_model" '.agents.defaults.model.primary = $m' "$CONFIG_FILE")
-    echo "$tmp" > "$CONFIG_FILE"
-    log_success "Primary model updated: $current → $desired_model"
-}
-
-# ==============================================================
 # Setup: Ensure gateway.mode is set
 # ==============================================================
 ensure_gateway_mode() {
@@ -813,13 +779,14 @@ run_setup() {
     enable_channels
     install_cli
     log "Running config doctor..."
-    if openclaw doctor --fix --yes 2>/dev/null; then
+    if openclaw doctor --repair --non-interactive 2>&1 \
+       || openclaw doctor --repair 2>&1 \
+       || openclaw doctor --non-interactive 2>&1; then
         log_success "Config validated"
     else
-        log_warn "openclaw doctor not available or config needs manual review"
+        log_warn "openclaw doctor failed — config may need manual review"
     fi
     ensure_gateway_mode
-    # ensure_primary_model  # disabled — was clobbering doctor's state and breaking first-time telegram
     install_gateway_guard
     start_gateway
 }
