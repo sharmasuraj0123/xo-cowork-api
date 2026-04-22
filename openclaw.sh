@@ -810,31 +810,27 @@ run_setup() {
     install_env
     enable_channels
     install_cli
-    # Only run doctor if Slack is enabled OR @slack/web-api is already available.
-    # OpenClaw doctor eagerly loads the slack extension module, which crashes
-    # with "Cannot find module '@slack/web-api'" (OpenClaw 2026.4.21 packaging bug).
-    # gateway runtime only loads enabled channels, so it's unaffected.
-    local slack_active="${SLACK_ENABLED:-false}"
-    if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
-        slack_active=true
-    fi
-    if [ "$slack_active" = "true" ]; then
-        log "Slack enabled — installing @slack/web-api before running doctor..."
-        install_openclaw_peer_deps
-        log "Running config doctor..."
-        if openclaw doctor --repair --non-interactive 2>&1 \
-           || openclaw doctor --repair 2>&1 \
-           || openclaw doctor --non-interactive 2>&1; then
-            log_success "Config validated"
-        else
-            log_warn "openclaw doctor failed — config may need manual review"
-        fi
+    # Install missing @slack/web-api so doctor can run (OpenClaw 2026.4.21
+    # packaging bug — doctor eagerly loads slack extension even when disabled).
+    install_openclaw_peer_deps
+    log "Running config doctor..."
+    if openclaw doctor --repair --non-interactive 2>&1 \
+       || openclaw doctor --repair 2>&1 \
+       || openclaw doctor --non-interactive 2>&1; then
+        log_success "Config validated"
     else
-        log "Slack not enabled — skipping doctor (avoids @slack/web-api load bug)"
+        log_warn "openclaw doctor failed — config may need manual review"
     fi
     ensure_gateway_mode
     install_gateway_guard
     start_gateway
+
+    # Restart gateway once setup completes so it picks up any config changes
+    # made by `openclaw doctor --repair` (schema migrations, plugin registrations,
+    # credential init). Gives first-time setup a reliable clean state.
+    log "Finalizing: restarting gateway to apply doctor's config changes..."
+    sleep 2
+    restart_gateway
 }
 
 # ==============================================================
