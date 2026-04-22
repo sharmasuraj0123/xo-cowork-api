@@ -5,68 +5,49 @@ Groups `/api/config/*` (api-key, providers, openclaw, openyak-account,
 ollama, local, openai-subscription) and the per-agent model listing
 (`/api/models`). Responses here shape what the UI sees in provider menus
 and the settings screen.
+
+Provider onboarding recipes now come from the active agent's manifest
+(`config/agents/<agent>.json` → `providers.*`) instead of an inline dict,
+so adding a provider (or swapping agents) is a config change.
 """
 
 import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from services.cowork_agent.settings import AGENTS_DIR, OPENCLAW_MODEL_CAPABILITIES
+from services.cowork_agent.agent_registry import get_default_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
 from services.cowork_agent.openclaw_env import upsert_env_entry
 from services.cowork_agent.openclaw_store import list_agent_entries, load_openclaw_config
 
 router = APIRouter()
 
-
-# ── Provider onboarding ──────────────────────────────────────────────────────
-
-# Per-provider recipe used by `POST /api/config/providers/{id}/key`:
-#   env_key      — the variable name the provider's SDK reads
-#   commands     — shell commands run sequentially after the key is written.
-#                  Executed via /bin/sh in `openclaw_cwd`. No user input is
-#                  ever interpolated into these strings — every value is a
-#                  fixed model/alias identifier — so there is no command-
-#                  injection surface even with `shell=True`.
-PROVIDER_PROVISIONING: dict[str, dict] = {
-    "anthropic": {
-        "env_key": "ANTHROPIC_API_KEY",
-        "commands": [
-            'openclaw models set anthropic/claude-opus-4.6',
-        ],
-    },
-    "openai": {
-        "env_key": "OPENAI_API_KEY",
-        "commands": [
-            'openclaw models set openai/gpt-5.4',
-        ],
-    },
-}
-
-_OPENCLAW_CWD = Path("/home/coder")
-_PROVISIONING_LOG = Path.home() / ".openclaw" / "bridge-provisioning.log"
+_AGENT = get_default_agent()
 
 
-async def _run_provider_provisioning(provider_id: str, commands: list[str]) -> None:
-    """Run the openclaw CLI chain for a provider, appending output to a log file.
+async def _run_provider_provisioning(provider_id: str, argvs: list[list[str]]) -> None:
+    """Run the agent's CLI chain for a provider, appending output to the log.
 
-    Chain aborts on the first non-zero exit — a broken `models set` would
-    leave subsequent `config set` aliases pointing at nothing.
+    Argvs are pre-rendered from the manifest's command templates — no
+    user input is interpolated, so `create_subprocess_exec` is safe.
+    Chain aborts on the first non-zero exit so a broken `models set`
+    doesn't leave later aliases pointing at nothing.
     """
-    _PROVISIONING_LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_path = _AGENT.provisioning_log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).isoformat()
-    with _PROVISIONING_LOG.open("a") as log:
+    with log_path.open("a") as log:
         log.write(f"\n=== {ts} provisioning: {provider_id} ===\n")
-        for cmd in commands:
-            log.write(f"$ {cmd}\n")
+        for argv in argvs:
+            log.write(f"$ {' '.join(argv)}\n")
             log.flush()
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    cwd=str(_OPENCLAW_CWD),
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=str(_AGENT.cwd),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
@@ -84,13 +65,13 @@ async def _run_provider_provisioning(provider_id: str, commands: list[str]) -> N
 
 @router.post("/api/config/providers/{provider_id}/key")
 async def save_provider_key(provider_id: str, request: Request):
-    """Persist a provider API key and kick off the openclaw CLI chain.
+    """Persist a provider API key and kick off the agent's CLI chain.
 
-    Returns 200 as soon as the key is safely written to `~/.openclaw/.env`.
-    The CLI chain runs in the background; its output is appended to
-    `~/.openclaw/bridge-provisioning.log` for later inspection.
+    Returns 200 as soon as the key is safely written to the agent's env
+    file. The CLI chain runs in the background; its output is appended to
+    the agent's provisioning log for later inspection.
     """
-    recipe = PROVIDER_PROVISIONING.get(provider_id)
+    recipe = _AGENT.providers.get(provider_id)
     if recipe is None:
         return JSONResponse(
             status_code=400,
@@ -111,7 +92,15 @@ async def save_provider_key(provider_id: str, request: Request):
     except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
         return JSONResponse(status_code=500, content={"detail": f"Failed to save key: {e}"})
 
-    asyncio.create_task(_run_provider_provisioning(provider_id, recipe["commands"]))
+    try:
+        argvs = _AGENT.render_recipe_commands(recipe.get("commands") or [])
+    except (KeyError, ValueError) as e:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Invalid provider recipe for '{provider_id}': {e}"},
+        )
+
+    asyncio.create_task(_run_provider_provisioning(provider_id, argvs))
 
     return {"ok": True, "provider": provider_id, "provisioning": "started"}
 
@@ -120,7 +109,7 @@ async def save_provider_key(provider_id: str, request: Request):
 
 
 def list_openclaw_models() -> list[dict]:
-    """One model row per OpenClaw agent so the UI can target `openclaw/<agentId>`."""
+    """One model row per agent entry so the UI can target `<prefix>/<agentId>`."""
     cfg = load_openclaw_config()
     entries_by_id = {
         normalize_agent_id(str(e.get("id", ""))): e
@@ -129,6 +118,7 @@ def list_openclaw_models() -> list[dict]:
     }
     models: list[dict] = []
     seen: set[str] = set()
+    prefix = _AGENT.model_prefix
 
     if AGENTS_DIR.exists():
         for agent_dir in sorted(AGENTS_DIR.iterdir()):
@@ -141,9 +131,9 @@ def list_openclaw_models() -> list[dict]:
             label = (display or "").strip() or aid
             models.append(
                 {
-                    "id": f"openclaw/{aid}",
+                    "id": f"{prefix}/{aid}",
                     "name": label,
-                    "provider_id": "openclaw",
+                    "provider_id": _AGENT.name,
                     "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
                     "pricing": {"prompt": 0, "completion": 0},
                     "metadata": {"openclaw_agent_id": aid},
@@ -153,9 +143,9 @@ def list_openclaw_models() -> list[dict]:
     if not models:
         models.append(
             {
-                "id": "openclaw/main",
+                "id": f"{prefix}/main",
                 "name": "main",
-                "provider_id": "openclaw",
+                "provider_id": _AGENT.name,
                 "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
                 "pricing": {"prompt": 0, "completion": 0},
                 "metadata": {"openclaw_agent_id": "main"},
@@ -175,7 +165,7 @@ def list_models():
 
 @router.get("/api/config/api-key")
 def config_api_key():
-    return {"has_key": True, "provider": "openclaw"}
+    return {"has_key": True, "provider": _AGENT.name}
 
 
 @router.get("/api/config/providers")
@@ -205,8 +195,8 @@ def local_provider():
 
 @router.get("/api/config/openclaw")
 def get_openclaw_config():
-    """Return the full openclaw.json with sensitive fields masked."""
+    """Return the full agent config file (e.g. openclaw.json) with sensitive fields masked."""
     cfg = load_openclaw_config()
     if not cfg:
-        return JSONResponse(status_code=404, content={"detail": "openclaw.json not found"})
+        return JSONResponse(status_code=404, content={"detail": f"{_AGENT.config_file.name} not found"})
     return _mask_sensitive(cfg)

@@ -5,6 +5,8 @@ Covers uploads, directory listing, text & binary content reads, and
 directory creation with optional xo-cowork scaffolding (WORKSPACE.md /
 AGENTS.md / OBJECTIVES.md / sessions.json). All paths are clamped to the
 user's home dir for safety.
+
+#TODO --- need safect related change (dir)
 """
 
 import hashlib

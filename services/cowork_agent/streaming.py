@@ -23,8 +23,13 @@ from services.cowork_agent.settings import (
     OPENCLAW_API_URL,
     OPENCLAW_MODEL,
 )
+from services.cowork_agent.agent_registry import get_default_agent
 from services.cowork_agent.chat_state import active_streams
 from services.cowork_agent.helpers import normalize_agent_id
+
+_AGENT = get_default_agent()
+_SESSION_HEADER = _AGENT.session_header
+_MODEL_PREFIX = _AGENT.model_prefix.lower()
 
 
 def find_session_id_by_key(session_key: str) -> str | None:
@@ -46,14 +51,18 @@ def find_session_id_by_key(session_key: str) -> str | None:
 
 
 def openclaw_agent_id_from_prompt_body(body: dict) -> str:
-    """Resolve OpenClaw agent id from `model` (e.g. openclaw/research) for new sessions."""
+    """Resolve agent id from `model` (e.g. `<prefix>/research`) for new sessions.
+
+    The expected prefix comes from the active agent's manifest
+    (`model_prefix`), so swapping the default agent swaps the namespace.
+    """
     model = body.get("model")
     if isinstance(model, str):
         lowered = model.strip().lower()
-        if lowered.startswith("openclaw/"):
+        if lowered.startswith(f"{_MODEL_PREFIX}/"):
             rest = model.split("/", 1)[1] if "/" in model else ""
             return normalize_agent_id(rest) if rest.strip() else "main"
-        if lowered == "openclaw":
+        if lowered == _MODEL_PREFIX:
             return "main"
     return "main"
 
@@ -80,7 +89,7 @@ async def create_new_session(text: str, session_key: str) -> tuple[str, str, str
             headers={
                 "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
                 "Content-Type": "application/json",
-                "x-openclaw-session-key": session_key,
+                _SESSION_HEADER: session_key,
             },
             json={
                 "model": OPENCLAW_MODEL,
@@ -144,7 +153,7 @@ async def stream_openclaw_to_sse(stream_id: str):
                 headers={
                     "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
                     "Content-Type": "application/json",
-                    "x-openclaw-session-key": session_key,
+                    _SESSION_HEADER: session_key,
                 },
                 json={
                     "model": OPENCLAW_MODEL,

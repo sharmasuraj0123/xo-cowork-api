@@ -1,24 +1,28 @@
 """
 Environment, paths, and constants for the cowork_agent subsystem.
 
-Migrated from bridge/config.py. `CORS_ORIGINS` lives in server.py instead,
-and `active_streams` lives in chat_state.py.
+Values previously hardcoded to OpenClaw are now sourced from the active
+agent manifest (see `services/cowork_agent/agent_registry.py` and
+`config/agents/*.json`). The module-level names are preserved so the rest
+of the subsystem keeps working without edits.
 """
 
-import os
 import re
-from pathlib import Path
 
 from dotenv import load_dotenv
 
+from services.cowork_agent.agent_registry import get_default_agent
+
 load_dotenv()
 
-# ── OpenClaw on-disk layout ──────────────────────────────────────────────────
+_AGENT = get_default_agent()
 
-OPENCLAW_DIR = Path.home() / ".openclaw"
-AGENTS_DIR = OPENCLAW_DIR / "agents"
-OPENCLAW_JSON = OPENCLAW_DIR / "openclaw.json"
-DEFAULT_OPENCLAW_WORKSPACE = OPENCLAW_DIR / "workspace"
+# ── Active-agent on-disk layout (sourced from manifest) ──────────────────────
+
+OPENCLAW_DIR = _AGENT.home_dir
+AGENTS_DIR = _AGENT.agents_dir
+OPENCLAW_JSON = _AGENT.config_file
+DEFAULT_OPENCLAW_WORKSPACE = _AGENT.workspace_dir
 
 # ── Agent id normalization regexes ───────────────────────────────────────────
 
@@ -52,17 +56,10 @@ _WORKSPACE_DOC_FILES = (
 
 _MAX_AGENT_PAYLOAD_BYTES = 256_000
 
-# ── OpenClaw API config ──────────────────────────────────────────────────────
+# ── Active-agent API config (sourced from manifest + env) ────────────────────
 
-OPENCLAW_API_URL = os.getenv("OPENCLAW_API_URL", "http://127.0.0.1:18789/v1/chat/completions")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "xo-cowork")
-OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openclaw/default")
+OPENCLAW_API_URL = _AGENT.api_url
+OPENCLAW_GATEWAY_TOKEN = _AGENT.api_token
+OPENCLAW_MODEL = _AGENT.api_model
 
-OPENCLAW_MODEL_CAPABILITIES: dict = {
-    "function_calling": True,
-    "vision": False,
-    "reasoning": True,
-    "json_output": True,
-    "max_context": 200000,
-    "max_output": 16384,
-}
+OPENCLAW_MODEL_CAPABILITIES: dict = dict(_AGENT.model_capabilities)

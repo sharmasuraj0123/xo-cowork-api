@@ -15,7 +15,9 @@ Two access patterns live on top of this file:
 import re
 from pathlib import Path
 
-ENV_FILE: Path = Path.home() / ".openclaw" / ".env"
+from services.cowork_agent.agent_registry import get_default_agent
+
+ENV_FILE: Path = get_default_agent().env_file
 
 
 def parse_env_file(text: str) -> list[dict]:
