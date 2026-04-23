@@ -486,54 +486,13 @@ OPENCLAW_PEER_DEPS=(
 )
 
 install_openclaw_peer_deps() {
-    if [ "${#OPENCLAW_PEER_DEPS[@]}" -eq 0 ]; then
-        return 0
-    fi
+    [ "${#OPENCLAW_PEER_DEPS[@]}" -eq 0 ] && return 0
 
-    if ! command -v npm &>/dev/null; then
-        log_warn "npm not found — skipping OpenClaw peer deps install"
-        return 0
-    fi
-
-    local npm_root openclaw_dir install_target
-    npm_root="$(npm root -g 2>/dev/null)"
-    openclaw_dir="${npm_root}/openclaw"
-
-    if [ -d "$openclaw_dir" ]; then
-        install_target="$openclaw_dir"
+    log "Installing OpenClaw peer deps: ${OPENCLAW_PEER_DEPS[*]}"
+    if npm install -g "${OPENCLAW_PEER_DEPS[@]}"; then
+        log_success "Peer deps installed"
     else
-        log_warn "OpenClaw module dir not found at $openclaw_dir — falling back to -g"
-        install_target=""
-    fi
-
-    local missing=() pkg
-    for pkg in "${OPENCLAW_PEER_DEPS[@]}"; do
-        if [ -n "$install_target" ] && [ -d "$install_target/node_modules/$pkg" ]; then
-            continue
-        fi
-        if [ -z "$install_target" ] && [ -d "${npm_root}/${pkg}" ]; then
-            continue
-        fi
-        missing+=("$pkg")
-    done
-
-    if [ "${#missing[@]}" -eq 0 ]; then
-        log_success "OpenClaw peer deps already present"
-        return 0
-    fi
-
-    log "Installing OpenClaw peer deps: ${missing[*]}"
-    local ok=1
-    if [ -n "$install_target" ]; then
-        (cd "$install_target" && npm install --no-save "${missing[@]}") || ok=0
-    else
-        npm install -g "${missing[@]}" || ok=0
-    fi
-
-    if [ "$ok" -eq 1 ]; then
-        log_success "Peer deps installed (${missing[*]})"
-    else
-        log_warn "One or more peer deps failed to install — extensions may fail at runtime"
+        log_warn "Peer deps install failed — extensions may fail at runtime"
     fi
 }
 
