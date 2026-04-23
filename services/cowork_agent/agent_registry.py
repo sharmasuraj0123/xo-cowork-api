@@ -1,11 +1,15 @@
 """
 Agent manifest registry.
 
-Loads JSON manifests from `config/agents/*.json` — one per supported agent
-tool (openclaw today, room for others later). Each manifest declares the
-binary name, filesystem layout, API env-var names, command templates, and
-provider/channel recipes. Call sites go through `get_default_agent()` so
-the binary, paths, and argv shapes are never hardcoded.
+Loads JSON manifests from `config/agents/<agent>/commands.json` — one
+subdirectory per supported agent tool (openclaw today, room for others
+later). Each manifest declares the binary name, filesystem layout, API
+env-var names, command templates, and provider/channel recipes. Call
+sites go through `get_default_agent()` so the binary, paths, and argv
+shapes are never hardcoded.
+
+The file is named `commands.json` (not `<agent>.json`) so it cannot be
+confused with the agent's own config file (e.g. `~/.openclaw/openclaw.json`).
 
 Which manifest is the "default" is driven by env var `DEFAULT_AGENT`
 (matched against the `name` field inside each manifest). If the env var
@@ -133,16 +137,23 @@ def _discover_manifests() -> dict[str, AgentManifest]:
     if not _MANIFEST_DIR.exists():
         raise FileNotFoundError(
             f"agent manifest directory not found: {_MANIFEST_DIR}. "
-            "Add a JSON manifest describing the default agent tool."
+            "Add a `config/agents/<name>/commands.json` describing the default agent tool."
         )
     manifests: dict[str, AgentManifest] = {}
-    for path in sorted(_MANIFEST_DIR.glob("*.json")):
-        manifest = _build_manifest(path)
+    # One subdir per agent, each containing a `commands.json` file.
+    for subdir in sorted(p for p in _MANIFEST_DIR.iterdir() if p.is_dir()):
+        manifest_path = subdir / "commands.json"
+        if not manifest_path.exists():
+            continue
+        manifest = _build_manifest(manifest_path)
         if manifest.name in manifests:
             raise ValueError(f"duplicate manifest name '{manifest.name}' in {_MANIFEST_DIR}")
         manifests[manifest.name] = manifest
     if not manifests:
-        raise FileNotFoundError(f"no agent manifests found in {_MANIFEST_DIR}")
+        raise FileNotFoundError(
+            f"no agent manifests found in {_MANIFEST_DIR} "
+            "(expected `<agent>/commands.json` subdirectories)."
+        )
     return manifests
 
 
