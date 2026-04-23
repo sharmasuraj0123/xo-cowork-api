@@ -301,174 +301,99 @@ install_cli() {
 }
 
 # ==============================================================
-# Setup: Configure config.yaml (channels, model, etc.)
+# Setup: Configure Hermes via hermes config set
 # ==============================================================
 configure_hermes() {
     log "Configuring Hermes..."
-    mkdir -p "$HERMES_DIR"
-    mkdir -p "$HERMES_DIR/skills"
-    mkdir -p "$HERMES_DIR/sessions"
-    mkdir -p "$HERMES_DIR/memories"
-    mkdir -p "$HERMES_DIR/cron"
-    mkdir -p "$HERMES_DIR/logs"
-    mkdir -p "$HERMES_DIR/hooks"
+    mkdir -p "$HERMES_DIR/skills" "$HERMES_DIR/sessions" "$HERMES_DIR/memories" \
+             "$HERMES_DIR/cron" "$HERMES_DIR/logs" "$HERMES_DIR/hooks"
 
-    # Determine enabled channels from env
+    # ── Model ──────────────────────────────────────────────────────────────────
+    # HERMES_PROVIDER (from Coder form) selects which key to use when multiple are set.
+    # Normalise: "openai" → "custom" (Hermes has no standalone openai provider).
+    local _provider="${HERMES_PROVIDER:-}"
+    [ "$_provider" = "openai" ] && _provider="custom"
+
+    _configure_model() {
+        local provider="$1" key_var="$2" default_model="$3" base_url="$4"
+        local api_key="${!key_var:-}"
+        [ -z "$api_key" ] && { log_warn "Provider $provider selected but $key_var is not set — skipping"; return 1; }
+        local model="${HERMES_MODEL:-$default_model}"
+        log "Configuring model: $provider / $model"
+        hermes config set "$key_var" "$api_key"
+        hermes config set model.provider "$provider"
+        hermes config set model.default "$model"
+        [ -n "$base_url" ] && hermes config set model.base_url "$base_url"
+        log_success "Model: $provider / $model"
+    }
+
+    case "$_provider" in
+        anthropic)
+            _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com ;;
+        custom)
+            _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1 ;;
+        openrouter)
+            _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 "" ;;
+        *)
+            # Auto-detect from whichever key is set (anthropic wins if multiple)
+            if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+                _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+            elif [ -n "${OPENAI_API_KEY:-}" ]; then
+                _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+            elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+                _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
+            fi
+            ;;
+    esac
+
+    # ── Channels ───────────────────────────────────────────────────────────────
+    # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
     local telegram_enabled="${TELEGRAM_ENABLED:-true}"
     local whatsapp_enabled="${WHATSAPP_ENABLED:-false}"
     local slack_enabled="${SLACK_ENABLED:-false}"
-
-    # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
     if [ -n "${ENABLED_CHANNELS:-}" ]; then
         echo "$ENABLED_CHANNELS" | grep -q '"telegram"' && telegram_enabled=true || telegram_enabled=false
         echo "$ENABLED_CHANNELS" | grep -q '"whatsapp"' && whatsapp_enabled=true || whatsapp_enabled=false
-        echo "$ENABLED_CHANNELS" | grep -q '"slack"' && slack_enabled=true || slack_enabled=false
+        echo "$ENABLED_CHANNELS" | grep -q '"slack"'    && slack_enabled=true    || slack_enabled=false
+    fi
+    # Auto-enable Slack if both tokens are present
+    [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ] && slack_enabled=true
+
+    # Telegram
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ "$telegram_enabled" = "true" ]; then
+        log "Configuring Telegram..."
+        hermes config set TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+        hermes config set TELEGRAM_ALLOWED_USERS "${TELEGRAM_ALLOWED_USERS:-*}"
+        hermes config set GATEWAY_ALLOW_ALL_USERS true
+        log_success "Telegram configured"
     fi
 
-    # Auto-enable Slack if tokens are provided
-    if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
-        slack_enabled=true
+    # Slack
+    if [ "$slack_enabled" = "true" ] && [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ]; then
+        log "Configuring Slack..."
+        hermes config set SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN"
+        hermes config set SLACK_APP_TOKEN "$SLACK_APP_TOKEN"
+        hermes config set SLACK_ALLOWED_USERS "${SLACK_ALLOWED_USERS:-*}"
+        log_success "Slack configured"
     fi
 
-    # Determine primary model
-    local primary_model="${HERMES_MODEL:-claude-opus-4-6}"
-    local primary_provider="${HERMES_PROVIDER:-anthropic}"
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-        primary_model="gpt-4o"
-        primary_provider="openai"
-    elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        primary_model="anthropic/claude-sonnet-4"
-        primary_provider="openrouter"
-    fi
-    log "Primary model: ${primary_provider}/${primary_model}"
-
-    # Write config.yaml (only if it doesn't exist)
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log "Writing config.yaml..."
-        cat > "$CONFIG_FILE" <<CFGEOF
-# ── Model & Providers ──────────────────────────────────────────────────────
-model:
-  default: ${primary_model}
-  provider: ${primary_provider}
-
-fallback_providers:
-  - provider: openrouter
-    model: anthropic/claude-sonnet-4
-
-credential_pool_strategies:
-  anthropic: round_robin
-  openrouter: least_used
-
-# ── Agent Behaviour ────────────────────────────────────────────────────────
-agent:
-  max_turns: 90
-  gateway_timeout: 1800
-  reasoning_effort: medium
-
-# ── Terminal Backend ───────────────────────────────────────────────────────
-terminal:
-  backend: local
-
-# ── Display ────────────────────────────────────────────────────────────────
-display:
-  personality: helpful
-  compact: false
-  streaming: true
-  inline_diffs: true
-  dashboard:
-    theme: default
-    host: 0.0.0.0
-    allowed_hosts:
-      - "*"
-
-# ── Memory ─────────────────────────────────────────────────────────────────
-memory:
-  memory_enabled: true
-  user_profile_enabled: true
-  memory_char_limit: 2200
-  user_char_limit: 1375
-  provider: ''
-  nudge_interval: 10
-  flush_min_turns: 6
-
-# ── Context Compression ────────────────────────────────────────────────────
-compression:
-  enabled: true
-  threshold: 0.5
-  target_ratio: 0.2
-
-# ── Approvals ──────────────────────────────────────────────────────────────
-approvals:
-  mode: manual
-  timeout: 300
-
-# ── Security ───────────────────────────────────────────────────────────────
-security:
-  redact_secrets: true
-  tirith_enabled: true
-
-command_allowlist:
-  - git
-  - npm
-  - python3
-  - node
-  - pip
-  - hermes
-
-# ── Sessions ───────────────────────────────────────────────────────────────
-session_reset:
-  mode: both
-  idle_minutes: 120
-  at_hour: 3
-
-# ── Channels ───────────────────────────────────────────────────────────────
-telegram:
-  dm_policy: open
-  allow_from:
-    - "*"
-  channel_prompts: {}
-
-discord:
-  require_mention: true
-  free_response_channels: ""
-  auto_thread: true
-  reactions: true
-  dm_policy: open
-  allow_from:
-    - "*"
-  channel_prompts: {}
-
-slack:
-  dm_policy: open
-  allow_from:
-    - "*"
-  channel_prompts: {}
-
-# ── Skills ─────────────────────────────────────────────────────────────────
-skills:
-  external_dirs: []
-  creation_nudge_interval: 50
-
-# ── Other ──────────────────────────────────────────────────────────────────
-timezone: UTC
-logging:
-  level: INFO
-  file_size_mb: 10
-
-_config_version: 21
-CFGEOF
-        chmod 600 "$CONFIG_FILE"
-        log_success "config.yaml written"
-    else
-        log "config.yaml already exists — preserving manual edits"
-        # Patch model if needed (using hermes config set if available)
-        if command -v hermes &>/dev/null; then
-            hermes config set model.default "$primary_model" 2>/dev/null || true
-            hermes config set model.provider "$primary_provider" 2>/dev/null || true
+    # WhatsApp
+    if [ "$whatsapp_enabled" = "true" ] || [ -n "${WHATSAPP_CREDS:-}" ]; then
+        log "Configuring WhatsApp..."
+        hermes config set WHATSAPP_ENABLED true
+        hermes config set WHATSAPP_MODE "${WHATSAPP_MODE:-bot}"
+        hermes config set WHATSAPP_ALLOWED_USERS "${WHATSAPP_ALLOWED_USERS:-*}"
+        if [ -n "${WHATSAPP_CREDS:-}" ]; then
+            local wa_dir="$HERMES_DIR/whatsapp/session"
+            mkdir -p "$wa_dir"
+            echo "$WHATSAPP_CREDS" > "$wa_dir/creds.json"
+            chmod 600 "$wa_dir/creds.json"
+            log_success "WhatsApp credentials written to $wa_dir/creds.json"
         fi
+        log_success "WhatsApp configured"
     fi
 
-    # Write auth.json (credential pool)
+    # ── auth.json (credential pool) ────────────────────────────────────────────
     if [ ! -f "$AUTH_FILE" ]; then
         log "Building auth.json credential pool..."
         _build_auth_json
@@ -477,29 +402,14 @@ CFGEOF
         log "auth.json already exists — skipping"
     fi
 
-    # Write WhatsApp credentials if provided
-    if [ -n "${WHATSAPP_CREDS:-}" ]; then
-        local wa_dir="$HERMES_DIR/whatsapp/session"
-        mkdir -p "$wa_dir"
-        echo "$WHATSAPP_CREDS" > "$wa_dir/creds.json"
-        chmod 600 "$wa_dir/creds.json"
-        log_success "WhatsApp credentials written"
+    # ── Skills ────────────────────────────────────────────────────────────────
+    if [ -d "$HERMES_REPO/skills" ] && command -v hermes &>/dev/null; then
+        hermes skills sync 2>/dev/null || {
+            rsync -a --ignore-existing "$HERMES_REPO/skills/" "$HERMES_DIR/skills/" 2>/dev/null || \
+            cp -rn "$HERMES_REPO/skills/"* "$HERMES_DIR/skills/" 2>/dev/null || true
+        }
+        log_success "Skills synced"
     fi
-
-    # Sync bundled skills if the repo has them
-    if [ -d "$HERMES_REPO/skills" ]; then
-        if command -v hermes &>/dev/null; then
-            # Use hermes built-in skill sync if available
-            hermes skills sync 2>/dev/null || {
-                # Fallback: manual rsync
-                rsync -a --ignore-existing "$HERMES_REPO/skills/" "$HERMES_DIR/skills/" 2>/dev/null || \
-                cp -rn "$HERMES_REPO/skills/"* "$HERMES_DIR/skills/" 2>/dev/null || true
-            }
-            log_success "Skills synced"
-        fi
-    fi
-
-    log_success "Channels configured (telegram: ${telegram_enabled}, whatsapp: ${whatsapp_enabled}, slack: ${slack_enabled})"
 }
 
 # Build auth.json from available API keys
@@ -915,6 +825,14 @@ run_setup() {
     validate_env
     install_env
     install_cli
+
+    # Reload shell so hermes CLI is on PATH before config commands run
+    set +u
+    [ -f "$HOME/.zshrc" ]  && source "$HOME/.zshrc"  2>/dev/null || true
+    [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null || true
+    set -u
+    export PATH="$HOME/.local/bin:$HERMES_DIR/hermes-agent/venv/bin:$PATH"
+
     configure_hermes
 
     # Run hermes doctor for health check
