@@ -248,6 +248,7 @@ enable_channels() {
             --arg ui_origin "$control_ui_origin" \
             --arg primary_model "$primary_model" \
             --arg has_openai "$([ -n "${OPENAI_API_KEY:-}" ] && echo true || echo false)" \
+            --arg has_anthropic "$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" \
             --arg slack_bot_token "${SLACK_BOT_TOKEN:-}" \
             --arg slack_app_token "${SLACK_APP_TOKEN:-}" \
             '{
@@ -264,7 +265,7 @@ enable_channels() {
                         dmPolicy: "open",
                         allowFrom: ["*"],
                         groupPolicy: "allowlist",
-                        streamMode: "partial"
+                        streaming: { mode: "partial" }
                     },
                     whatsapp: {
                         enabled: $wa_enabled,
@@ -289,6 +290,9 @@ enable_channels() {
             | if $ui_origin != "" then
                 .gateway.controlUi.allowedOrigins = [$ui_origin]
               else . end
+            | if $has_anthropic == "true" then
+                .plugins.entries.anthropic = { enabled: true }
+              else . end
             | if $has_openai == "true" then
                 .plugins.entries.openai = { config: { personality: "off" } }
               else . end
@@ -311,6 +315,10 @@ enable_channels() {
         local openai_plugin=""
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             openai_plugin=", \"openai\": { \"config\": { \"personality\": \"off\" } }"
+        fi
+        local anthropic_plugin=""
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            anthropic_plugin=", \"anthropic\": { \"enabled\": true }"
         fi
         local slack_plugin=""
         local slack_channel=""
@@ -345,7 +353,7 @@ enable_channels() {
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
-      "streamMode": "partial"
+      "streaming": { "mode": "partial" }
     },
     "whatsapp": {
       "enabled": false,
@@ -357,7 +365,7 @@ enable_channels() {
       "mediaMaxMb": 50
     }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${anthropic_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -378,7 +386,7 @@ EOJSON
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "allowlist",
-      "streamMode": "partial"
+      "streaming": { "mode": "partial" }
     },
     "whatsapp": {
       "enabled": false,
@@ -390,7 +398,7 @@ EOJSON
       "mediaMaxMb": 50
     }${slack_channel}
   },
-  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${openai_plugin} } },
+  "plugins": { "entries": { "telegram": { "enabled": true }, "whatsapp": { "enabled": false }${slack_plugin}${anthropic_plugin}${openai_plugin} } },
   "agents": { "defaults": { "maxConcurrent": 4, "subagents": { "maxConcurrent": 8 }, "model": { ${model_line} } } },
   "messages": { "ackReactionScope": "group-mentions" }
 }
@@ -403,39 +411,6 @@ EOJSON
     fi
 
     log_success "Channels configured (telegram: ${telegram_enabled}, whatsapp: ${whatsapp_enabled}, slack: ${slack_enabled})"
-}
-
-# ==============================================================
-# Setup: Ensure primary model matches MODEL_PROVIDER (idempotent)
-# ==============================================================
-ensure_primary_model() {
-    [ -f "$CONFIG_FILE" ] || return 0
-
-    # Key-based rule:
-    #   only OpenAI     → openai
-    #   only Anthropic  → anthropic
-    #   both / neither  → anthropic (default)
-    local desired_model="anthropic/claude-opus-4-6"
-    if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        desired_model="openai/gpt-5.4"
-    fi
-
-    if ! command -v jq &>/dev/null; then
-        log_warn "jq not available — cannot patch primary model"
-        return 0
-    fi
-
-    local current
-    current=$(jq -r '.agents.defaults.model.primary // ""' "$CONFIG_FILE" 2>/dev/null)
-    if [ "$current" = "$desired_model" ]; then
-        log "Primary model already set to $desired_model"
-        return 0
-    fi
-
-    local tmp
-    tmp=$(jq --arg m "$desired_model" '.agents.defaults.model.primary = $m' "$CONFIG_FILE")
-    echo "$tmp" > "$CONFIG_FILE"
-    log_success "Primary model updated: $current → $desired_model"
 }
 
 # ==============================================================
@@ -492,6 +467,31 @@ install_cli() {
     else
         log_error "OpenClaw CLI not found in PATH after install"
         exit 1
+    fi
+}
+
+# ==============================================================
+# Setup: Install missing peer deps for OpenClaw extensions
+#
+# Some OpenClaw releases ship extensions that import npm packages
+# they don't bundle (e.g. "Cannot find module: @slack/web-api").
+# Add entries to OPENCLAW_PEER_DEPS below and they will be installed
+# globally on every setup.
+# ==============================================================
+
+OPENCLAW_PEER_DEPS=(
+    "@whiskeysockets/baileys"   # WhatsApp channel
+    "@slack/web-api"            # Slack channel
+)
+
+install_openclaw_peer_deps() {
+    [ "${#OPENCLAW_PEER_DEPS[@]}" -eq 0 ] && return 0
+
+    log "Installing OpenClaw peer deps: ${OPENCLAW_PEER_DEPS[*]}"
+    if npm install -g "${OPENCLAW_PEER_DEPS[@]}"; then
+        log_success "Peer deps installed"
+    else
+        log_warn "Peer deps install failed — extensions may fail at runtime"
     fi
 }
 
@@ -803,6 +803,7 @@ run_setup() {
     install_env
     enable_channels
     install_cli
+    install_openclaw_peer_deps
     log "Running config doctor..."
     if openclaw doctor --fix --yes 2>/dev/null; then
         log_success "Config validated"
@@ -810,7 +811,6 @@ run_setup() {
         log_warn "openclaw doctor not available or config needs manual review"
     fi
     ensure_gateway_mode
-    ensure_primary_model
     install_gateway_guard
     start_gateway
 }
