@@ -655,7 +655,7 @@ _launch_dashboard() {
         hermes_bin="'"$hermes_bin"'"
         hermes_dir="'"$HERMES_DIR"'"
         cd "$hermes_dir"
-        "$hermes_bin" dashboard --host 0.0.0.0 --port '"$HERMES_DASH_PORT"' 2>&1
+        "$hermes_bin" dashboard --host 0.0.0.0 --port '"$HERMES_DASH_PORT"' --insecure 2>&1
     ' >> "$DASH_LOG_FILE" 2>&1 &
 
     local pid=$!
