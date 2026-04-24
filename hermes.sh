@@ -264,19 +264,17 @@ install_cli() {
         if [ ! -d "venv" ]; then
             uv venv venv
         fi
-        # Try full install, fall back to base
-        uv pip install -e ".[all]" 2>/dev/null || uv pip install -e . || {
+        uv pip install -e ".[all]" || {
             log_error "Failed to install hermes-agent with uv"
             exit 1
         }
     else
-        log "Installing with pip (uv not found)..."
+        log "Installing with pip..."
         if [ ! -d "venv" ]; then
             python3 -m venv venv
         fi
-        source venv/bin/activate
-        pip install --upgrade pip setuptools wheel
-        pip install -e ".[all]" 2>/dev/null || pip install -e . || {
+        venv/bin/pip install --upgrade pip setuptools wheel
+        venv/bin/pip install -e ".[all]" || {
             log_error "Failed to install hermes-agent with pip"
             exit 1
         }
