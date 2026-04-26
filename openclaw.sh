@@ -161,23 +161,33 @@ kill_orphan_gateways() {
 # ==============================================================
 validate_env() {
     local missing=0
+    local warnings=0
+
+    # --- Soft checks (warn only, gateway may have limited functionality) ---
     if [ "${TELEGRAM_ENABLED:-true}" = "true" ] && [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
-        log_error "TELEGRAM_BOT_TOKEN is not set (required when TELEGRAM_ENABLED=true)"
-        missing=1
+        log_warn "TELEGRAM_BOT_TOKEN is not set — Telegram channel will be disabled"
+        export TELEGRAM_ENABLED=false
+        warnings=1
     fi
     if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-        log_error "No model provider key set. Set ANTHROPIC_API_KEY or OPENAI_API_KEY (or both)."
-        missing=1
+        log_warn "No model provider key set (ANTHROPIC_API_KEY or OPENAI_API_KEY). Gateway will start but agents won't work without a model."
+        warnings=1
     fi
+
+    # --- Hard check (gateway cannot function without this) ---
     if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
         log_error "OPENCLAW_GATEWAY_TOKEN is not set"
         missing=1
     fi
+
     if [ "$missing" -eq 1 ]; then
         log_error "Set required vars in .env. Exiting."
         exit 1
     fi
-    log_success "Required environment variables are set"
+    if [ "$warnings" -eq 1 ]; then
+        log_warn "Some optional keys are missing — gateway will start with reduced functionality"
+    fi
+    log_success "Environment variables validated"
 }
 
 # ==============================================================
