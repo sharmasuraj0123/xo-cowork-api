@@ -266,6 +266,32 @@ install_cli() {
     # Set up Python venv and install
     cd "$HERMES_REPO"
 
+    # ─────────────────────────────────────────────
+    # Fix Baileys version (critical for WhatsApp)
+    # ─────────────────────────────────────────────
+    log "Fixing Baileys version..."
+
+    WA_DIR="$HERMES_REPO/scripts/whatsapp-bridge"
+
+    if [ -d "$WA_DIR" ]; then
+        cd "$WA_DIR"
+
+        # Clean install to avoid cached broken versions
+        rm -rf node_modules package-lock.json
+
+        # Force exact version
+        npm install @whiskeysockets/baileys@6.6.0 --save-exact
+
+        # Install remaining deps
+        npm install
+
+        log_success "Baileys locked to 6.6.0"
+    else
+        log_warn "WhatsApp bridge directory not found, skipping Baileys fix"
+    fi
+
+    cd "$HERMES_REPO"
+
     if command -v uv &>/dev/null; then
         log "Installing with uv..."
         if [ ! -d "venv" ]; then
