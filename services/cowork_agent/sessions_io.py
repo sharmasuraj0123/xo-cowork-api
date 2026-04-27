@@ -1,6 +1,6 @@
 """
 Session-file I/O: scan the `~/.openclaw/agents/*/sessions/` directories and
-materialize xo-cowork-shaped session records.
+`~/claude-cowork/*/.sessions/` directories.
 
 Concerns:
 - listing sessions across agents and sorting by updated time
@@ -12,84 +12,138 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.settings import AGENTS_DIR, OPENCLAW_DIR
+from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_DIR
 from services.cowork_agent.helpers import derive_title, iso_now, ms_to_iso, parse_jsonl
 
 
 def load_all_sessions() -> list[dict]:
-    """Scan all agents and build SessionResponse objects."""
+    """Scan all agents (OpenClaw and Claude Code) and build SessionResponse objects."""
     sessions = []
 
-    if not AGENTS_DIR.exists():
-        return sessions
+    # OpenClaw sessions
+    if AGENTS_DIR.exists():
+        for agent_dir in sorted(AGENTS_DIR.iterdir()):
+            if not agent_dir.is_dir():
+                continue
 
-    for agent_dir in sorted(AGENTS_DIR.iterdir()):
-        if not agent_dir.is_dir():
-            continue
+            agent_name = agent_dir.name
+            sessions_dir = agent_dir / "sessions"
+            sessions_index = sessions_dir / "sessions.json"
 
-        agent_name = agent_dir.name
-        sessions_dir = agent_dir / "sessions"
-        sessions_index = sessions_dir / "sessions.json"
+            if not sessions_index.exists():
+                continue
 
-        if not sessions_index.exists():
-            continue
+            with open(sessions_index) as f:
+                index_data = json.load(f)
 
-        with open(sessions_index) as f:
-            index_data = json.load(f)
+            for key, meta in index_data.items():
+                session_id = meta.get("sessionId", "")
+                session_file = sessions_dir / f"{session_id}.jsonl"
 
-        for key, meta in index_data.items():
-            session_id = meta.get("sessionId", "")
-            session_file = sessions_dir / f"{session_id}.jsonl"
+                updated_at = meta.get("updatedAt")
+                time_updated = ms_to_iso(updated_at) if updated_at else iso_now()
 
-            updated_at = meta.get("updatedAt")
-            time_updated = ms_to_iso(updated_at) if updated_at else iso_now()
+                time_created = time_updated
+                title = "Untitled Session"
+                if session_file.exists():
+                    records = parse_jsonl(session_file)
+                    if records:
+                        ts = records[0].get("timestamp")
+                        if ts:
+                            time_created = ts
+                    title = derive_title(records)
 
-            time_created = time_updated
-            title = "Untitled Session"
-            if session_file.exists():
-                records = parse_jsonl(session_file)
-                if records:
-                    ts = records[0].get("timestamp")
-                    if ts:
-                        time_created = ts
-                title = derive_title(records)
+                sessions.append({
+                    "id": session_id,
+                    "project_id": None,
+                    "parent_id": None,
+                    "slug": None,
+                    "agent": agent_name,
+                    "directory": meta.get("directory") or str(OPENCLAW_DIR / "workspace"),
+                    "title": title,
+                    "version": 1,
+                    "summary_additions": 0,
+                    "summary_deletions": 0,
+                    "summary_files": 0,
+                    "summary_diffs": [],
+                    "is_pinned": False,
+                    "permission": {},
+                    "time_created": time_created,
+                    "time_updated": time_updated,
+                    "time_compacting": None,
+                    "time_archived": None,
+                })
 
-            sessions.append({
-                "id": session_id,
-                "project_id": None,
-                "parent_id": None,
-                "slug": None,
-                "agent": agent_name,
-                "directory": meta.get("directory") or str(OPENCLAW_DIR / "workspace"),
-                "title": title,
-                "version": 1,
-                "summary_additions": 0,
-                "summary_deletions": 0,
-                "summary_files": 0,
-                "summary_diffs": [],
-                "is_pinned": False,
-                "permission": {},
-                "time_created": time_created,
-                "time_updated": time_updated,
-                "time_compacting": None,
-                "time_archived": None,
-            })
+    # Claude Code sessions — per-agent dirs + root .sessions dir
+    if CLAUDE_COWORK_DIR.exists():
+        # Collect all (sessions_dir, agent_name, agent_dir_path) to scan
+        cc_scan: list[tuple[Path, str, Path]] = []
+
+        # Per-agent subdirectories
+        for agent_dir in sorted(CLAUDE_COWORK_DIR.iterdir()):
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                continue
+            cc_scan.append((agent_dir / ".sessions", agent_dir.name, agent_dir))
+
+        # Root .sessions dir (sessions created with agent_id="")
+        root_sessions = CLAUDE_COWORK_DIR / ".sessions"
+        cc_scan.append((root_sessions, "default", CLAUDE_COWORK_DIR))
+
+        for sessions_dir, agent_name, agent_dir in cc_scan:
+            if not sessions_dir.exists():
+                continue
+
+            for session_file in sorted(sessions_dir.iterdir()):
+                if session_file.suffix != ".json":
+                    continue
+                try:
+                    rec = json.loads(session_file.read_text())
+                except Exception:
+                    continue
+
+                session_id = rec.get("session_id", "")
+                if not session_id:
+                    continue
+
+                sessions.append({
+                    "id": session_id,
+                    "project_id": None,
+                    "parent_id": None,
+                    "slug": None,
+                    "agent": agent_name,
+                    "directory": str(agent_dir),
+                    "title": rec.get("title") or "Untitled Session",
+                    "version": 1,
+                    "summary_additions": 0,
+                    "summary_deletions": 0,
+                    "summary_files": 0,
+                    "summary_diffs": [],
+                    "is_pinned": False,
+                    "permission": {},
+                    "time_created": rec.get("created_at") or iso_now(),
+                    "time_updated": rec.get("updated_at") or iso_now(),
+                    "time_compacting": None,
+                    "time_archived": None,
+                })
 
     sessions.sort(key=lambda s: s["time_updated"], reverse=True)
     return sessions
 
 
 def find_session_file(session_id: str) -> Path | None:
-    """Find the JSONL file for a given session ID across all agents."""
-    if not AGENTS_DIR.exists():
-        return None
-    for agent_dir in AGENTS_DIR.iterdir():
-        if not agent_dir.is_dir():
-            continue
-        path = agent_dir / "sessions" / f"{session_id}.jsonl"
-        if path.exists():
-            return path
-    return None
+    """Find the JSONL messages file for a session (OpenClaw or Claude Code)."""
+    # OpenClaw agents
+    if AGENTS_DIR.exists():
+        for agent_dir in AGENTS_DIR.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            path = agent_dir / "sessions" / f"{session_id}.jsonl"
+            if path.exists():
+                return path
+
+    # Claude Code: look for saved .messages.jsonl files
+    from services.cowork_agent.claude_sessions import find_session_messages_path
+    return find_session_messages_path(session_id)
 
 
 def find_session_key(session_id: str) -> str | None:

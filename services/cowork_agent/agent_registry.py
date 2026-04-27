@@ -141,9 +141,16 @@ def _discover_manifests() -> dict[str, AgentManifest]:
         )
     manifests: dict[str, AgentManifest] = {}
     # One subdir per agent, each containing a `commands.json` file.
+    # Files that lack the `binary` field are adapter configs, not agent manifests — skip them.
     for subdir in sorted(p for p in _MANIFEST_DIR.iterdir() if p.is_dir()):
         manifest_path = subdir / "commands.json"
         if not manifest_path.exists():
+            continue
+        try:
+            raw_check = json.loads(manifest_path.read_text())
+        except Exception:
+            continue
+        if "binary" not in raw_check:
             continue
         manifest = _build_manifest(manifest_path)
         if manifest.name in manifests:

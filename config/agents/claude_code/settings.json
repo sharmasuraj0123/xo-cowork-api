@@ -1,0 +1,5 @@
+{
+  "cli_path_env": "CLAUDE_CLI_PATH",
+  "workspace_root_env": "AI_WORKSPACE_ROOT",
+  "timeout": 120
+}
