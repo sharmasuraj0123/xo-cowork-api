@@ -50,6 +50,8 @@ def parse_stream_line(raw: bytes) -> dict | None:
             "type": "result",
             "result": event.get("result", ""),
             "session_id": event.get("session_id"),
+            "usage": event.get("usage") or {},
+            "model": event.get("model", ""),
         }
 
     if etype == "text":

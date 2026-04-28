@@ -42,9 +42,13 @@ _AGENT_NAME = os.getenv("AGENT_NAME", "openclaw")
 
 def _resolve_backend_for_session(session_id: str) -> str | None:
     """Return 'claude_code' if session_id belongs to a Claude Code session, else None."""
+    # New index format: ~/claude-cowork/agents/*/sessions/sessions.json
+    from services.cowork_agent.adapters.claude_code.adapter import find_session_key_for_session_id
+    if find_session_key_for_session_id(session_id) is not None:
+        return "claude_code"
+    # Old format: ~/claude-cowork/{agent_id}/.sessions/{session_id}.json
     from services.cowork_agent.claude_sessions import load_session
-    rec = load_session(session_id)
-    if rec is not None:
+    if load_session(session_id) is not None:
         return "claude_code"
     return None
 
@@ -61,6 +65,8 @@ async def _dispatcher_sse(stream_info: dict):
     """
     from services.cowork_agent.dispatcher import AgentDispatcher
     from services.cowork_agent.claude_sessions import save_session
+    from services.cowork_agent.adapter_registry import get_adapter
+    from services.cowork_agent.settings import load_agent_config
 
     agent_name = stream_info["agent_name"]
     question = stream_info["question"]
@@ -69,6 +75,7 @@ async def _dispatcher_sse(stream_info: dict):
     agent_type = stream_info.get("agent_type")
     agent_id = stream_info.get("agent_id")
     is_new_session = stream_info.get("is_new_session", False)
+    session_key = stream_info.get("session_key")
 
     # Emit session-created immediately for new sessions so the frontend can navigate
     if is_new_session and our_session_id:
@@ -78,21 +85,52 @@ async def _dispatcher_sse(stream_info: dict):
     else:
         event_id = 1
 
-    # For Claude Code, look up the native_session_id for --resume
-    native_resume_id = session_id  # for non-new sessions, this is the native id
-    if agent_name == "claude_code" and not is_new_session and session_id:
-        from services.cowork_agent.claude_sessions import load_session
-        rec = load_session(session_id)
-        if rec:
-            native_resume_id = rec.get("native_session_id") or session_id
+    # For Claude Code, resolve the native_session_id for --resume
+    native_resume_id = None
+    if agent_name == "claude_code" and not is_new_session and session_key:
+        try:
+            adapter = get_adapter("claude_code", load_agent_config("claude_code"))
+            native_resume_id = adapter.get_native_session_id(session_key)
+        except Exception:
+            pass
+        # Fall back to old .sessions JSON format
+        if not native_resume_id and session_id:
+            from services.cowork_agent.claude_sessions import load_session
+            rec = load_session(session_id)
+            if rec:
+                native_resume_id = rec.get("native_session_id") or None
+
+    # Write preliminary index entry for new Claude Code sessions so
+    # the session is discoverable before the subprocess finishes.
+    if agent_name == "claude_code" and is_new_session and session_key and our_session_id:
+        try:
+            adapter = get_adapter("claude_code", load_agent_config("claude_code"))
+            cwd = adapter.config.get("workspace_root") or "/home/coder"
+            adapter.write_preliminary_entry(session_key, our_session_id, cwd)
+        except Exception:
+            pass
 
     dispatcher = AgentDispatcher(agent_name)
     final_native_session_id = None
     first_token = None
-    response_parts: list[str] = []
+
+    # Build extra kwargs to pass through to adapter.stream() for session tracking
+    stream_kwargs: dict = {}
+    if agent_name == "claude_code":
+        stream_kwargs = {
+            "session_key": session_key,
+            "our_session_id": our_session_id,
+            "agent_id": agent_id,
+            # "question" is already the first positional arg — do NOT repeat it here
+        }
 
     try:
-        async for event in dispatcher.stream(question, native_resume_id if not is_new_session else None, agent_type=agent_type):
+        async for event in dispatcher.stream(
+            question,
+            native_resume_id if not is_new_session else None,
+            agent_type=agent_type,
+            **stream_kwargs,
+        ):
             if event.get("done"):
                 final_native_session_id = event.get("native_session_id")
                 break
@@ -100,7 +138,6 @@ async def _dispatcher_sse(stream_info: dict):
                 token = event.get("token", "")
                 if first_token is None:
                     first_token = token
-                response_parts.append(token)
                 yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'text': token})}\n\n"
                 event_id += 1
             elif event.get("type") == "error":
@@ -110,9 +147,9 @@ async def _dispatcher_sse(stream_info: dict):
         yield f"id: {event_id}\nevent: agent-error\ndata: {json.dumps({'error_message': str(exc)})}\n\n"
         event_id += 1
 
-    # Persist Claude Code session record and messages
+    # Persist Claude Code session record (backward-compat .sessions/{id}.json metadata)
+    # The JSONL messages file is now written by the adapter itself.
     if agent_name == "claude_code" and our_session_id:
-        from services.cowork_agent.claude_sessions import save_session_messages
         title = (first_token or question)[:60] if first_token or question else "Untitled"
         eff_agent_id = agent_id or ""
         try:
@@ -124,16 +161,8 @@ async def _dispatcher_sse(stream_info: dict):
             )
         except Exception:
             pass
-        if response_parts:
-            try:
-                save_session_messages(
-                    session_id=our_session_id,
-                    agent_id=eff_agent_id,
-                    question=question,
-                    response="".join(response_parts),
-                )
-            except Exception:
-                pass
+        # NOTE: save_session_messages() intentionally NOT called here —
+        # the adapter's stream() method appends the JSONL exchange itself.
 
     resolved_session_id = our_session_id or final_native_session_id or session_id
     yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'session_id': resolved_session_id})}\n\n"
@@ -176,6 +205,28 @@ async def chat_prompt(request: Request):
             except Exception:
                 pass
 
+        # For Claude Code: attach a session_key to every stream so the adapter
+        # can write the JSONL index and resume sessions via --resume.
+        session_key = None
+        if agent_name == "claude_code":
+            if is_new_session:
+                from services.cowork_agent.adapter_registry import get_adapter
+                from services.cowork_agent.settings import load_agent_config
+                try:
+                    adapter = get_adapter("claude_code", load_agent_config("claude_code"))
+                    session_key = adapter.make_session_key(agent_id or "default")
+                except Exception:
+                    pass
+            else:
+                # Existing session: look up the session_key from the index
+                from services.cowork_agent.adapter_registry import get_adapter
+                from services.cowork_agent.settings import load_agent_config
+                try:
+                    adapter = get_adapter("claude_code", load_agent_config("claude_code"))
+                    session_key = adapter.find_session_key_for_session_id(our_session_id)
+                except Exception:
+                    pass
+
         stream_id = str(uuid.uuid4())
         active_streams[stream_id] = {
             "question": text,
@@ -185,6 +236,7 @@ async def chat_prompt(request: Request):
             "agent_type": body.get("agent_type"),
             "agent_id": agent_id,
             "is_new_session": is_new_session,
+            "session_key": session_key,
         }
         return {"stream_id": stream_id, "session_id": our_session_id}
 

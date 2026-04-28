@@ -14,10 +14,12 @@ import mimetypes
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 router = APIRouter()
+
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 # ── Scaffold templates used by mkdir ─────────────────────────────────────────
@@ -156,7 +158,9 @@ async def upload_file(
     workspace: str = Form(""),
 ):
     """Save an uploaded file into the workspace (or ~/uploads fallback)."""
-    content = await file.read()
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
     content_hash = hashlib.sha256(content).hexdigest()
 
     if workspace:
