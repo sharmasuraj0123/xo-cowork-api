@@ -74,64 +74,11 @@ def load_all_sessions() -> list[dict]:
                     "time_archived": None,
                 })
 
-    # Claude Code sessions — per-agent dirs + root .sessions dir
+    # Claude Code sessions — current layout: ~/claude-cowork/{agent_id}/sessions/sessions.json
+    seen_ids: set[str] = {s["id"] for s in sessions}
     if CLAUDE_COWORK_DIR.exists():
-        # Collect all (sessions_dir, agent_name, agent_dir_path) to scan
-        cc_scan: list[tuple[Path, str, Path]] = []
-
-        # Per-agent subdirectories
         for agent_dir in sorted(CLAUDE_COWORK_DIR.iterdir()):
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
-                continue
-            cc_scan.append((agent_dir / ".sessions", agent_dir.name, agent_dir))
-
-        # Root .sessions dir (sessions created with agent_id="")
-        root_sessions = CLAUDE_COWORK_DIR / ".sessions"
-        cc_scan.append((root_sessions, "default", CLAUDE_COWORK_DIR))
-
-        for sessions_dir, agent_name, agent_dir in cc_scan:
-            if not sessions_dir.exists():
-                continue
-
-            for session_file in sorted(sessions_dir.iterdir()):
-                if session_file.suffix != ".json":
-                    continue
-                try:
-                    rec = json.loads(session_file.read_text())
-                except Exception:
-                    continue
-
-                session_id = rec.get("session_id", "")
-                if not session_id:
-                    continue
-
-                sessions.append({
-                    "id": session_id,
-                    "project_id": None,
-                    "parent_id": None,
-                    "slug": None,
-                    "agent": agent_name,
-                    "directory": str(agent_dir),
-                    "title": rec.get("title") or "Untitled Session",
-                    "version": 1,
-                    "summary_additions": 0,
-                    "summary_deletions": 0,
-                    "summary_files": 0,
-                    "summary_diffs": [],
-                    "is_pinned": False,
-                    "permission": {},
-                    "time_created": rec.get("created_at") or iso_now(),
-                    "time_updated": rec.get("updated_at") or iso_now(),
-                    "time_compacting": None,
-                    "time_archived": None,
-                })
-
-    # Claude Code sessions — new index format under ~/claude-cowork/agents/*/sessions/sessions.json
-    seen_ids: set[str] = {s["id"] for s in sessions}
-    new_cc_root = CLAUDE_COWORK_DIR / "agents"
-    if new_cc_root.exists():
-        for agent_dir in sorted(new_cc_root.iterdir()):
-            if not agent_dir.is_dir():
                 continue
             sessions_dir = agent_dir / "sessions"
             sessions_index = sessions_dir / "sessions.json"
@@ -169,7 +116,7 @@ def load_all_sessions() -> list[dict]:
                     "parent_id": None,
                     "slug": None,
                     "agent": agent_dir.name,
-                    "directory": meta.get("directory") or str(CLAUDE_COWORK_DIR / "workspace"),
+                    "directory": meta.get("directory") or str(agent_dir),
                     "title": title,
                     "version": 1,
                     "summary_additions": 0,
@@ -180,6 +127,53 @@ def load_all_sessions() -> list[dict]:
                     "permission": {},
                     "time_created": time_created,
                     "time_updated": time_updated,
+                    "time_compacting": None,
+                    "time_archived": None,
+                })
+
+    # Claude Code sessions — old backward-compat layout: ~/claude-cowork/{agent_id}/.sessions/*.json
+    if CLAUDE_COWORK_DIR.exists():
+        cc_scan: list[tuple[Path, str, Path]] = []
+        for agent_dir in sorted(CLAUDE_COWORK_DIR.iterdir()):
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                continue
+            cc_scan.append((agent_dir / ".sessions", agent_dir.name, agent_dir))
+        cc_scan.append((CLAUDE_COWORK_DIR / ".sessions", "default", CLAUDE_COWORK_DIR))
+
+        for sessions_dir, agent_name, agent_dir in cc_scan:
+            if not sessions_dir.exists():
+                continue
+
+            for session_file in sorted(sessions_dir.iterdir()):
+                if session_file.suffix != ".json":
+                    continue
+                try:
+                    rec = json.loads(session_file.read_text())
+                except Exception:
+                    continue
+
+                session_id = rec.get("session_id", "")
+                if not session_id or session_id in seen_ids:
+                    continue
+                seen_ids.add(session_id)
+
+                sessions.append({
+                    "id": session_id,
+                    "project_id": None,
+                    "parent_id": None,
+                    "slug": None,
+                    "agent": agent_name,
+                    "directory": str(agent_dir),
+                    "title": rec.get("title") or "Untitled Session",
+                    "version": 1,
+                    "summary_additions": 0,
+                    "summary_deletions": 0,
+                    "summary_files": 0,
+                    "summary_diffs": [],
+                    "is_pinned": False,
+                    "permission": {},
+                    "time_created": rec.get("created_at") or iso_now(),
+                    "time_updated": rec.get("updated_at") or iso_now(),
                     "time_compacting": None,
                     "time_archived": None,
                 })
@@ -199,12 +193,10 @@ def find_session_file(session_id: str) -> Path | None:
             if path.exists():
                 return path
 
-    # Claude Code new index format: ~/claude-cowork/agents/*/sessions/{session_id}.jsonl
-    # Check this BEFORE the old .messages.jsonl format — it has more complete data.
-    new_cc_root = CLAUDE_COWORK_DIR / "agents"
-    if new_cc_root.exists():
-        for agent_dir in new_cc_root.iterdir():
-            if not agent_dir.is_dir():
+    # Claude Code current layout: ~/claude-cowork/{agent_id}/sessions/{session_id}.jsonl
+    if CLAUDE_COWORK_DIR.exists():
+        for agent_dir in CLAUDE_COWORK_DIR.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
             path = agent_dir / "sessions" / f"{session_id}.jsonl"
             if path.exists():
@@ -234,11 +226,10 @@ def find_session_key(session_id: str) -> str | None:
                 if isinstance(meta, dict) and meta.get("sessionId") == session_id:
                     return key
 
-    # Claude Code new index format: ~/claude-cowork/agents/*/sessions/sessions.json
-    new_cc_root = CLAUDE_COWORK_DIR / "agents"
-    if new_cc_root.exists():
-        for agent_dir in new_cc_root.iterdir():
-            if not agent_dir.is_dir():
+    # Claude Code current layout: ~/claude-cowork/{agent_id}/sessions/sessions.json
+    if CLAUDE_COWORK_DIR.exists():
+        for agent_dir in CLAUDE_COWORK_DIR.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
             index_path = agent_dir / "sessions" / "sessions.json"
             if not index_path.exists():
@@ -298,17 +289,16 @@ def update_claude_session_directory(session_id: str, directory: str) -> bool:
     """
     Update the workspace directory for a Claude Code session.
 
-    Checks the new index format (~/claude-cowork/agents/*/sessions/sessions.json)
+    Checks the current index format (~/claude-cowork/{agent_id}/sessions/sessions.json)
     first, then falls back to the old .sessions/{session_id}.json format.
     Returns True if the record was found and updated.
     """
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    # New index format
-    new_cc_root = CLAUDE_COWORK_DIR / "agents"
-    if new_cc_root.exists():
-        for agent_dir in new_cc_root.iterdir():
-            if not agent_dir.is_dir():
+    # Current index format: ~/claude-cowork/{agent_id}/sessions/sessions.json
+    if CLAUDE_COWORK_DIR.exists():
+        for agent_dir in CLAUDE_COWORK_DIR.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
             index_path = agent_dir / "sessions" / "sessions.json"
             if not index_path.exists():
@@ -335,8 +325,6 @@ def update_claude_session_directory(session_id: str, directory: str) -> bool:
                 index_path.write_text(
                     json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                # Also try updating the old-format file for backward compat
-                _try_update_old_claude_session(session_id, directory)
                 return True
 
     # Fall back to old-format .sessions/{session_id}.json

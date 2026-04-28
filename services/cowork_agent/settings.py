@@ -71,7 +71,9 @@ import json as _json
 import os as _os
 from pathlib import Path as _Path
 
-CLAUDE_COWORK_DIR: _Path = _Path.home() / "claude-cowork"
+CLAUDE_COWORK_DIR: _Path = _Path(
+    _os.environ.get("CLAUDE_COWORK_ROOT", str(_Path.home() / "claude-cowork"))
+).expanduser()
 
 
 def load_agent_config(agent_name: str) -> dict:

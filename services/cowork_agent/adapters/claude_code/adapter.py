@@ -18,12 +18,25 @@ from services.cowork_agent.helpers import short_id, iso_now
 _native_map: dict[str, str] = {}
 
 
-# ── Pure helpers (no self needed) ─────────────────────────────────────────────
+# ── Path helpers ───────────────────────────────────────────────────────────────
 
 
 def _sessions_dir(agent_id: str) -> Path:
-    """Return the sessions directory for a given agent_id under CLAUDE_COWORK_DIR."""
+    """Sessions live inside the project folder: ~/claude-cowork/{agent_id}/sessions/"""
+    return CLAUDE_COWORK_DIR / agent_id / "sessions"
+
+
+def _legacy_sessions_dir(agent_id: str) -> Path:
+    """Pre-restructure path: ~/claude-cowork/agents/{agent_id}/sessions/"""
     return CLAUDE_COWORK_DIR / "agents" / agent_id / "sessions"
+
+
+def _project_dir(agent_id: str) -> Path:
+    """Project working directory: ~/claude-cowork/{agent_id}/"""
+    return CLAUDE_COWORK_DIR / agent_id
+
+
+# ── Index I/O ──────────────────────────────────────────────────────────────────
 
 
 def _load_index(path: Path) -> dict:
@@ -42,11 +55,27 @@ def _write_index(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
+def _load_index_with_legacy(agent_id: str) -> tuple[dict, Path]:
+    """
+    Load sessions.json, trying the current layout first then the legacy layout.
+    Returns (index_dict, authoritative_path) so callers can write back to the right file.
+    """
+    new_path = _sessions_dir(agent_id) / "sessions.json"
+    if new_path.exists():
+        return _load_index(new_path), new_path
+
+    legacy_path = _legacy_sessions_dir(agent_id) / "sessions.json"
+    if legacy_path.exists():
+        return _load_index(legacy_path), legacy_path
+
+    # Neither exists — return the new path as the target for future writes
+    return {}, new_path
+
+
+# ── Pure helpers ───────────────────────────────────────────────────────────────
+
+
 def _extract_native_session_id(event: dict) -> str | None:
-    """
-    Extract the claude-native session/conversation ID from a result event.
-    Checks both snake_case and camelCase variants to be robust against CLI changes.
-    """
     for key in ("session_id", "sessionId", "conversation_id", "conversationId"):
         value = event.get(key)
         if isinstance(value, str) and value.strip():
@@ -55,31 +84,41 @@ def _extract_native_session_id(event: dict) -> str | None:
 
 
 def make_session_key(agent_id: str) -> str:
-    """Generate a new session key in the format claude:{agent_id}:web:{hex8}."""
     return f"claude:{agent_id}:web:{uuid.uuid4().hex[:8]}"
 
 
+def _agent_id_from_key(session_key: str) -> str:
+    parts = session_key.split(":")
+    return parts[1] if len(parts) >= 2 else "default"
+
+
 def find_session_id_by_key(session_key: str) -> str | None:
-    """Read sessions.json for the agent derived from session_key and return the sessionId."""
     agent_id = _agent_id_from_key(session_key)
-    index = _load_index(_sessions_dir(agent_id) / "sessions.json")
+    index, _ = _load_index_with_legacy(agent_id)
     meta = index.get(session_key)
     return meta.get("sessionId") if meta else None
 
 
 def get_native_session_id(session_key: str) -> str | None:
-    """Return the native Claude session ID for a key — cache first, then disk."""
     cached = _native_map.get(session_key)
     if cached:
         return cached
     agent_id = _agent_id_from_key(session_key)
-    meta = _load_index(_sessions_dir(agent_id) / "sessions.json").get(session_key)
+    index, _ = _load_index_with_legacy(agent_id)
+    meta = index.get(session_key)
     if meta:
         native = meta.get("nativeSessionId")
         if native:
             _native_map[session_key] = native
             return native
     return None
+
+
+def get_session_directory(session_key: str) -> str | None:
+    agent_id = _agent_id_from_key(session_key)
+    index, _ = _load_index_with_legacy(agent_id)
+    meta = index.get(session_key)
+    return meta.get("directory") if meta else None
 
 
 def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None:
@@ -94,7 +133,7 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
     index = _load_index(index_path)
     index[session_key] = {
         "sessionId": session_id,
-        "nativeSessionId": "",  # filled in once the result event arrives
+        "nativeSessionId": "",
         "directory": cwd,
         "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
     }
@@ -110,8 +149,8 @@ def _append_exchange(
     model_id: str,
 ) -> None:
     """
-    Append a user+assistant turn to {session_id}.jsonl in OpenClaw-compatible format.
-    Also bumps updatedAt in sessions.json so the session list stays sorted.
+    Append a user+assistant turn to {session_id}.jsonl inside the project's
+    sessions directory. Also bumps updatedAt in sessions.json.
     """
     agent_id = _agent_id_from_key(session_key)
     sd = _sessions_dir(agent_id)
@@ -150,40 +189,51 @@ def _append_exchange(
             }) + "\n"
         )
 
-    # Bump updatedAt in the index
-    index_path = sd / "sessions.json"
-    index = _load_index(index_path)
+    # Bump updatedAt in the index (using whichever path the index is stored in)
+    index, index_path = _load_index_with_legacy(agent_id)
     if session_key in index:
         index[session_key]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
         _write_index(index_path, index)
 
 
 def find_session_key_for_session_id(session_id: str) -> str | None:
-    """Search all agents' sessions.json files and return the session_key for session_id."""
-    agents_root = CLAUDE_COWORK_DIR / "agents"
-    if not agents_root.exists():
+    """
+    Search all projects' sessions.json files for a matching session_id.
+    Checks the current layout (~/claude-cowork/{id}/sessions/) first,
+    then falls back to the legacy layout (~/claude-cowork/agents/{id}/sessions/).
+    """
+    if not CLAUDE_COWORK_DIR.exists():
         return None
-    for agent_dir in agents_root.iterdir():
-        if not agent_dir.is_dir():
-            continue
-        index_path = agent_dir / "sessions" / "sessions.json"
-        if not index_path.exists():
-            continue
-        index = _load_index(index_path)
-        for key, meta in index.items():
-            if isinstance(meta, dict) and meta.get("sessionId") == session_id:
-                # Warm the native cache while we're here
-                native = meta.get("nativeSessionId")
-                if native:
-                    _native_map[key] = native
-                return key
+
+    def _search_dir(root: Path, skip_names: set) -> str | None:
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith(".") or entry.name in skip_names:
+                continue
+            index_path = entry / "sessions" / "sessions.json"
+            if not index_path.exists():
+                continue
+            index = _load_index(index_path)
+            for key, meta in index.items():
+                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
+                    native = meta.get("nativeSessionId")
+                    if native:
+                        _native_map[key] = native
+                    return key
+        return None
+
+    # Current layout: project dirs directly under claude-cowork (skip "agents" legacy dir)
+    result = _search_dir(CLAUDE_COWORK_DIR, skip_names={"agents"})
+    if result:
+        return result
+
+    # Legacy layout: ~/claude-cowork/agents/{agent_id}/sessions/
+    legacy_root = CLAUDE_COWORK_DIR / "agents"
+    if legacy_root.exists():
+        result = _search_dir(legacy_root, skip_names=set())
+        if result:
+            return result
+
     return None
-
-
-def _agent_id_from_key(session_key: str) -> str:
-    """Extract agent_id from 'claude:{agent_id}:web:{random}' format."""
-    parts = session_key.split(":")
-    return parts[1] if len(parts) >= 2 else "default"
 
 
 # ── Adapter class ──────────────────────────────────────────────────────────────
@@ -198,8 +248,19 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.commands = self.load_commands()
+        raw_root = self.config.get("cowork_root", str(CLAUDE_COWORK_DIR))
+        self.cowork_root = Path(raw_root).expanduser().resolve()
 
-    # ── Internal helpers ───────────────────────────────────────────────────────
+    def _resolve_cwd(self, agent_id: str | None) -> str:
+        """
+        Compute the working directory for a Claude subprocess.
+        Named agents run inside their project folder; 'default'/None use cowork_root.
+        """
+        if agent_id and agent_id not in ("default", ""):
+            project = self.cowork_root / agent_id
+            project.mkdir(parents=True, exist_ok=True)
+            return str(project)
+        return str(self.cowork_root)
 
     def _build_cmd(
         self,
@@ -207,16 +268,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         native_session_id: str | None,
         stream: bool,
         agent_type: str | None = None,
+        cwd: str | None = None,
     ) -> list[str]:
         cli = self.config.get("cli_path") or "claude"
-        workspace = self.config.get("workspace_root") or "/home/coder"
+        workspace = cwd or str(self.cowork_root)
         fmt = "stream-json" if stream else "json"
 
         skill_prefix = None
         if agent_type:
             skills = self.commands.get("skills", {})
-            normalised = agent_type.lower().replace("_", "-")
-            skill_prefix = skills.get(normalised)
+            skill_prefix = skills.get(agent_type.lower().replace("_", "-"))
 
         prompt = f"{skill_prefix} {question}" if skill_prefix else question
 
@@ -236,14 +297,12 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
-        # Let the CLI use its own credentials file — don't inject tokens.
-        # Strip placeholder values injected by the workspace that would confuse Claude.
         for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if env.get(key) in (None, "", "sk-ant-none"):
                 env.pop(key, None)
         return env
 
-    # ── Convenience wrappers that delegate to module-level functions ───────────
+    # ── Convenience wrappers ───────────────────────────────────────────────────
 
     def make_session_key(self, agent_id: str) -> str:
         return make_session_key(agent_id)
@@ -260,6 +319,9 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
     def find_session_key_for_session_id(self, session_id: str) -> str | None:
         return find_session_key_for_session_id(session_id)
 
+    def get_session_directory(self, session_key: str) -> str | None:
+        return get_session_directory(session_key)
+
     # ── BaseAgentAdapter implementation ───────────────────────────────────────
 
     async def run(
@@ -269,14 +331,17 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         agent_type: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        cmd = self._build_cmd(question, session_id, stream=False, agent_type=agent_type)
-        timeout = self.config.get("timeout", 120)
+        agent_id = kwargs.get("agent_id")
+        cwd = self._resolve_cwd(agent_id)
+        cmd = self._build_cmd(question, session_id, stream=False, agent_type=agent_type, cwd=cwd)
+        timeout = self.config.get("timeout", 300)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._subprocess_env(),
+            cwd=cwd,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -308,33 +373,58 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
     ) -> AsyncIterator[dict[str, Any]]:
         from services.cowork_agent.adapters.claude_code.streaming import parse_stream_line
 
-        # Named kwargs injected by chat.py for session tracking
-        sk: str | None = kwargs.get("session_key")
-        our_session_id: str | None = kwargs.get("our_session_id")
+        our_session_id: str | None = kwargs.get("our_session_id") or session_id
+        is_new: bool = kwargs.get("is_new_session", session_id is None)
         agent_id: str | None = kwargs.get("agent_id")
-        question_text: str = question  # use the positional arg directly
-        cwd: str | None = kwargs.get("cwd")
 
-        # Determine which native_session_id to resume with
-        # (session_id positional arg is the native_session_id for existing sessions)
-        native_resume_id = session_id
+        # Resolve session_key: generate for new sessions, look up for existing ones.
+        sk: str | None = kwargs.get("session_key")
+        if not sk:
+            if is_new:
+                sk = make_session_key(agent_id or "default")
+            elif our_session_id:
+                sk = find_session_key_for_session_id(our_session_id)
 
-        # Write the preliminary index entry if we have a session_key
-        if sk and our_session_id:
-            effective_cwd = cwd or self.config.get("workspace_root") or "/home/coder"
+        if not agent_id and sk:
+            agent_id = _agent_id_from_key(sk)
+
+        # For existing sessions, use the stored directory so user project selections are preserved.
+        # For new sessions, derive from agent_id.
+        if not is_new and sk:
+            stored_dir = get_session_directory(sk)
+            effective_cwd = stored_dir if stored_dir and stored_dir not in (".", "") else self._resolve_cwd(agent_id)
+        else:
+            effective_cwd = self._resolve_cwd(agent_id)
+
+        # Write preliminary sessions.json entry only for new sessions.
+        # Calling it for existing sessions would wipe nativeSessionId and the stored directory.
+        if is_new and sk and our_session_id:
             write_preliminary_entry(sk, our_session_id, effective_cwd)
 
-        cmd = self._build_cmd(question_text, native_resume_id, stream=True, agent_type=agent_type)
+        # Resolve native --resume ID for existing sessions.
+        native_resume_id: str | None = None
+        if not is_new:
+            if sk:
+                native_resume_id = get_native_session_id(sk)
+            if not native_resume_id and our_session_id:
+                from services.cowork_agent.claude_sessions import load_session
+                rec = load_session(our_session_id)
+                if rec:
+                    native_resume_id = rec.get("native_session_id")
+
+        cmd = self._build_cmd(question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._subprocess_env(),
+            cwd=effective_cwd,
         )
 
         native_session_id: str | None = None
         response_parts: list[str] = []
+        result_text: str = ""  # fallback: text from the result event
         usage: dict = {}
         model_id = ""
 
@@ -347,6 +437,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 native_session_id = _extract_native_session_id(event)
                 usage = event.get("usage") or {}
                 model_id = event.get("model", "")
+                result_text = (event.get("result") or "").strip()
                 continue
 
             if event.get("type") == "token":
@@ -356,12 +447,17 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
         await proc.wait()
 
-        # Persist the exchange and update the index if we have session tracking info
+        # Fall back to result event text when no token events were captured.
+        # This happens when Claude completes a task via tool calls only, with no
+        # streaming text blocks — the final summary lands only in the result event.
+        if not response_parts and result_text:
+            response_parts.append(result_text)
+            yield {"type": "token", "token": result_text}
+
         if sk and our_session_id and response_parts:
             full_response = "".join(response_parts)
-            _append_exchange(our_session_id, sk, question_text, full_response, usage, model_id)
+            _append_exchange(our_session_id, sk, question, full_response, usage, model_id)
 
-            # Update nativeSessionId in the index
             if native_session_id:
                 agent_id_for_key = _agent_id_from_key(sk)
                 sd = _sessions_dir(agent_id_for_key)
