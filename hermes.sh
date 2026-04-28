@@ -340,42 +340,29 @@ configure_hermes() {
              "$HERMES_DIR/cron" "$HERMES_DIR/logs" "$HERMES_DIR/hooks"
 
     # ── Model ──────────────────────────────────────────────────────────────────
-    # HERMES_PROVIDER (from Coder form) selects which key to use when multiple are set.
-    # Normalise: "openai" → "custom" (Hermes has no standalone openai provider).
-    local _provider="${HERMES_PROVIDER:-}"
-    [ "$_provider" = "openai" ] && _provider="custom"
-
+    # Provider is determined by whichever API key is present.
+    # Anthropic wins if multiple are set.
     _configure_model() {
         local provider="$1" key_var="$2" default_model="$3" base_url="$4"
         local api_key="${!key_var:-}"
-        [ -z "$api_key" ] && { log_warn "Provider $provider selected but $key_var is not set — skipping"; return 1; }
-        local model="${HERMES_MODEL:-$default_model}"
-        log "Configuring model: $provider / $model"
+        [ -z "$api_key" ] && return 1
+        log "Configuring model: $provider / $default_model"
         hermes config set "$key_var" "$api_key"
         hermes config set model.provider "$provider"
-        hermes config set model.default "$model"
+        hermes config set model.default "$default_model"
         [ -n "$base_url" ] && hermes config set model.base_url "$base_url"
-        log_success "Model: $provider / $model"
+        log_success "Model: $provider / $default_model"
     }
 
-    case "$_provider" in
-        anthropic)
-            _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com ;;
-        custom)
-            _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1 ;;
-        openrouter)
-            _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 "" ;;
-        *)
-            # Auto-detect from whichever key is set (anthropic wins if multiple)
-            if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-                _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
-            elif [ -n "${OPENAI_API_KEY:-}" ]; then
-                _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
-            elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
-                _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
-            fi
-            ;;
-    esac
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+    elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
+    else
+        log_warn "No model provider key — model not configured"
+    fi
 
     # ── Channels ───────────────────────────────────────────────────────────────
     # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
