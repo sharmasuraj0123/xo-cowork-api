@@ -1,0 +1,6 @@
+{
+  "cli_path_env": "OPENCLAW_CLI_PATH",
+  "gateway_token_env": "OPENCLAW_GATEWAY_TOKEN",
+  "anthropic_api_key_env": "ANTHROPIC_API_KEY",
+  "timeout": 120
+}

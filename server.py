@@ -392,9 +392,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -475,10 +481,12 @@ async def delete_session(project_id: str):
 async def gateway_restart():
     """Restart the OpenClaw gateway."""
     import subprocess
-    script = os.path.expanduser("~/xo-cowork-api/openclaw.sh")
+    script = Path(os.path.expanduser("~/xo-cowork-api/openclaw.sh")).resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="Gateway script not found")
     try:
         result = subprocess.run(
-            [script, "restart"],
+            [str(script), "restart"],
             capture_output=True, text=True, timeout=30
         )
         return {

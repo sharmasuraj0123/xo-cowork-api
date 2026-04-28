@@ -12,12 +12,14 @@ so adding a provider (or swapping agents) is a config change.
 """
 
 import asyncio
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.settings import AGENTS_DIR, OPENCLAW_MODEL_CAPABILITIES
+from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_MODEL_CAPABILITIES, load_agent_config
 from services.cowork_agent.agent_registry import get_default_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
 from services.cowork_agent.openclaw_env import upsert_env_entry
@@ -200,3 +202,33 @@ def get_openclaw_config():
     if not cfg:
         return JSONResponse(status_code=404, content={"detail": f"{_AGENT.config_file.name} not found"})
     return _mask_sensitive(cfg)
+
+
+@router.get("/api/config/workspace")
+def get_workspace_config():
+    """
+    Return workspace root paths for each agent backend, sourced entirely from
+    their config files — no paths are hardcoded here.
+
+    Response shape:
+      {
+        "roots": { "openclaw": "/home/coder/.openclaw/workspace", "claude_code": "/home/coder/claude-cowork" },
+        "default": "claude_code"   // active backend (AGENT_NAME env or manifest default)
+      }
+    """
+    roots: dict[str, str] = {}
+
+    # OpenClaw workspace comes from the active manifest's workspace_dir.
+    if _AGENT.workspace_dir:
+        roots[_AGENT.name] = str(_AGENT.workspace_dir)
+
+    # Claude Code workspace comes from config/agents/claude_code/settings.json → cowork_root.
+    try:
+        cc_cfg = load_agent_config("claude_code")
+        raw_root = cc_cfg.get("cowork_root") or str(CLAUDE_COWORK_DIR)
+        roots["claude_code"] = str(Path(raw_root).expanduser().resolve())
+    except FileNotFoundError:
+        roots["claude_code"] = str(CLAUDE_COWORK_DIR)
+
+    default_backend = os.getenv("AGENT_NAME", _AGENT.name)
+    return {"roots": roots, "default": default_backend}

@@ -67,6 +67,9 @@ def openclaw_agent_id_from_prompt_body(body: dict) -> str:
     return "main"
 
 
+# DEPRECATED: OpenClaw-specific parsing logic has moved to
+# services/cowork_agent/adapters/openclaw/streaming.py.
+# This function is kept here so existing callers continue to work.
 async def create_new_session(text: str, session_key: str) -> tuple[str, str, str]:
     """
     Create a new OpenClaw session by sending the first message.
@@ -127,6 +130,7 @@ async def create_new_session(text: str, session_key: str) -> tuple[str, str, str
     return session_key, session_id, response_text
 
 
+# DEPRECATED: moved to services/cowork_agent/adapters/openclaw/streaming.py.
 async def stream_openclaw_to_sse(stream_id: str):
     """
     Sends the user message to OpenClaw's OpenAI-compatible API using the
@@ -213,6 +217,7 @@ async def stream_openclaw_to_sse(stream_id: str):
     yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'finish_reason': 'stop', 'session_id': session_id})}\n\n"
 
 
+# DEPRECATED: moved to services/cowork_agent/adapters/openclaw/streaming.py.
 async def emit_prefetched_sse(stream_id: str):
     """
     Await the background create_new_session task, emitting keepalives every
