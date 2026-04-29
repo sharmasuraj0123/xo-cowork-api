@@ -25,7 +25,7 @@ from services.cowork_agent.chat_state import active_streams
 # double-mount) gets a graceful done event rather than "Stream not found".
 # Maps stream_id -> {session_id, started_at}
 _recently_started: dict[str, dict] = {}
-_RECENTLY_STARTED_TTL = 30  # seconds
+_RECENTLY_STARTED_TTL = 600  # seconds — must outlast SSE_HEARTBEAT_TIMEOUT (45s) + full reconnect backoff
 from services.cowork_agent.sessions_io import find_session_key
 from services.cowork_agent.streaming import (
     create_new_session,
@@ -68,8 +68,8 @@ async def _dispatcher_sse(stream_info: dict):
       event: agent-error   data: {"error_message":"..."}
       event: done          data: {"session_id":"..."}
 
-    During long tool-call runs, emits `: keepalive` SSE comments every
-    20 s so proxies/browsers don't close an idle connection.
+    During long tool-call runs, emits `event: heartbeat` named events every
+    20 s so the frontend's heartbeat timer is reset and idle connections stay open.
 
     Keepalives use an asyncio.Queue producer-task pattern — NOT
     asyncio.wait_for(__anext__) — because cancelling __anext__ on an
@@ -121,7 +121,7 @@ async def _dispatcher_sse(stream_info: dict):
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_INTERVAL)
             except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
+                yield "event: heartbeat\ndata: {}\n\n"
                 continue
 
             if item is _SENTINEL:
