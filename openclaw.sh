@@ -506,7 +506,7 @@ install_cli() {
     export OPENCLAW_NO_PROMPT=1
     export OPENCLAW_DISABLE_BONJOUR=1
 
-    if curl -fsSL https://openclaw.ai/install.sh | bash; then
+    if curl -fsSL https://openclaw.ai/install.sh | bash -s -- --install-method npm --version 2026.4.9; then
         log_success "OpenClaw CLI installed"
     else
         log_error "Failed to install OpenClaw CLI"
