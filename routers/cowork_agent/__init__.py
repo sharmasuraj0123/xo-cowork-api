@@ -15,11 +15,16 @@ from .chat import router as chat_router
 from .config import router as config_router
 from .files import router as files_router
 from .fts import router as fts_router
+from .gdrive import router as gdrive_router
+from .github import router as github_router
+from .manus import router as manus_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
+from .onedrive import router as onedrive_router
 from .secrets import router as secrets_router
 from .sessions import router as sessions_router
 from .usage import router as usage_router
+from .vercel import router as vercel_router
 from .workspace_memory import router as workspace_memory_router
 
 all_routers: list[APIRouter] = [
@@ -35,4 +40,9 @@ all_routers: list[APIRouter] = [
     fts_router,
     misc_router,
     onboarding_router,
+    gdrive_router,
+    onedrive_router,
+    github_router,
+    vercel_router,
+    manus_router,
 ]

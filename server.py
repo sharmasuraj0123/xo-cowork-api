@@ -390,6 +390,14 @@ async def lifespan(app: FastAPI):
             "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
         )
 
+    # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
+    try:
+        from services.cowork_agent.gdrive_rclone import ensure_rclone_running
+        await ensure_rclone_running()
+        print("   rclone daemon: started for gdrive/onedrive connectors")
+    except Exception as exc:
+        print(f"⚠️ rclone startup skipped (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
