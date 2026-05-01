@@ -762,5 +762,6 @@ if __name__ == "__main__":
         "server:app",
         host=host,
         port=port,
-        reload=True
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parent)]
     )
