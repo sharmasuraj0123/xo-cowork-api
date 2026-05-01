@@ -1,19 +1,13 @@
 """
-Vercel connector — OAuth 2.1 with PKCE (no env vars).
+Vercel connector — supports both API Token and OAuth 2.1 (Authorization Code + PKCE).
 
-Uses Vercel's dynamic client registration + PKCE flow:
-  1. Register a client dynamically (one-time, stored in mcp-tokens.json)
-  2. Generate PKCE code_verifier + S256 challenge
-  3. Start a local callback server on a free port
-  4. Open browser to Vercel's authorization endpoint
-  5. Receive callback with auth code
-  6. Exchange code for access_token + refresh_token
-  7. Store tokens in mcp-tokens.json
+API-token flow: user generates a token at https://vercel.com/account/tokens and pastes it.
+OAuth 2.1 flow: initiated via /api/connectors/vercel/oauth/start; Vercel redirects back
+  to /callback where the authorization code is exchanged for tokens (with PKCE).
 
-No client_secret needed. No environment variables.
+Token file: <project_root>/mcp-tokens.json  (.gitignored)
 """
 
-import asyncio
 import base64
 import hashlib
 import json
@@ -21,41 +15,40 @@ import logging
 import os
 import secrets
 import time
-import uuid
-import webbrowser
-from dataclasses import dataclass, field
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from threading import Thread
 from typing import Any, Literal
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode
 
 import httpx
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths & URLs
-# ---------------------------------------------------------------------------
-
 _PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
 
-VERCEL_AUTHORIZE_URL = "https://vercel.com/oauth/authorize"
-VERCEL_TOKEN_URL = "https://vercel.com/api/login/oauth/token"
-VERCEL_REGISTER_URL = "https://vercel.com/api/login/oauth/register"
-VERCEL_REVOKE_URL = "https://vercel.com/api/login/oauth/token/revoke"
 VERCEL_USER_URL = "https://api.vercel.com/v2/user"
+VERCEL_OAUTH_AUTHORIZE_URL = "https://vercel.com/oauth/authorize"
+VERCEL_OAUTH_TOKEN_URL = "https://api.vercel.com/login/oauth/token"
 
-SESSION_TTL = 600   # 10 min
-OAUTH_TIMEOUT = 300  # 5 min
+# In-memory store for pending OAuth flows: state → {code_verifier, redirect_uri}
+_pending_oauth: dict[str, dict[str, str]] = {}
 
-# Fixed callback port so remote dev environments (Coder, Codespaces, etc.)
-# can set up a stable port-forward. Override with VERCEL_CALLBACK_PORT.
-CALLBACK_PORT = int(os.environ.get("VERCEL_CALLBACK_PORT", "53683"))
 
 # ---------------------------------------------------------------------------
-# Token storage (shared with github_connector via mcp-tokens.json)
+# PKCE helpers
+# ---------------------------------------------------------------------------
+
+def _generate_code_verifier() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def _generate_code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# Token storage
 # ---------------------------------------------------------------------------
 
 def _read_tokens() -> dict[str, Any]:
@@ -75,167 +68,285 @@ def _write_tokens(data: dict[str, Any]) -> None:
     )
 
 
-def get_vercel_token() -> dict[str, Any] | None:
-    """Return the stored Vercel token entry, or None."""
-    return _read_tokens().get("vercel") or None
+def get_oauth_client() -> dict[str, Any] | None:
+    """Return the registered OAuth client credentials from mcp-tokens.json, or None."""
+    return _read_tokens().get("vercel_client")
 
 
-def save_vercel_token(token_data: dict[str, Any]) -> None:
-    """Save Vercel OAuth tokens to mcp-tokens.json."""
+def get_vercel_token() -> str | None:
+    """Return the stored access_token (API token or OAuth), or None."""
+    entry = _read_tokens().get("vercel")
+    if not entry:
+        return None
+    return entry.get("access_token") or None
+
+
+def save_vercel_token(token: str, username: str = "", name: str = "") -> None:
+    """Save a manually-provided API token (no expiry, no refresh_token)."""
     data = _read_tokens()
-    data["vercel"] = token_data
+    data["vercel"] = {
+        "access_token": token,
+        "token_type": "Bearer",
+        "auth_method": "api_token",
+        "username": username,
+        "name": name,
+    }
     _write_tokens(data)
-    log.info("Vercel token saved to %s", TOKEN_FILE)
+    log.info("Vercel API token saved to %s", TOKEN_FILE)
+
+
+def save_oauth_tokens(
+    access_token: str,
+    refresh_token: str | None,
+    expires_in: int,
+    username: str = "",
+    name: str = "",
+) -> None:
+    """Persist OAuth 2.1 access + refresh tokens."""
+    data = _read_tokens()
+    data["vercel"] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": int(time.time()) + expires_in,
+        "token_type": "Bearer",
+        "auth_method": "oauth",
+        "username": username,
+        "name": name,
+    }
+    _write_tokens(data)
+    log.info("Vercel OAuth tokens saved to %s", TOKEN_FILE)
 
 
 def delete_vercel_token() -> None:
-    """Remove the Vercel entry from mcp-tokens.json."""
+    """Remove the user's Vercel tokens. Preserves the vercel_client OAuth registration."""
     data = _read_tokens()
     data.pop("vercel", None)
-    # Also remove cached client registration
-    data.pop("vercel_client", None)
     _write_tokens(data)
     log.info("Vercel token removed from %s", TOKEN_FILE)
 
 
-def _get_or_register_client() -> dict[str, str]:
-    """Get or create a dynamic OAuth client registration."""
+# ---------------------------------------------------------------------------
+# OAuth 2.1 Authorization Code + PKCE flow
+# ---------------------------------------------------------------------------
+
+def start_oauth_flow(redirect_uri: str) -> dict[str, str]:
+    """
+    Create a new OAuth 2.1 PKCE authorization request.
+
+    Returns {"auth_url": "...", "state": "..."}.
+    The caller must send the user to auth_url and later call
+    exchange_code_for_tokens() with the returned code + state.
+    """
+    client = get_oauth_client()
+    if not client:
+        raise ValueError("No Vercel OAuth client registered in mcp-tokens.json.")
+
+    state = secrets.token_urlsafe(32)
+    code_verifier = _generate_code_verifier()
+    code_challenge = _generate_code_challenge(code_verifier)
+
+    _pending_oauth[state] = {
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+    }
+
+    params = {
+        "client_id": client["client_id"],
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "scope": "openid email profile",
+    }
+    auth_url = VERCEL_OAUTH_AUTHORIZE_URL + "?" + urlencode(params)
+    return {"auth_url": auth_url, "state": state}
+
+
+async def exchange_code_for_tokens(code: str, state: str) -> dict[str, Any]:
+    """
+    Exchange an authorization code for access + refresh tokens (PKCE).
+
+    Consumes the pending state entry so each code can only be used once.
+    On success, persists tokens via save_oauth_tokens() and returns
+    {"valid": True, "status": "connected", "username": ..., "name": ..., "auth_method": "oauth"}.
+    On failure, returns {"valid": False, "error": "..."}.
+    """
+    pending = _pending_oauth.pop(state, None)
+    if pending is None:
+        return {"valid": False, "error": "Invalid or expired OAuth state parameter."}
+
+    client = get_oauth_client()
+    if not client:
+        return {"valid": False, "error": "No Vercel OAuth client registered."}
+
+    form_data = {
+        "client_id": client["client_id"],
+        "code": code,
+        "redirect_uri": pending["redirect_uri"],
+        "code_verifier": pending["code_verifier"],
+        "grant_type": "authorization_code",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.post(
+                VERCEL_OAUTH_TOKEN_URL,
+                data=form_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+        if resp.status_code != 200:
+            try:
+                body = resp.json()
+                vercel_error = body.get("error_description") or body.get("error") or resp.text
+            except Exception:
+                vercel_error = resp.text
+            log.error("Vercel token exchange failed %s: %s", resp.status_code, vercel_error)
+            return {
+                "valid": False,
+                "error": f"Token exchange failed: {vercel_error}",
+            }
+
+        tokens = resp.json()
+        access_token = tokens.get("access_token")
+        if not access_token:
+            return {"valid": False, "error": "No access_token in Vercel token response."}
+
+        user_info = await validate_token(access_token)
+        if not user_info.get("valid"):
+            # Exchange succeeded so the token IS valid for MCP tool calls.
+            # /v2/user may reject it if the scope doesn't cover user-info reads.
+            # Save and connect with empty display name rather than failing the flow.
+            log.warning(
+                "Vercel /v2/user rejected the OAuth token (%s) — saving anyway",
+                user_info.get("error"),
+            )
+            save_oauth_tokens(
+                access_token=access_token,
+                refresh_token=tokens.get("refresh_token"),
+                expires_in=tokens.get("expires_in", 3600),
+                username="",
+                name="",
+            )
+            return {
+                "valid": True,
+                "status": "connected",
+                "username": "",
+                "name": "",
+                "auth_method": "oauth",
+            }
+
+        save_oauth_tokens(
+            access_token=access_token,
+            refresh_token=tokens.get("refresh_token"),
+            expires_in=tokens.get("expires_in", 3600),
+            username=user_info.get("username", ""),
+            name=user_info.get("name", ""),
+        )
+        return {
+            "valid": True,
+            "status": "connected",
+            "username": user_info.get("username", ""),
+            "name": user_info.get("name", ""),
+            "auth_method": "oauth",
+        }
+
+    except httpx.TimeoutException:
+        return {"valid": False, "error": "Timed out during token exchange with Vercel."}
+    except Exception as exc:
+        return {"valid": False, "error": f"Token exchange error: {exc}"}
+
+
+async def refresh_oauth_token() -> str | None:
+    """
+    Use the stored refresh_token to obtain a new access_token.
+
+    Updates mcp-tokens.json in-place on success.
+    Returns the new access_token, or None if refresh is not possible.
+    """
     data = _read_tokens()
-    client = data.get("vercel_client")
-    if client and client.get("client_id"):
-        return client
+    entry = data.get("vercel", {})
+    refresh_token = entry.get("refresh_token")
+    if not refresh_token:
+        return None
 
-    # Register a new client dynamically
-    log.info("Registering new OAuth client with Vercel...")
-    resp = httpx.post(VERCEL_REGISTER_URL, json={
-        "client_name": "xo-cowork",
-        "redirect_uris": ["http://127.0.0.1:0/callback"],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    }, timeout=15)
+    client = get_oauth_client()
+    if not client:
+        return None
 
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"Client registration failed: {resp.status_code} {resp.text}")
+    form_data = {
+        "client_id": client["client_id"],
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
 
-    client = resp.json()
-    data["vercel_client"] = client
-    _write_tokens(data)
-    log.info("Registered Vercel OAuth client: %s", client.get("client_id"))
-    return client
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.post(
+                VERCEL_OAUTH_TOKEN_URL,
+                data=form_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
 
+        if resp.status_code != 200:
+            log.warning("Vercel OAuth refresh failed: HTTP %s", resp.status_code)
+            return None
 
-# ---------------------------------------------------------------------------
-# PKCE helpers
-# ---------------------------------------------------------------------------
+        tokens = resp.json()
+        new_access_token = tokens.get("access_token")
+        if not new_access_token:
+            return None
 
-def _generate_pkce() -> tuple[str, str]:
-    """Generate PKCE code_verifier and code_challenge (S256)."""
-    code_verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return code_verifier, code_challenge
+        entry["access_token"] = new_access_token
+        entry["expires_at"] = int(time.time()) + tokens.get("expires_in", 3600)
+        if tokens.get("refresh_token"):
+            entry["refresh_token"] = tokens["refresh_token"]
+        data["vercel"] = entry
+        _write_tokens(data)
+        log.info("Vercel OAuth token refreshed successfully")
+        return new_access_token
 
-
-# ---------------------------------------------------------------------------
-# Local callback server
-# ---------------------------------------------------------------------------
-
-class _CallbackHandler(BaseHTTPRequestHandler):
-    """Handles the OAuth redirect callback."""
-
-    auth_code: str | None = None
-    error: str | None = None
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-
-        if "code" in params:
-            _CallbackHandler.auth_code = params["code"][0]
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""
-                <html><body style="font-family:system-ui;display:flex;align-items:center;
-                justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff;">
-                <div style="text-align:center">
-                <h1 style="color:#00dc82">&#10003; Connected to Vercel!</h1>
-                <p style="color:#888">You can close this tab and return to xo-cowork.</p>
-                </div></body></html>
-            """)
-        elif "error" in params:
-            _CallbackHandler.error = params.get("error_description", params["error"])[0]
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(f"""
-                <html><body style="font-family:system-ui;display:flex;align-items:center;
-                justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff;">
-                <div style="text-align:center">
-                <h1 style="color:#ef4444">Authorization Failed</h1>
-                <p style="color:#888">{_CallbackHandler.error}</p>
-                </div></body></html>
-            """.encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        # Suppress default HTTP server logging
-        pass
+    except Exception as exc:
+        log.warning("Vercel OAuth token refresh error: %s", exc)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Session model
-# ---------------------------------------------------------------------------
+async def get_valid_access_token() -> str | None:
+    """
+    Return a valid access token, auto-refreshing OAuth tokens that are near expiry.
 
-SessionStatus = Literal["pending", "awaiting_oauth", "completed", "failed", "cancelled"]
+    For API tokens (no expires_at) the stored token is returned as-is.
+    Returns None if no token is stored or refresh fails.
+    """
+    data = _read_tokens()
+    entry = data.get("vercel", {})
+    access_token = entry.get("access_token")
+    if not access_token:
+        return None
 
+    expires_at = entry.get("expires_at", 0)
+    if expires_at and time.time() >= expires_at - 60:
+        log.info("Vercel OAuth token near expiry, attempting refresh")
+        refreshed = await refresh_oauth_token()
+        return refreshed
 
-@dataclass
-class VercelSession:
-    session_id: str
-    status: SessionStatus = "pending"
-    auth_url: str | None = None
-    error: str | None = None
-    created_at: float = field(default_factory=time.time)
-    task: asyncio.Task | None = field(default=None, repr=False)
-
-
-_sessions: dict[str, VercelSession] = {}
-
-
-def get_session(session_id: str) -> VercelSession | None:
-    return _sessions.get(session_id)
-
-
-def _active_oauth_session() -> VercelSession | None:
-    for s in _sessions.values():
-        if s.status == "awaiting_oauth":
-            return s
-    return None
-
-
-def _expire_sessions() -> None:
-    now = time.time()
-    for sid in [k for k, v in _sessions.items() if now - v.created_at > SESSION_TTL]:
-        s = _sessions.pop(sid)
-        if s.task and not s.task.done():
-            s.task.cancel()
+    return access_token
 
 
 # ---------------------------------------------------------------------------
 # Token validation
 # ---------------------------------------------------------------------------
 
-async def validate_vercel_token(access_token: str) -> dict[str, Any]:
-    """Validate a Vercel token by calling /v2/user."""
+VercelStatus = Literal["connected", "needs_auth", "failed"]
+
+
+async def validate_token(token: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 VERCEL_USER_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
+                headers={"Authorization": f"Bearer {token}"},
             )
 
         if resp.status_code == 200:
@@ -249,210 +360,40 @@ async def validate_vercel_token(access_token: str) -> dict[str, Any]:
                 "avatar_url": user.get("avatar") or "",
             }
         elif resp.status_code in (401, 403):
-            return {
-                "valid": False,
-                "status": "needs_auth",
-                "error": "Token is invalid or revoked.",
-            }
-        elif resp.status_code == 404:
-            # MCP-scoped OAuth tokens may not have REST API access.
-            # Treat 404 as "token works but can't access /v2/user".
-            return {
-                "valid": True,
-                "status": "connected",
-                "username": "",
-                "name": "",
-                "email": "",
-                "avatar_url": "",
-            }
+            return {"valid": False, "status": "needs_auth", "error": "Token is invalid or revoked."}
         else:
-            return {
-                "valid": False,
-                "status": "failed",
-                "error": f"Vercel returned HTTP {resp.status_code}.",
-            }
+            return {"valid": False, "status": "failed", "error": f"Vercel returned HTTP {resp.status_code}."}
+
+    except httpx.TimeoutException:
+        return {"valid": False, "status": "failed", "error": "Timed out connecting to Vercel."}
     except Exception as exc:
-        return {
-            "valid": False,
-            "status": "failed",
-            "error": f"Could not connect to Vercel: {exc}",
-        }
+        return {"valid": False, "status": "failed", "error": f"Could not connect to Vercel: {exc}"}
 
 
 async def get_status() -> dict[str, Any]:
-    """Compute the current Vercel connector status."""
-    entry = get_vercel_token()
-    if not entry:
-        return {"status": "needs_auth"}
+    data = _read_tokens()
+    entry = data.get("vercel", {})
 
-    access_token = entry.get("access_token")
-    if not access_token:
-        return {"status": "needs_auth"}
-
-    result = await validate_vercel_token(access_token)
-    # Merge stored metadata (username, name) if API didn't return them
-    if result.get("valid") and not result.get("username"):
-        result["username"] = entry.get("username", "")
-        result["name"] = entry.get("name", "")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# OAuth flow
-# ---------------------------------------------------------------------------
-
-async def _run_oauth_flow(session: VercelSession) -> None:
-    """Run the full OAuth 2.1 + PKCE flow."""
-    server: HTTPServer | None = None
-    try:
-        # ── 1. Get or register client ────────────────────────────────
-        client_info = _get_or_register_client()
-        client_id = client_info["client_id"]
-
-        # ── 2. Generate PKCE ─────────────────────────────────────────
-        code_verifier, code_challenge = _generate_pkce()
-        state = secrets.token_urlsafe(32)
-
-        # ── 3. Start local callback server on a free port ────────────
-        _CallbackHandler.auth_code = None
-        _CallbackHandler.error = None
-
-        server = HTTPServer(("127.0.0.1", CALLBACK_PORT), _CallbackHandler)
-        port = server.server_address[1]
-        redirect_uri = f"http://127.0.0.1:{port}/callback"
-
-        # Update client registration with the actual redirect URI
-        client_info_data = _read_tokens()
-        if "vercel_client" in client_info_data:
-            client_info_data["vercel_client"]["redirect_uris"] = [redirect_uri]
-            _write_tokens(client_info_data)
-
-        server_thread = Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        log.info("Vercel OAuth callback server started on port %d", port)
-
-        # ── 4. Build authorization URL ───────────────────────────────
-        auth_params = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": state,
+    # OAuth tokens are MCP-scoped and can't be validated via /v2/user.
+    # Trust the stored entry as long as the token exists and hasn't expired.
+    if entry.get("auth_method") == "oauth":
+        token = await get_valid_access_token()
+        if not token:
+            return {"status": "needs_auth"}
+        return {
+            "valid": True,
+            "status": "connected",
+            "username": entry.get("username", ""),
+            "name": entry.get("name", ""),
+            "email": entry.get("email", ""),
+            "auth_method": "oauth",
         }
-        auth_url = f"{VERCEL_AUTHORIZE_URL}?{urlencode(auth_params)}"
 
-        session.auth_url = auth_url
-        session.status = "awaiting_oauth"
-        log.info("Vercel %s: auth URL ready: %s", session.session_id, auth_url[:80])
-
-        # ── 5. Wait for callback ─────────────────────────────────────
-        deadline = time.time() + OAUTH_TIMEOUT
-        while time.time() < deadline:
-            if session.status == "cancelled":
-                return
-            if _CallbackHandler.auth_code or _CallbackHandler.error:
-                break
-            await asyncio.sleep(0.5)
-        else:
-            session.status = "failed"
-            session.error = "Timed out waiting for Vercel authorization."
-            return
-
-        if _CallbackHandler.error:
-            session.status = "failed"
-            session.error = f"Vercel denied access: {_CallbackHandler.error}"
-            return
-
-        auth_code = _CallbackHandler.auth_code
-        log.info("Vercel %s: received auth code", session.session_id)
-
-        # ── 6. Exchange code for tokens ──────────────────────────────
-        async with httpx.AsyncClient(timeout=15) as http:
-            token_resp = await http.post(
-                VERCEL_TOKEN_URL,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": auth_code,
-                    "redirect_uri": redirect_uri,
-                    "client_id": client_id,
-                    "code_verifier": code_verifier,
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-
-        if token_resp.status_code != 200:
-            session.status = "failed"
-            session.error = f"Token exchange failed: {token_resp.status_code} {token_resp.text}"
-            return
-
-        token_data = token_resp.json()
-        log.info("Vercel %s: token exchange successful", session.session_id)
-
-        # ── 7. Store token ────────────────────────────────────────────
-        access_token = token_data.get("access_token")
-        if not access_token:
-            session.status = "failed"
-            session.error = "No access_token in token response."
-            return
-
-        # Try to get user info (may fail with 404 for MCP-scoped tokens)
-        username = ""
-        display_name = ""
-        validation = await validate_vercel_token(access_token)
-        if validation.get("valid"):
-            username = validation.get("username", "")
-            display_name = validation.get("name", "")
-
-        # Save to mcp-tokens.json
-        save_vercel_token({
-            "access_token": access_token,
-            "refresh_token": token_data.get("refresh_token"),
-            "expires_at": int(time.time()) + token_data.get("expires_in", 0)
-                if token_data.get("expires_in") else 0,
-            "token_type": token_data.get("token_type", "Bearer"),
-            "scope": token_data.get("scope", ""),
-            "username": username,
-            "name": display_name,
-        })
-
-        session.status = "completed"
-        log.info("Vercel %s: connected ✓ (user=%s)", session.session_id, username or "unknown")
-
-    except asyncio.CancelledError:
-        session.status = "cancelled"
-    except Exception as exc:
-        log.exception("Vercel OAuth error in session %s", session.session_id)
-        session.status = "failed"
-        session.error = str(exc)
-    finally:
-        if server:
-            server.shutdown()
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-async def create_oauth_session() -> VercelSession:
-    """Start a new Vercel OAuth flow."""
-    _expire_sessions()
-    active = _active_oauth_session()
-    if active:
-        raise RuntimeError("Another Vercel connection is being set up. Please finish or cancel it first.")
-
-    session_id = str(uuid.uuid4())
-    session = VercelSession(session_id=session_id)
-    _sessions[session_id] = session
-    session.task = asyncio.create_task(_run_oauth_flow(session))
-    return session
-
-
-async def cancel_session(session_id: str) -> None:
-    session = _sessions.get(session_id)
-    if not session:
-        return
-    session.status = "cancelled"
-    if session.task and not session.task.done():
-        session.task.cancel()
-    _sessions.pop(session_id, None)
+    # API token: validate live against /v2/user.
+    token = await get_valid_access_token()
+    if not token:
+        return {"status": "needs_auth"}
+    result = await validate_token(token)
+    if result.get("valid"):
+        result["auth_method"] = entry.get("auth_method", "api_token")
+    return result
