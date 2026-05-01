@@ -23,6 +23,23 @@ async def get_env_secrets():
         return JSONResponse(status_code=500, content={"detail": str(e)})
 
 
+@router.get("/api/secrets/env/keys")
+async def get_env_keys():
+    """Return only the keys with non-empty values — no secret material is
+    transmitted. Used by onboarding to detect which provider keys are
+    already configured without the full /env payload (and without
+    sending plaintext values to the browser)."""
+    try:
+        keys = [
+            e["key"]
+            for e in load_env_entries()
+            if (e.get("value") or "").strip()
+        ]
+        return {"keys": keys}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": str(e)})
+
+
 @router.put("/api/secrets/env")
 async def put_env_secrets(request: Request):
     """Overwrite the OpenClaw .env file with the provided key-value entries."""

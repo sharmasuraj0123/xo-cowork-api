@@ -16,6 +16,7 @@ from .config import router as config_router
 from .files import router as files_router
 from .fts import router as fts_router
 from .misc import router as misc_router
+from .onboarding import router as onboarding_router
 from .secrets import router as secrets_router
 from .sessions import router as sessions_router
 from .usage import router as usage_router
@@ -33,4 +34,5 @@ all_routers: list[APIRouter] = [
     usage_router,
     fts_router,
     misc_router,
+    onboarding_router,
 ]
