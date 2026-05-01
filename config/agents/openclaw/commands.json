@@ -37,7 +37,7 @@
     "anthropic": {
       "env_key": "ANTHROPIC_API_KEY",
       "commands": [
-        {"template": "models_set", "params": {"model": "anthropic/claude-opus-4.6"}}
+        {"template": "models_set", "params": {"model": "anthropic/claude-opus-4-6"}}
       ]
     },
     "openai": {
