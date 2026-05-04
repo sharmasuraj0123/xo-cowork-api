@@ -37,7 +37,6 @@ SYNC_HOUR_UTC = int(os.getenv("USAGE_SYNC_HOUR_UTC", "2"))
 
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "main")
 
-_CLAUDE_COWORK_ROOT = os.path.expanduser(os.getenv("CLAUDE_COWORK_ROOT", "~/claude-cowork"))
 _CLAUDE_NATIVE_PROJECTS_DIR = os.path.expanduser(os.getenv("CLAUDE_NATIVE_PROJECTS_DIR", "~/.claude/projects"))
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -71,12 +70,6 @@ def _save_sync_state(state: dict) -> None:
 # ---------------------------------------------------------------------------
 # Claude Code / Native CLI session discovery
 # ---------------------------------------------------------------------------
-
-
-def _discover_claude_code_session_files() -> list[str]:
-    """Discover ~/claude-cowork/{agent_id}/sessions/*.jsonl files."""
-    pattern = os.path.join(_CLAUDE_COWORK_ROOT, "*", "sessions", "*.jsonl")
-    return sorted(glob.glob(pattern))
 
 
 def _discover_claude_native_session_files() -> list[str]:
@@ -307,9 +300,11 @@ async def _run_sync(is_backfill: bool = False) -> None:
             all_entries.extend(entries)
             sf_idx += 1
 
+    # OpenClaw sessions (separate agent system)
     _collect(discover_session_files(OPENCLAW_AGENT_ID), lambda sf: parse_session_file(sf)[1])
-    _collect(_discover_claude_code_session_files(),     lambda sf: parse_session_file(sf)[1])
-    _collect(_discover_claude_native_session_files(),    _parse_claude_native_session_file)
+    # All native Claude CLI sessions — covers both standalone and cowork sessions
+    # without double-counting (cowork sessions appear here under their cwd project)
+    _collect(_discover_claude_native_session_files(), _parse_claude_native_session_file)
 
     if not all_entries:
         print(f"usage_sync: no new entries since {last_synced_date}, skipping")
