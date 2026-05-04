@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 
-from services.cowork_agent.settings import AGENTS_DIR
+from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR
 from services.cowork_agent.helpers import iso_now, parse_jsonl
 
 router = APIRouter()
@@ -43,8 +43,11 @@ def usage(days: int = 30):
     def _empty_tokens():
         return {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
 
-    if AGENTS_DIR.exists():
-        for agent_dir in AGENTS_DIR.iterdir():
+    def _scan_root(root_dir):
+        nonlocal total_cost, assistant_messages, user_messages
+        if not root_dir.exists():
+            return
+        for agent_dir in root_dir.iterdir():
             if not agent_dir.is_dir():
                 continue
             sessions_dir = agent_dir / "sessions"
@@ -53,6 +56,8 @@ def usage(days: int = 30):
 
             for session_file in sessions_dir.glob("*.jsonl"):
                 session_id = session_file.stem
+                if session_id in session_stats:
+                    continue  # already counted from the other root
                 try:
                     records = parse_jsonl(session_file)
                 except Exception:
@@ -164,6 +169,9 @@ def usage(days: int = 30):
                         session_entry["title"] = session_title
                     session_entry["time_created"] = first_user_time_created or iso_now()
                     session_stats[session_id] = session_entry
+
+    _scan_root(AGENTS_DIR)
+    _scan_root(CLAUDE_COWORK_DIR)
 
     # Fill daily series with zeros
     today = datetime.now(timezone.utc).date()
