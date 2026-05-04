@@ -33,6 +33,7 @@ def parse_stream_line(raw: bytes) -> dict | None:
 
     if etype == "assistant":
         message = event.get("message", {})
+        model = message.get("model", "")
         parts = []
         for block in message.get("content", []):
             if block.get("type") == "text":
@@ -40,7 +41,13 @@ def parse_stream_line(raw: bytes) -> dict | None:
                 if text:
                     parts.append(text)
         if parts:
-            return {"type": "token", "token": "".join(parts)}
+            tok: dict = {"type": "token", "token": "".join(parts)}
+            if model:
+                tok["model"] = model
+            return tok
+        # Tool-use-only turn: no text, but carry the model name for the adapter.
+        if model:
+            return {"type": "assistant_meta", "model": model}
         return None
 
     if etype == "result":

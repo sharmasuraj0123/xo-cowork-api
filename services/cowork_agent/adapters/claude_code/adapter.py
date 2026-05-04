@@ -440,11 +440,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             if event.get("type") == "result":
                 native_session_id = _extract_native_session_id(event)
                 usage = event.get("usage") or {}
-                model_id = event.get("model", "")
+                model_id = model_id or event.get("model", "")
                 result_text = (event.get("result") or "").strip()
                 continue
 
+            if event.get("type") == "assistant_meta":
+                model_id = model_id or event.get("model", "")
+                continue
+
             if event.get("type") == "token":
+                model_id = model_id or event.get("model", "")
                 response_parts.append(event.get("token", ""))
 
             yield event
