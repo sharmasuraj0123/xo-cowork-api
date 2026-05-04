@@ -63,3 +63,40 @@ OPENCLAW_GATEWAY_TOKEN = _AGENT.api_token
 OPENCLAW_MODEL = _AGENT.api_model
 
 OPENCLAW_MODEL_CAPABILITIES: dict = dict(_AGENT.model_capabilities)
+
+
+# ── Adapter config loader ─────────────────────────────────────────────────────
+
+import json as _json
+import os as _os
+from pathlib import Path as _Path
+
+CLAUDE_COWORK_DIR: _Path = _Path(
+    _os.environ.get("CLAUDE_COWORK_ROOT", str(_Path.home() / "claude-cowork"))
+).expanduser()
+
+
+def load_agent_config(agent_name: str) -> dict:
+    """
+    Load config/agents/{agent_name}/settings.json and resolve *_env keys.
+
+    For every key ending in _env, reads os.environ.get(value) and adds the
+    resolved value under the key with _env stripped.
+
+    Example: "cli_path_env": "CLAUDE_CLI_PATH" → also sets "cli_path": <env value>.
+    Raises FileNotFoundError if the settings file is absent.
+    """
+    settings_path = _Path(__file__).resolve().parents[2] / "config" / "agents" / agent_name / "settings.json"
+    if not settings_path.exists():
+        raise FileNotFoundError(
+            f"No settings file for agent '{agent_name}': expected {settings_path}. "
+            "Create config/agents/{agent_name}/settings.json."
+        )
+    config: dict = _json.loads(settings_path.read_text())
+    resolved: dict = {}
+    for key, value in config.items():
+        if key.endswith("_env") and isinstance(value, str):
+            resolved_key = key[: -len("_env")]
+            resolved[resolved_key] = _os.environ.get(value)
+    config.update(resolved)
+    return config
