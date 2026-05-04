@@ -125,7 +125,8 @@ def parse_session_file(
     return session_meta, entries
 
 
-def _date_from_ms(epoch_ms: int) -> str:
+def date_from_ms(epoch_ms: int) -> str:
+    """Convert epoch ms to YYYY-MM-DD string (UTC)."""
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
@@ -187,7 +188,7 @@ def build_session_cost_summary(session_meta: dict, entries: list) -> dict:
             total_tool_calls += 1
 
         if ts:
-            date_str = _date_from_ms(ts)
+            date_str = date_from_ms(ts)
             activity_dates.add(date_str)
             if first_activity is None or ts < first_activity:
                 first_activity = ts

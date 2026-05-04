@@ -17,6 +17,7 @@ from services.cowork_agent.adapters.openclaw.usage import (
     discover_session_files,
     parse_session_file,
     build_session_cost_summary,
+    date_from_ms,
 )
 
 # ---------------------------------------------------------------------------
@@ -29,35 +30,6 @@ OPENCLAW_AGENTS_DIR = os.getenv(
 )
 
 router = APIRouter(prefix="/openclaw/usage", tags=["openclaw-usage"])
-
-
-# ---------------------------------------------------------------------------
-# Helpers – delegate to adapter module; keep private wrappers for backward compat
-# ---------------------------------------------------------------------------
-
-
-def _discover_session_files(agent_id: str = "main") -> list[str]:
-    """Find all .jsonl session transcript files for an agent."""
-    return discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
-
-
-def _parse_session_file(
-    path: str,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-):
-    """Delegate to adapter module."""
-    return parse_session_file(path, start_ms, end_ms)
-
-
-def _date_from_ms(epoch_ms: int) -> str:
-    """Convert epoch ms to YYYY-MM-DD string (UTC)."""
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-
-
-def _build_session_cost_summary(session_meta: dict, entries: list) -> dict:
-    """Delegate to adapter module."""
-    return build_session_cost_summary(session_meta, entries)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +74,7 @@ async def get_usage_analytics(
         now = datetime.now(timezone.utc)
         start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
 
-    session_files = _discover_session_files(agent_id)
+    session_files = discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
     if not session_files:
         return {
             "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
@@ -115,7 +87,7 @@ async def get_usage_analytics(
 
     all_entries = []
     for sf in session_files:
-        _, entries = _parse_session_file(sf, start_ms, end_ms)
+        _, entries = parse_session_file(sf, start_ms, end_ms)
         all_entries.extend(entries)
 
     if not all_entries:
@@ -163,7 +135,7 @@ async def get_usage_analytics(
 
         ts = entry.get("timestamp")
         if ts:
-            d = _date_from_ms(ts)
+            d = date_from_ms(ts)
 
             dc = daily_cost[d]
             dc["date"] = d
@@ -311,13 +283,13 @@ async def get_usage_summary_card(
     now = datetime.now(timezone.utc)
     start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
 
-    session_files = _discover_session_files(agent_id)
+    session_files = discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
     if not session_files:
         return {"days": days, "totalCost": 0, "totalMessages": 0, "totalTokens": 0, "dailyCost": []}
 
     all_entries = []
     for sf in session_files:
-        _, entries = _parse_session_file(sf, start_ms=start_ms)
+        _, entries = parse_session_file(sf, start_ms=start_ms)
         all_entries.extend(entries)
 
     if not all_entries:
@@ -338,7 +310,7 @@ async def get_usage_summary_card(
 
         ts = entry.get("timestamp")
         if ts:
-            date_str = _date_from_ms(ts)
+            date_str = date_from_ms(ts)
             d = daily[date_str]
             d["date"] = date_str
             d["cost"] += cost_val
@@ -397,7 +369,7 @@ async def get_usage_summary(
         now = datetime.now(timezone.utc)
         start_ms = int((now.timestamp() - days * 86400) * 1000)
 
-    session_files = _discover_session_files(agent_id)
+    session_files = discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
     if not session_files:
         return {"error": "No session files found", "agentId": agent_id}
 
@@ -406,9 +378,9 @@ async def get_usage_summary(
     session_summaries = []
 
     for sf in session_files:
-        meta, entries = _parse_session_file(sf, start_ms, end_ms)
+        meta, entries = parse_session_file(sf, start_ms, end_ms)
         if entries:
-            summary = _build_session_cost_summary(meta, entries)
+            summary = build_session_cost_summary(meta, entries)
             session_summaries.append(summary)
             all_entries.extend(entries)
 
@@ -420,7 +392,7 @@ async def get_usage_summary(
         "sessionId": "all",
         "sessionFile": f"{len(session_files)} files",
     }
-    combined = _build_session_cost_summary(combined_meta, all_entries)
+    combined = build_session_cost_summary(combined_meta, all_entries)
     combined["sessionCount"] = len(session_summaries)
     combined["sessions"] = session_summaries
 
@@ -435,11 +407,11 @@ async def get_session_list(
     List all discovered sessions with basic metadata.
     Use a session ID from this list to query /sessions/{session_id} for details.
     """
-    session_files = _discover_session_files(agent_id)
+    session_files = discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
     sessions = []
 
     for sf in session_files:
-        meta, entries = _parse_session_file(sf)
+        meta, entries = parse_session_file(sf)
         if not meta:
             continue
 
@@ -487,13 +459,13 @@ async def get_session_usage(
             datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000
         ) + 86400_000
 
-    session_files = _discover_session_files(agent_id)
+    session_files = discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
 
     for sf in session_files:
         if session_id in os.path.basename(sf):
-            meta, entries = _parse_session_file(sf, start_ms, end_ms)
+            meta, entries = parse_session_file(sf, start_ms, end_ms)
             if not entries:
                 return {"error": "No usage data found for this session in the given range"}
-            return _build_session_cost_summary(meta, entries)
+            return build_session_cost_summary(meta, entries)
 
     return {"error": f"Session {session_id} not found", "agentId": agent_id}
