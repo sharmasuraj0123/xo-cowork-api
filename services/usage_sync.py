@@ -68,23 +68,26 @@ def _save_sync_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code / Native CLI session discovery
+# Native Claude CLI session discovery and parsing
 # ---------------------------------------------------------------------------
 
 
 def _discover_claude_native_session_files() -> list[str]:
-    """Discover ~/.claude/projects/*/*.jsonl files (native Claude CLI sessions)."""
+    """Discover ~/.claude/projects/*/*.jsonl (all native Claude CLI sessions)."""
     pattern = os.path.join(_CLAUDE_NATIVE_PROJECTS_DIR, "*", "*.jsonl")
     return sorted(glob.glob(pattern))
 
 
 def _parse_claude_native_session_file(path: str) -> list[dict]:
     """
-    Parse a native ~/.claude/projects/<project>/<uuid>.jsonl file into the
-    same normalized shape as _parse_session_file returns.
+    Parse ~/.claude/projects/<project>/<uuid>.jsonl into the normalized entry
+    shape used by _aggregate_by_date.
 
-    Native field names: input_tokens, output_tokens, cache_creation_input_tokens,
-    cache_read_input_tokens — mapped to: input, output, cacheWrite, cacheRead.
+    Native field names (snake_case) are mapped to the standard camelCase shape:
+      input_tokens                  → input
+      output_tokens                 → output
+      cache_read_input_tokens       → cacheRead
+      cache_creation_input_tokens   → cacheWrite
     """
     entries: list[dict] = []
     try:
@@ -102,13 +105,8 @@ def _parse_claude_native_session_file(path: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
 
-        # Native CLI format: top-level type is "assistant" (not "message")
-        # Older/cowork format: type is "message" with message.role == "assistant"
         rtype = record.get("type", "")
         if rtype == "assistant":
-            msg = record.get("message", {})
-            ts_raw = record.get("timestamp", "")
-        elif rtype == "message" and record.get("message", {}).get("role") == "assistant":
             msg = record.get("message", {})
             ts_raw = record.get("timestamp", "")
         else:
@@ -117,9 +115,12 @@ def _parse_claude_native_session_file(path: str) -> list[dict]:
         usage_raw = msg.get("usage") or {}
         inp = int(usage_raw.get("input_tokens", 0) or 0)
         out = int(usage_raw.get("output_tokens", 0) or 0)
-        cache_w = int(usage_raw.get("cache_creation_input_tokens", 0) or 0)
         cache_r = int(usage_raw.get("cache_read_input_tokens", 0) or 0)
-        total = inp + out + cache_w + cache_r
+        cache_w = int(usage_raw.get("cache_creation_input_tokens", 0) or 0)
+        total = inp + out + cache_r + cache_w
+
+        if not total:
+            continue
 
         try:
             ts_ms = int(
@@ -137,12 +138,10 @@ def _parse_claude_native_session_file(path: str) -> list[dict]:
                 if name:
                     tool_names.append(name)
 
-        model = msg.get("model") or ""
-
         entries.append({
             "timestamp": ts_ms,
             "provider": "anthropic",
-            "model": model,
+            "model": msg.get("model") or "",
             "toolNames": tool_names,
             "usage": {
                 "input": inp,
@@ -218,11 +217,11 @@ def _aggregate_by_date(all_entries: list) -> dict:
             d["_tool_counter"][tn] += 1
             d["total_tool_calls"] += 1
 
-        mkey = f"{entry.get('provider', '')}|{entry.get('model', '')}"
+        mkey = f"{entry.get('provider') or ''}|{entry.get('model') or ''}"
         if mkey not in d["_model_map"]:
             d["_model_map"][mkey] = {
-                "provider": entry.get("provider", ""),
-                "model": entry.get("model", ""),
+                "provider": entry.get("provider") or "",
+                "model": entry.get("model") or "",
                 "calls": 0,
                 "tokens": 0,
                 "cost": 0.0,
@@ -300,10 +299,9 @@ async def _run_sync(is_backfill: bool = False) -> None:
             all_entries.extend(entries)
             sf_idx += 1
 
-    # OpenClaw sessions (separate agent system)
+    # OpenClaw sessions
     _collect(discover_session_files(OPENCLAW_AGENT_ID), lambda sf: parse_session_file(sf)[1])
-    # All native Claude CLI sessions — covers both standalone and cowork sessions
-    # without double-counting (cowork sessions appear here under their cwd project)
+    # All native Claude CLI sessions — covers cowork and any other Claude Code usage
     _collect(_discover_claude_native_session_files(), _parse_claude_native_session_file)
 
     if not all_entries:
