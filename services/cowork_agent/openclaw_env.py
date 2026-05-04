@@ -1,3 +1,10 @@
+import warnings
+warnings.warn(
+    "openclaw_env.py is deprecated. Use AgentDispatcher from dispatcher.py.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 """
 Helpers for `~/.openclaw/.env`.
 

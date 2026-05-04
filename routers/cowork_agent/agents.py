@@ -3,16 +3,19 @@ Agent CRUD endpoints.
 
 Maps between OpenClaw's on-disk agent records and the xo-cowork `AgentInfo`
 shape the frontend expects. Create/patch operations mutate `openclaw.json`
-via `openclaw_store`.
+via `openclaw_store`. Claude Code agents are stored under ~/claude-cowork/.
 """
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.cowork_agent.settings import AGENTS_DIR, _WORKSPACE_DOC_FILES
+from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, _WORKSPACE_DOC_FILES
 from services.cowork_agent.helpers import (
     _path_must_be_under_home,
     _read_json_file_safe,
@@ -39,12 +42,13 @@ router = APIRouter()
 
 
 class CreateAgentBody(BaseModel):
-    """Payload for POST /api/agents — persisted to OpenClaw ~/.openclaw/openclaw.json and disk layout."""
+    """Payload for POST /api/agents — supports openclaw and claude_code backends."""
 
     name: str = Field(..., min_length=1, max_length=200)
     id: str | None = Field(None, max_length=80)
     description: str | None = Field(None, max_length=4000)
     workspace: str | None = Field(None, max_length=2048)
+    backend: Literal["openclaw", "claude_code"] = "openclaw"
 
 
 class UpdateAgentBody(BaseModel):
@@ -56,6 +60,47 @@ class UpdateAgentBody(BaseModel):
     model: str | None = Field(None, max_length=400)
     identity_name: str | None = Field(None, max_length=200)
     identity_emoji: str | None = Field(None, max_length=32)
+
+
+# ── Claude Code agent helpers ────────────────────────────────────────────────
+
+
+def _claude_agent_meta_path(agent_id: str) -> Path:
+    return CLAUDE_COWORK_DIR / agent_id / ".agent.json"
+
+
+def _load_claude_agent(agent_id: str) -> dict | None:
+    path = _claude_agent_meta_path(agent_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _write_claude_agent(agent_id: str, data: dict) -> None:
+    path = _claude_agent_meta_path(agent_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _agent_info_claude(agent_id: str, meta: dict) -> dict:
+    workspace = str(CLAUDE_COWORK_DIR / agent_id)
+    return {
+        "name": agent_id,
+        "description": meta.get("description") or meta.get("name") or agent_id,
+        "mode": "primary",
+        "tools": [],
+        "permissions": {"rules": []},
+        "system_prompt": None,
+        "temperature": None,
+        "metadata": {
+            "backend": "claude_code",
+            "display_name": meta.get("name") or agent_id,
+            "workspace": workspace,
+        },
+    }
 
 
 # ── Internal helpers (module-private) ────────────────────────────────────────
@@ -73,6 +118,7 @@ def _agent_info_for_id(cfg: dict, agent_id: str, display_name: str | None, descr
         "system_prompt": None,
         "temperature": None,
         "metadata": {
+            "backend": "openclaw",
             "openclaw_id": aid,
             "display_name": display_name or aid,
             "workspace": str(resolve_agent_workspace_dir(cfg, aid)),
@@ -86,6 +132,37 @@ def get_agent_detail(agent_id: str) -> dict | None:
     redacted auth, sessions index, and global auth summary.
     """
     aid = normalize_agent_id(agent_id)
+
+    # Check Claude Code backend first
+    claude_meta = _load_claude_agent(aid)
+    if claude_meta is not None:
+        workspace_path = CLAUDE_COWORK_DIR / aid
+        return {
+            "id": aid,
+            "display_name": (claude_meta.get("name") or "").strip() or aid,
+            "description": claude_meta.get("description") or "",
+            "workspace": str(workspace_path),
+            "model": None,
+            "model_raw": None,
+            "identity": {"name": None, "emoji": None, "bio": None},
+            "config_entry": {},
+            "agents_defaults": {},
+            "workspace_files": {},
+            "on_disk": {
+                "agent_dir": str(workspace_path),
+                "models_catalog": None,
+                "auth_state": None,
+                "auth_profiles": None,
+            },
+            "sessions": {
+                "index_path": str(workspace_path / ".sessions"),
+                "count": 0,
+                "session_ids": [],
+            },
+            "openclaw_global_auth": {},
+            "backend": "claude_code",
+        }
+
     agent_root = AGENTS_DIR / aid
     if not agent_root.is_dir():
         return None
@@ -170,6 +247,7 @@ def get_agent_detail(agent_id: str) -> dict | None:
             "session_ids": session_ids,
         },
         "openclaw_global_auth": global_auth_summary,
+        "backend": "openclaw",
     }
 
 
@@ -239,37 +317,72 @@ def patch_agent_into_config(cfg: dict, agent_id: str, body: UpdateAgentBody) -> 
 
 @router.get("/api/agents")
 def list_agents():
+    agents: list[dict] = []
+
+    # OpenClaw agents
     cfg = load_openclaw_config()
     entries = {normalize_agent_id(str(e.get("id", ""))): e for e in list_agent_entries(cfg)}
-    agents: list[dict] = []
-    if not AGENTS_DIR.exists():
-        return agents
-    for d in sorted(AGENTS_DIR.iterdir()):
-        if not d.is_dir():
-            continue
-        aid = d.name
-        meta = entries.get(normalize_agent_id(aid), {})
-        display = meta.get("name") if isinstance(meta.get("name"), str) else None
-        desc = ""
-        if isinstance(meta.get("identity"), dict):
-            ident = meta["identity"]
-            if isinstance(ident.get("bio"), str):
-                desc = ident["bio"]
-        agents.append(_agent_info_for_id(cfg, aid, display, desc))
+    if AGENTS_DIR.exists():
+        for d in sorted(AGENTS_DIR.iterdir()):
+            if not d.is_dir():
+                continue
+            aid = d.name
+            meta = entries.get(normalize_agent_id(aid), {})
+            display = meta.get("name") if isinstance(meta.get("name"), str) else None
+            desc = ""
+            if isinstance(meta.get("identity"), dict):
+                ident = meta["identity"]
+                if isinstance(ident.get("bio"), str):
+                    desc = ident["bio"]
+            agents.append(_agent_info_for_id(cfg, aid, display, desc))
+
+    # Claude Code agents
+    if CLAUDE_COWORK_DIR.exists():
+        for d in sorted(CLAUDE_COWORK_DIR.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            meta_path = d / ".agent.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                meta = {}
+            agents.append(_agent_info_claude(d.name, meta))
+
     return agents
 
 
 @router.post("/api/agents")
 def create_agent(body: CreateAgentBody):
-    """
-    Register a new OpenClaw agent: updates agents.list in openclaw.json, creates
-    ~/.openclaw/agents/<id>/sessions and workspace dirs (same layout as `openclaw agents add`).
-    """
     display_name = body.name.strip()
     agent_id = normalize_agent_id((body.id or body.name).strip())
     if agent_id == "main":
         return JSONResponse(status_code=400, content={"detail": 'Agent id "main" is reserved; choose another id or name.'})
 
+    if body.backend == "claude_code":
+        # Claude Code agent: create ~/claude-cowork/{agent_id}/ directory + .agent.json
+        agent_dir = CLAUDE_COWORK_DIR / agent_id
+        if agent_dir.exists():
+            return JSONResponse(status_code=409, content={"detail": f'Agent directory "{agent_id}" already exists under ~/claude-cowork.'})
+
+        now = datetime.now(timezone.utc).isoformat()
+        meta = {
+            "id": agent_id,
+            "name": display_name,
+            "description": (body.description or "").strip(),
+            "backend": "claude_code",
+            "created_at": now,
+        }
+        try:
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            _write_claude_agent(agent_id, meta)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": str(e)})
+
+        return _agent_info_claude(agent_id, meta)
+
+    # OpenClaw agent (default)
     cfg = load_openclaw_config()
     existing_entries = list_agent_entries(cfg)
     if find_agent_entry_index(existing_entries, agent_id) >= 0:
@@ -310,6 +423,22 @@ def get_agent(agent_id: str):
 @router.patch("/api/agents/{agent_id}")
 def patch_agent(agent_id: str, body: UpdateAgentBody):
     aid = normalize_agent_id(agent_id)
+
+    # Claude Code agents don't support patch via OpenClaw mechanisms
+    if _load_claude_agent(aid) is not None:
+        if not body.model_fields_set:
+            detail = get_agent_detail(aid)
+            return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
+        # Update name/description in .agent.json
+        meta = _load_claude_agent(aid) or {}
+        if body.name is not None:
+            meta["name"] = body.name.strip()
+        if body.description is not None:
+            meta["description"] = body.description.strip()
+        _write_claude_agent(aid, meta)
+        detail = get_agent_detail(aid)
+        return detail if detail else JSONResponse(status_code=500, content={"detail": "Failed to read agent after update"})
+
     if not (AGENTS_DIR / aid).is_dir():
         return JSONResponse(status_code=404, content={"detail": f'Agent "{aid}" not found'})
     if not body.model_fields_set:

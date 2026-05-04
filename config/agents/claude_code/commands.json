@@ -1,0 +1,13 @@
+{
+  "skills": {
+    "default":              null,
+    "code-writer":          "/code-writer",
+    "reviewer":             "/reviewer",
+    "debugger":             "/debugger",
+    "agno-agentic-backend": "/agno-agentic-backend"
+  },
+  "flags": {
+    "dangerously_skip_permissions": true,
+    "output_format": "stream-json"
+  }
+}

@@ -56,3 +56,5 @@ htmlcov/
 # Runtime data (usage sync watermark, etc.)
 data/
 docs/
+
+ARCHITECTURE.md

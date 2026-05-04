@@ -1,0 +1,5 @@
+{
+  "cli_path_env": "CLAUDE_CLI_PATH",
+  "cowork_root": "~/claude-cowork",
+  "timeout": 300
+}
