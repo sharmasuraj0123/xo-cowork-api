@@ -1,7 +1,7 @@
 """
-Google Drive connector via rclone.
+Google Drive connector via rclone (CLI mode — no daemon, no port).
 
-Architecture (correct for rclone v1.57+):
+Architecture:
   1. Run `rclone authorize --auth-no-open-browser drive` as a subprocess.
      - Captures the Google auth URL from stderr.
      - Blocks until the OAuth callback is received on localhost:53682.
@@ -9,11 +9,15 @@ Architecture (correct for rclone v1.57+):
      free port, capture the auth code ourselves, then deliver it to rclone's
      waiting process via HTTP GET to localhost:53682.
   3. rclone authorize prints the token JSON to stdout.
-  4. We write the remote config directly via /config/create + the token,
-     WITHOUT going through the interactive state machine (which blocks).
+  4. We write the remote section directly into rclone.conf (no API call) so
+     the next `rclone listremotes --config <path>` picks it up immediately.
+
+All read/list/delete operations invoke `rclone` as a subprocess via
+`_rclone_cli()` — no `rclone rcd` daemon is started.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -39,10 +43,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-RCLONE_RC_URL  = os.getenv("RCLONE_RCD_URL",  "http://127.0.0.1:5572")
-RCLONE_RC_USER = os.getenv("RCLONE_RCD_USER", "")
-RCLONE_RC_PASS = os.getenv("RCLONE_RCD_PASS", "")
 
 # rclone config file — stored inside the project directory
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -123,71 +123,90 @@ def _expire_sessions() -> None:
 # rclone RC helpers
 # ---------------------------------------------------------------------------
 
-def _rc_auth() -> tuple[str | None, str | None]:
-    return (RCLONE_RC_USER or None), (RCLONE_RC_PASS or None)
+async def _rclone_cli(*args: str, timeout: int = 30) -> str:
+    """
+    Run an `rclone` CLI command and return stdout. Raises RuntimeError on non-zero
+    exit. Always passes --config so commands target our project's rclone.conf.
+    """
+    full_args = ("rclone",) + args + ("--config", RCLONE_CONFIG_PATH)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *full_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("rclone binary not found in PATH") from exc
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"rclone {args[0] if args else ''} timed out after {timeout}s")
+
+    if proc.returncode != 0:
+        err_text = (stderr or stdout).decode(errors="replace").strip()
+        raise RuntimeError(f"rclone error: {err_text or f'exit code {proc.returncode}'}")
+    return stdout.decode(errors="replace")
 
 
 async def _rc_post(endpoint: str, body: dict | None = None, timeout: int = 15) -> dict:
-    u, p = _rc_auth()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            f"{RCLONE_RC_URL}/{endpoint.lstrip('/')}",
-            json=body or {},
-            auth=(u, p) if u else None,
-        )
-        if not resp.is_success:
-            try:
-                msg = resp.json().get("error", resp.text)
-            except Exception:
-                msg = resp.text or f"HTTP {resp.status_code}"
-            raise RuntimeError(f"rclone error: {msg}")
-        return resp.json()
+    """
+    Compatibility shim: maps the legacy rclone rc HTTP endpoints used by this
+    project to local `rclone` CLI invocations, so we don't need a daemon
+    listening on a port. Return shapes match the original rc JSON responses.
+    """
+    body = body or {}
+    ep = endpoint.lstrip("/")
+
+    if ep == "rc/noop":
+        await _rclone_cli("version", timeout=timeout)
+        return {}
+
+    if ep == "config/listremotes":
+        out = await _rclone_cli("listremotes", timeout=timeout)
+        names = [line.rstrip(":").strip() for line in out.splitlines() if line.strip()]
+        return {"remotes": names}
+
+    if ep == "config/get":
+        name = body.get("name", "")
+        out = await _rclone_cli("config", "dump", timeout=timeout)
+        try:
+            dump = json.loads(out) if out.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Could not parse rclone config dump: {exc}") from exc
+        return dump.get(name, {})
+
+    if ep == "config/delete":
+        name = body.get("name", "")
+        if not name:
+            raise RuntimeError("config/delete requires a 'name'")
+        await _rclone_cli("config", "delete", name, timeout=timeout)
+        return {}
+
+    raise RuntimeError(f"Unsupported rclone CLI shim endpoint: {endpoint}")
 
 
 # ---------------------------------------------------------------------------
-# Daemon lifecycle
+# Availability checks (CLI mode — no daemon to keep alive)
 # ---------------------------------------------------------------------------
-
-_rclone_proc: subprocess.Popen | None = None
-
 
 async def ensure_rclone_running() -> None:
+    """
+    No-op in CLI mode. Logs whether the binary is reachable so startup
+    surfaces missing-binary problems early instead of at first request.
+    """
     try:
-        await _rc_post("/rc/noop")
-        log.info("rclone rcd already running at %s", RCLONE_RC_URL)
-        return
-    except Exception:
-        pass
-
-    log.info("Starting rclone rcd ...")
-    global _rclone_proc
-    try:
-        host_port = RCLONE_RC_URL.replace("http://", "").replace("https://", "")
-        _rclone_proc = subprocess.Popen(
-            ["rclone", "rcd", "--rc-no-auth",
-             f"--rc-addr={host_port}",
-             f"--config={RCLONE_CONFIG_PATH}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        log.warning("rclone not found in PATH")
-        return
-
-    for _ in range(10):
-        await asyncio.sleep(0.5)
-        try:
-            await _rc_post("/rc/noop")
-            log.info("rclone rcd started (pid=%d)", _rclone_proc.pid)
-            return
-        except Exception:
-            pass
-    log.error("rclone rcd did not start in time")
+        await _rclone_cli("version", timeout=5)
+        log.info("rclone CLI available (no daemon needed)")
+    except Exception as exc:
+        log.warning("rclone not available: %s", exc)
 
 
 async def rclone_available() -> bool:
     try:
-        await _rc_post("/rc/noop")
+        await _rclone_cli("version", timeout=5)
         return True
     except Exception:
         return False
@@ -452,11 +471,12 @@ async def _run_oauth_flow(session: GDriveSession) -> None:
         log.info("GDrive %s: captured token (%d chars)", session.session_id, len(token_json))
 
         # ── 5. Write remote directly to rclone.conf ──────────────────────
-        #    We write the INI section directly to the config file instead
-        #    of using the RC API, because config/create and config/update
-        #    both try to validate/refresh the token, which starts an auth
-        #    webserver on port 53682 — causing port conflicts.
-        #    rclone rcd auto-detects config file changes.
+        #    We write the INI section directly to the config file instead of
+        #    invoking `rclone config create`, because that command tries to
+        #    validate/refresh the token and starts another auth webserver on
+        #    port 53682 — causing port conflicts with our own listener.
+        #    Subsequent CLI calls re-read rclone.conf, so the new remote
+        #    is visible immediately.
         config_section = (
             f"\n[{name}]\n"
             f"type = drive\n"

@@ -18,10 +18,11 @@ Mirrors the architecture of `gdrive_rclone.py`. Only the deltas that matter:
          drive_id   = <from graph>
          drive_type = personal | business | documentLibrary
 
-The rclone daemon (`rclone rcd`) and `rclone.conf` are shared with the gdrive
-connector — there is no separate daemon for OneDrive. The cross-connector
-OAuth lock (`rclone_oauth_lock`) guarantees that only ONE OAuth flow runs at
-a time across all connectors that share rclone's :53682 callback.
+The `rclone.conf` file is shared with the gdrive connector. We invoke `rclone`
+as a CLI subprocess for every operation (no `rclone rcd` daemon, no port
+binding). The cross-connector OAuth lock (`rclone_oauth_lock`) guarantees
+that only ONE OAuth flow runs at a time across all connectors that share
+rclone's :53682 callback.
 """
 
 import asyncio
@@ -348,7 +349,7 @@ async def _run_oauth_flow(session: OneDriveSession) -> None:
 
         # ── Write remote section directly to rclone.conf ─────────────────
         # See gdrive_rclone for why we write the INI directly instead of
-        # going through /config/create (port 53682 conflicts).
+        # invoking `rclone config create` (port 53682 auth-server conflict).
         config_section = (
             f"\n[{name}]\n"
             f"type = onedrive\n"
