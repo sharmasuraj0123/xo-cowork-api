@@ -536,6 +536,29 @@ async def gateway_restart():
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
+@app.post("/app/restart")
+async def app_restart():
+    """Restart the XO Cowork API app process via cowork-api.sh."""
+    import subprocess
+    script = (Path(__file__).resolve().parent / "cowork-api.sh").resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="App restart script not found")
+    try:
+        subprocess.Popen(
+            [str(script), "restart"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(script.parent),
+            start_new_session=True,
+        )
+        return {
+            "status": "accepted",
+            "message": "Restart triggered in background"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
 @app.post("/ask_question")
 async def ask_question(data: AskQuestionRequest):
     """
