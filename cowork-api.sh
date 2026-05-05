@@ -23,6 +23,26 @@ log_success() { log "${GREEN}✓ $*${NC}"; }
 log_warn()    { log "${YELLOW}⚠ $*${NC}"; }
 log_error()   { log "${RED}✗ $*${NC}"; }
 
+resolve_python_cmd() {
+    # Prefer project virtualenv when available, then system Python.
+    if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
+        echo "$SCRIPT_DIR/venv/bin/python"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+
+    if command -v python >/dev/null 2>&1; then
+        command -v python
+        return 0
+    fi
+
+    return 1
+}
+
 LOCK_ACQUIRED=0
 cleanup_lock() {
     if [ "$LOCK_ACQUIRED" -eq 1 ]; then
@@ -188,12 +208,19 @@ start_api() {
     kill_hindering_processes
     wait_for_port_release 10 || true
 
+    local python_cmd
+    python_cmd="$(resolve_python_cmd || true)"
+    if [ -z "$python_cmd" ]; then
+        log_error "No Python interpreter found (tried: venv/bin/python, python3, python)"
+        return 1
+    fi
+
     log "Starting XO Cowork API on ${HOST}:${PORT}..."
     nohup bash -c '
         cd "'"$SCRIPT_DIR"'"
         export HOST="'"$HOST"'"
         export PORT="'"$PORT"'"
-        python server.py
+        "'"$python_cmd"'" server.py
     ' >> "$LOG_FILE" 2>&1 &
 
     local pid=$!
