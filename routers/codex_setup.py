@@ -22,6 +22,7 @@ No callback endpoint needed — device auth is handled entirely by the CLI.
 """
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -52,6 +53,8 @@ _NPM_INSTALL_TIMEOUT_SECONDS = int(os.getenv("CODEX_NPM_INSTALL_TIMEOUT", "300")
 _SSE_HEARTBEAT_INTERVAL = 15
 
 _TOKEN_ENV_KEYS = ["OPENAI_CODEX_ACCESS_TOKEN"]
+
+_OPENCLAW_DEFAULT_PRIMARY_MODEL = "openai-codex/gpt-5.4"
 
 
 def _strip_ansi(line: str) -> str:
@@ -98,10 +101,31 @@ def _persist_token_to_env_files(token: str) -> None:
                 print(f"[codex-setup] failed to write {key} to {env_path}: {e}")
 
 
-def _read_token_from_codex_credentials() -> Optional[str]:
+def _decode_jwt_payload(jwt: str) -> Optional[dict]:
+    """Decode a JWT's payload segment. No signature verification — caller trusts source."""
+    try:
+        parts = jwt.split(".")
+        if len(parts) < 2:
+            return None
+        seg = parts[1]
+        pad = "=" * (-len(seg) % 4)
+        decoded = base64.urlsafe_b64decode(seg + pad)
+        payload = json.loads(decoded)
+        return payload if isinstance(payload, dict) else None
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _read_codex_credentials() -> Optional[dict]:
     """
     After login succeeds the CLI writes credentials to a known location.
-    Try common paths and return the access token if found.
+    Try common paths and return a dict if found:
+        {"token": str,
+         "email": Optional[str],
+         "refresh": Optional[str],
+         "expires_ms": Optional[int]}
+    Email/refresh/expires_ms are only populated when reading the codex CLI's
+    chatgpt-mode auth.json (which carries an id_token JWT and refresh_token).
     """
     xdg_data = os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
     xdg_config = os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
@@ -119,10 +143,36 @@ def _read_token_from_codex_credentials() -> Optional[str]:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            token = None
+            token: Optional[str] = None
+            email: Optional[str] = None
+            refresh: Optional[str] = None
+            expires_ms: Optional[int] = None
             if isinstance(data, dict):
-                # flat format: {"access_token": "..."}
-                token = data.get("access_token") or data.get("accessToken")
+                # codex CLI ChatGPT/device-auth mode: {"tokens": {"access_token": ..., "id_token": ..., "refresh_token": ..., "account_id": ...}, ...}
+                tokens_obj = data.get("tokens")
+                if isinstance(tokens_obj, dict):
+                    token = tokens_obj.get("access_token") or tokens_obj.get("id_token")
+                    rt = tokens_obj.get("refresh_token")
+                    if isinstance(rt, str) and rt:
+                        refresh = rt
+                    id_token = tokens_obj.get("id_token")
+                    if isinstance(id_token, str):
+                        payload = _decode_jwt_payload(id_token)
+                        if isinstance(payload, dict):
+                            claim = payload.get("email")
+                            if isinstance(claim, str) and claim:
+                                email = claim
+                            exp = payload.get("exp")
+                            if isinstance(exp, (int, float)):
+                                expires_ms = int(exp) * 1000
+                # codex CLI API-key mode: {"auth_mode": "...", "OPENAI_API_KEY": "sk-..."}
+                if not token:
+                    api_key = data.get("OPENAI_API_KEY")
+                    if isinstance(api_key, str):
+                        token = api_key
+                # legacy flat format: {"access_token": "..."}
+                if not token:
+                    token = data.get("access_token") or data.get("accessToken")
                 # openclaw auth-profiles format
                 if not token:
                     profiles = data.get("profiles", {})
@@ -132,11 +182,167 @@ def _read_token_from_codex_credentials() -> Optional[str]:
                             if token:
                                 break
             if token and isinstance(token, str) and len(token) > 20:
-                print(f"[codex-setup] token read from {path}")
-                return token
+                print(f"[codex-setup] credentials read from {path}")
+                return {
+                    "token": token,
+                    "email": email,
+                    "refresh": refresh,
+                    "expires_ms": expires_ms,
+                }
         except (OSError, json.JSONDecodeError, TypeError):
             continue
     return None
+
+
+def _openclaw_config_path() -> str:
+    return str(Path.home() / ".openclaw" / "openclaw.json")
+
+
+def _upsert_openclaw_config(email: str) -> None:
+    """
+    Update ~/.openclaw/openclaw.json post-login:
+      1. auth.profiles["openai-codex:<email>"] = {provider, mode, email}
+      2. agents.defaults.model.primary = _OPENCLAW_DEFAULT_PRIMARY_MODEL (always overwrite)
+
+    Best-effort: missing/malformed file is logged and skipped, never raised.
+    Atomic write via temp file + os.replace so a crash mid-write cannot corrupt the file.
+    """
+    path = _openclaw_config_path()
+    if not os.path.isfile(path):
+        print(f"[codex-setup] openclaw.json not found at {path}, skipping config upsert")
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[codex-setup] failed to read {path} ({e}); skipping config upsert")
+        return
+    if not isinstance(data, dict):
+        print(f"[codex-setup] {path} is not a JSON object; skipping config upsert")
+        return
+
+    auth = data.get("auth")
+    if not isinstance(auth, dict):
+        auth = {}
+        data["auth"] = auth
+    profiles = auth.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {}
+        auth["profiles"] = profiles
+    profile_key = f"openai-codex:{email}"
+    profiles[profile_key] = {
+        "provider": "openai-codex",
+        "mode": "oauth",
+        "email": email,
+    }
+
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+        data["agents"] = agents
+    defaults = agents.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+        agents["defaults"] = defaults
+    model = defaults.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        defaults["model"] = model
+    model["primary"] = _OPENCLAW_DEFAULT_PRIMARY_MODEL
+
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+        print(
+            f"[codex-setup] openclaw.json updated: profile={profile_key}, "
+            f"primary={_OPENCLAW_DEFAULT_PRIMARY_MODEL}"
+        )
+    except OSError as e:
+        print(f"[codex-setup] failed to write {path} ({e}); skipping config upsert")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _agent_auth_profiles_path() -> str:
+    return str(Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json")
+
+
+def _upsert_agent_auth_profile(
+    email: str,
+    access: str,
+    refresh: str,
+    expires_ms: int,
+) -> None:
+    """
+    Upsert the email-keyed openai-codex oauth entry into the main agent's
+    auth-profiles.json — the credential store openclaw consults at runtime.
+
+    Schema matches the existing email-keyed entries:
+        profiles["openai-codex:<email>"] = {
+            "type": "oauth", "provider": "openai-codex",
+            "access": <access_token>, "refresh": <refresh_token>,
+            "expires": <ms epoch from JWT exp>, "email": <email>
+        }
+
+    Creates the file (and parent dirs) with `{"version": 1, "profiles": {...}}`
+    if it doesn't exist. A malformed existing file is logged and skipped to
+    avoid clobbering hand-edits in flight. Always overwrites an existing entry
+    for this email so re-login refreshes tokens.
+    """
+    path = _agent_auth_profiles_path()
+    created = False
+    if not os.path.isfile(path):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError as e:
+            print(f"[codex-setup] failed to create dir for {path} ({e}); skipping agent profile upsert")
+            return
+        data: dict = {"version": 1, "profiles": {}}
+        created = True
+    else:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[codex-setup] failed to read {path} ({e}); skipping agent profile upsert")
+            return
+        if not isinstance(data, dict):
+            print(f"[codex-setup] {path} is not a JSON object; skipping agent profile upsert")
+            return
+
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {}
+        data["profiles"] = profiles
+    profile_key = f"openai-codex:{email}"
+    profiles[profile_key] = {
+        "type": "oauth",
+        "provider": "openai-codex",
+        "access": access,
+        "refresh": refresh,
+        "expires": expires_ms,
+        "email": email,
+    }
+
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+        action = "created" if created else "updated"
+        print(f"[codex-setup] agent auth-profiles.json {action}: profile={profile_key}")
+    except OSError as e:
+        print(f"[codex-setup] failed to write {path} ({e}); skipping agent profile upsert")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _codex_cli_path() -> str:
@@ -365,12 +571,27 @@ async def codex_setup():
                 kind, value = item
                 if kind == "done":
                     if value == 0:
-                        token = _read_token_from_codex_credentials()
-                        if token:
+                        creds = _read_codex_credentials()
+                        if creds and creds.get("token"):
+                            token = creds["token"]
                             for key in _TOKEN_ENV_KEYS:
                                 os.environ[key] = token
                             _persist_token_to_env_files(token)
                             print(f"[codex-setup] token persisted (len={len(token)})")
+                            email = creds.get("email")
+                            if email:
+                                _upsert_openclaw_config(email)
+                                refresh = creds.get("refresh")
+                                expires_ms = creds.get("expires_ms")
+                                if refresh and expires_ms:
+                                    _upsert_agent_auth_profile(email, token, refresh, expires_ms)
+                                else:
+                                    print(
+                                        "[codex-setup] missing refresh/expires; "
+                                        "skipping agent auth-profiles.json upsert"
+                                    )
+                            else:
+                                print("[codex-setup] no email claim found, skipping openclaw.json upsert")
                         else:
                             print("[codex-setup] login succeeded but no token found in credential files")
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
