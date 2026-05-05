@@ -171,38 +171,63 @@ async def stream_openclaw_to_sse(stream_id: str):
                     yield f"id: {event_id}\nevent: agent-error\ndata: {json.dumps({'error_message': f'OpenClaw API error: {response.status_code} {body.decode()}'})}\n\n"
                     return
 
-                line_iter = response.aiter_lines().__aiter__()
-                while True:
+                # Read lines in a background task and feed them through a queue.
+                # We can't wrap `__anext__()` in `asyncio.wait_for` directly: on
+                # timeout, wait_for cancels the awaited coroutine, which closes
+                # httpx's aiter_lines generator — subsequent reads return
+                # StopAsyncIteration immediately and the upstream response is lost.
+                line_queue: asyncio.Queue = asyncio.Queue()
+                _SENTINEL = object()
+
+                async def _reader():
                     try:
-                        line = await asyncio.wait_for(line_iter.__anext__(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield "event: heartbeat\ndata: {}\n\n"
-                        continue
-                    except StopAsyncIteration:
-                        break
+                        async for ln in response.aiter_lines():
+                            await line_queue.put(ln)
+                    except Exception as exc:
+                        await line_queue.put(exc)
+                    finally:
+                        await line_queue.put(_SENTINEL)
 
-                    if not line.startswith("data: "):
-                        continue
+                reader_task = asyncio.create_task(_reader())
+                try:
+                    while True:
+                        try:
+                            item = await asyncio.wait_for(line_queue.get(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield "event: heartbeat\ndata: {}\n\n"
+                            continue
 
-                    data_str = line[6:]
-                    if data_str.strip() == "[DONE]":
-                        break
+                        if item is _SENTINEL:
+                            break
+                        if isinstance(item, BaseException):
+                            raise item
+                        line = item
 
-                    try:
-                        chunk = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+                        if not line.startswith("data: "):
+                            continue
 
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
 
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content")
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if content:
-                        event_id += 1
-                        yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'session_id': session_id, 'text': content})}\n\n"
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content")
+
+                        if content:
+                            event_id += 1
+                            yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'session_id': session_id, 'text': content})}\n\n"
+                finally:
+                    if not reader_task.done():
+                        reader_task.cancel()
 
     except httpx.ConnectError:
         event_id += 1
