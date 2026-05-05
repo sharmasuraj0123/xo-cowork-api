@@ -395,12 +395,18 @@ configure_hermes() {
         log_success "Slack configured"
     fi
 
-    # WhatsApp
+    # WhatsApp — these must live in env (not config.yaml), so persist them to $ENV_FILE
     if [ "$whatsapp_enabled" = "true" ] || [ -n "${WHATSAPP_CREDS:-}" ]; then
         log "Configuring WhatsApp..."
-        hermes config set WHATSAPP_ENABLED true
-        hermes config set WHATSAPP_MODE "${WHATSAPP_MODE:-bot}"
-        hermes config set WHATSAPP_ALLOWED_USERS "${WHATSAPP_ALLOWED_USERS:-*}"
+        _ensure_env() {
+            local key="$1" val="$2"
+            if ! grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+                printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+            fi
+        }
+        _ensure_env WHATSAPP_ENABLED       "true"
+        _ensure_env WHATSAPP_MODE          "${WHATSAPP_MODE:-bot}"
+        _ensure_env WHATSAPP_ALLOWED_USERS "${WHATSAPP_ALLOWED_USERS:-*}"
         if [ -n "${WHATSAPP_CREDS:-}" ]; then
             local wa_dir="$HERMES_DIR/whatsapp/session"
             mkdir -p "$wa_dir"
