@@ -7,6 +7,7 @@ Subsequently: only processes dates after the last-synced watermark.
 """
 
 import asyncio
+import glob
 import json
 import os
 import datetime
@@ -14,10 +15,10 @@ from collections import defaultdict
 
 import httpx
 
-from routers.openclaw_usage import (
-    _discover_session_files,
-    _parse_session_file,
-    _date_from_ms,
+from services.cowork_agent.adapters.openclaw.usage import (
+    discover_session_files,
+    parse_session_file,
+    date_from_ms,
 )
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,8 @@ SYNC_STATE_FILE = os.getenv("USAGE_SYNC_STATE_FILE", _DEFAULT_WATERMARK_PATH)
 SYNC_HOUR_UTC = int(os.getenv("USAGE_SYNC_HOUR_UTC", "2"))
 
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "main")
+
+_CLAUDE_NATIVE_PROJECTS_DIR = os.path.expanduser(os.getenv("CLAUDE_NATIVE_PROJECTS_DIR", "~/.claude/projects"))
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -62,6 +65,95 @@ def _save_sync_state(state: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.replace(tmp, SYNC_STATE_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Native Claude CLI session discovery and parsing
+# ---------------------------------------------------------------------------
+
+
+def _discover_claude_native_session_files() -> list[str]:
+    """Discover ~/.claude/projects/*/*.jsonl (all native Claude CLI sessions)."""
+    pattern = os.path.join(_CLAUDE_NATIVE_PROJECTS_DIR, "*", "*.jsonl")
+    return sorted(glob.glob(pattern))
+
+
+def _parse_claude_native_session_file(path: str) -> list[dict]:
+    """
+    Parse ~/.claude/projects/<project>/<uuid>.jsonl into the normalized entry
+    shape used by _aggregate_by_date.
+
+    Native field names (snake_case) are mapped to the standard camelCase shape:
+      input_tokens                  → input
+      output_tokens                 → output
+      cache_read_input_tokens       → cacheRead
+      cache_creation_input_tokens   → cacheWrite
+    """
+    entries: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return entries
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        rtype = record.get("type", "")
+        if rtype == "assistant":
+            msg = record.get("message", {})
+            ts_raw = record.get("timestamp", "")
+        else:
+            continue
+
+        usage_raw = msg.get("usage") or {}
+        inp = int(usage_raw.get("input_tokens", 0) or 0)
+        out = int(usage_raw.get("output_tokens", 0) or 0)
+        cache_r = int(usage_raw.get("cache_read_input_tokens", 0) or 0)
+        cache_w = int(usage_raw.get("cache_creation_input_tokens", 0) or 0)
+        total = inp + out + cache_r + cache_w
+
+        if not total:
+            continue
+
+        try:
+            ts_ms = int(
+                datetime.datetime.fromisoformat(
+                    ts_raw.replace("Z", "+00:00")
+                ).timestamp() * 1000
+            )
+        except Exception:
+            continue
+
+        tool_names: list[str] = []
+        for block in msg.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name", "")
+                if name:
+                    tool_names.append(name)
+
+        entries.append({
+            "timestamp": ts_ms,
+            "provider": "anthropic",
+            "model": msg.get("model") or "",
+            "toolNames": tool_names,
+            "usage": {
+                "input": inp,
+                "output": out,
+                "cacheRead": cache_r,
+                "cacheWrite": cache_w,
+                "totalTokens": total,
+                "cost": {},
+            },
+        })
+
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +188,7 @@ def _aggregate_by_date(all_entries: list) -> dict:
         if not ts:
             continue
 
-        date_str = _date_from_ms(ts)
+        date_str = date_from_ms(ts)
         d = days[date_str]
 
         usage = entry["usage"]
@@ -125,11 +217,11 @@ def _aggregate_by_date(all_entries: list) -> dict:
             d["_tool_counter"][tn] += 1
             d["total_tool_calls"] += 1
 
-        mkey = f"{entry.get('provider', '')}|{entry.get('model', '')}"
+        mkey = f"{entry.get('provider') or ''}|{entry.get('model') or ''}"
         if mkey not in d["_model_map"]:
             d["_model_map"][mkey] = {
-                "provider": entry.get("provider", ""),
-                "model": entry.get("model", ""),
+                "provider": entry.get("provider") or "",
+                "model": entry.get("model") or "",
                 "calls": 0,
                 "tokens": 0,
                 "cost": 0.0,
@@ -187,29 +279,30 @@ async def _run_sync(is_backfill: bool = False) -> None:
     state = _load_sync_state()
     last_synced_date = None if is_backfill else state.get("last_synced_date")
 
-    session_files = _discover_session_files(OPENCLAW_AGENT_ID)
-    if not session_files:
-        print("usage_sync: no session files found, skipping")
-        return
-
-    # Parse all session files and collect entries + per-date session counts
+    # Collect entries from all three session sources
     all_entries = []
     session_dates = defaultdict(set)  # date -> set of session file indices
+    sf_idx = 0
 
-    for sf_idx, sf in enumerate(session_files):
-        _, entries = _parse_session_file(sf)
+    def _collect(files: list[str], parse_fn) -> None:
+        nonlocal sf_idx
+        for sf in files:
+            entries = parse_fn(sf)
+            if last_synced_date:
+                entries = [
+                    e for e in entries
+                    if e.get("timestamp") and date_from_ms(e["timestamp"]) >= last_synced_date
+                ]
+            for e in entries:
+                if e.get("timestamp"):
+                    session_dates[date_from_ms(e["timestamp"])].add(sf_idx)
+            all_entries.extend(entries)
+            sf_idx += 1
 
-        if last_synced_date:
-            entries = [
-                e for e in entries
-                if e.get("timestamp") and _date_from_ms(e["timestamp"]) >= last_synced_date
-            ]
-
-        for e in entries:
-            if e.get("timestamp"):
-                session_dates[_date_from_ms(e["timestamp"])].add(sf_idx)
-
-        all_entries.extend(entries)
+    # OpenClaw sessions
+    _collect(discover_session_files(OPENCLAW_AGENT_ID), lambda sf: parse_session_file(sf)[1])
+    # All native Claude CLI sessions — covers cowork and any other Claude Code usage
+    _collect(_discover_claude_native_session_files(), _parse_claude_native_session_file)
 
     if not all_entries:
         print(f"usage_sync: no new entries since {last_synced_date}, skipping")

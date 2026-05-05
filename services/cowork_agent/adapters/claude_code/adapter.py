@@ -147,22 +147,30 @@ def _append_exchange(
     assistant_text: str,
     usage: dict,
     model_id: str,
+    user_time: str | None = None,
 ) -> None:
     """
     Append a user+assistant turn to {session_id}.jsonl inside the project's
     sessions directory. Also bumps updatedAt in sessions.json.
+
+    user_time should be the ISO timestamp captured before the CLI subprocess
+    was launched so that response latency can be computed from the JSONL.
     """
     agent_id = _agent_id_from_key(session_key)
     sd = _sessions_dir(agent_id)
     sd.mkdir(parents=True, exist_ok=True)
     now_iso = datetime.now(timezone.utc).isoformat()
+    inp = usage.get("input_tokens", 0) or 0
+    out = usage.get("output_tokens", 0) or 0
+    cache_r = usage.get("cache_read_input_tokens", 0) or 0
+    cache_w = usage.get("cache_creation_input_tokens", 0) or 0
 
     with open(sd / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
         f.write(
             json.dumps({
                 "type": "message",
                 "id": short_id(),
-                "timestamp": now_iso,
+                "timestamp": user_time or now_iso,
                 "message": {
                     "role": "user",
                     "content": [{"type": "text", "text": user_text}],
@@ -180,10 +188,11 @@ def _append_exchange(
                     "model": model_id,
                     "stopReason": "stop",
                     "usage": {
-                        "input": usage.get("input_tokens", 0),
-                        "output": usage.get("output_tokens", 0),
-                        "cacheRead": usage.get("cache_read_input_tokens", 0),
-                        "cacheWrite": usage.get("cache_creation_input_tokens", 0),
+                        "input": inp,
+                        "output": out,
+                        "cacheRead": cache_r,
+                        "cacheWrite": cache_w,
+                        "totalTokens": inp + out + cache_r + cache_w,
                     },
                 },
             }) + "\n"
@@ -418,6 +427,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
         cmd = self._build_cmd(question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd)
 
+        request_time = datetime.now(timezone.utc).isoformat()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -440,11 +450,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             if event.get("type") == "result":
                 native_session_id = _extract_native_session_id(event)
                 usage = event.get("usage") or {}
-                model_id = event.get("model", "")
+                model_id = model_id or event.get("model", "")
                 result_text = (event.get("result") or "").strip()
                 continue
 
+            if event.get("type") == "assistant_meta":
+                model_id = model_id or event.get("model", "")
+                continue
+
             if event.get("type") == "token":
+                model_id = model_id or event.get("model", "")
                 response_parts.append(event.get("token", ""))
 
             yield event
@@ -460,7 +475,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
         if sk and our_session_id and response_parts:
             full_response = "".join(response_parts)
-            _append_exchange(our_session_id, sk, question, full_response, usage, model_id)
+            _append_exchange(our_session_id, sk, question, full_response, usage, model_id, user_time=request_time)
 
             if native_session_id:
                 agent_id_for_key = _agent_id_from_key(sk)
