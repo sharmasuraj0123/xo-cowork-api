@@ -559,6 +559,29 @@ async def app_restart():
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
+@app.post("/app/update")
+async def app_update():
+    """Pull latest code safely via cowork-update.sh in background."""
+    import subprocess
+    script = (Path(__file__).resolve().parent / "cowork-update.sh").resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="App update script not found")
+    try:
+        subprocess.Popen(
+            [str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(script.parent),
+            start_new_session=True,
+        )
+        return {
+            "status": "accepted",
+            "message": "Update triggered in background"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
 @app.post("/ask_question")
 async def ask_question(data: AskQuestionRequest):
     """
