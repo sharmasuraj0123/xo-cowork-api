@@ -29,6 +29,7 @@ TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
 VERCEL_USER_URL = "https://api.vercel.com/v2/user"
 VERCEL_OAUTH_AUTHORIZE_URL = "https://vercel.com/oauth/authorize"
 VERCEL_OAUTH_TOKEN_URL = "https://api.vercel.com/login/oauth/token"
+VERCEL_OAUTH_REGISTER_URL = "https://api.vercel.com/login/oauth/register"
 
 # In-memory store for pending OAuth flows: state → {code_verifier, redirect_uri}
 _pending_oauth: dict[str, dict[str, str]] = {}
@@ -71,6 +72,77 @@ def _write_tokens(data: dict[str, Any]) -> None:
 def get_oauth_client() -> dict[str, Any] | None:
     """Return the registered OAuth client credentials from mcp-tokens.json, or None."""
     return _read_tokens().get("vercel_client")
+
+
+async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
+    """
+    Dynamically register a new OAuth 2.1 client with Vercel (RFC 7591).
+
+    POSTs the client metadata to Vercel's registration endpoint and persists
+    the returned client_id (plus client_secret if any) under `vercel_client`
+    in mcp-tokens.json. Subsequent calls to get_oauth_client() will return it.
+    """
+    metadata = {
+        "client_name": "xo-cowork",
+        "redirect_uris": [redirect_uri],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.post(
+                VERCEL_OAUTH_REGISTER_URL,
+                json=metadata,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("Timed out registering Vercel OAuth client.") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Could not reach Vercel registration endpoint: {exc}") from exc
+
+    if resp.status_code not in (200, 201):
+        try:
+            body = resp.json()
+            err = body.get("error_description") or body.get("error") or resp.text
+        except Exception:
+            err = resp.text
+        log.error("Vercel DCR failed %s: %s", resp.status_code, err)
+        raise RuntimeError(f"Vercel OAuth client registration failed: {err}")
+
+    registered = resp.json()
+    client_id = registered.get("client_id")
+    if not client_id:
+        raise RuntimeError("Vercel registration response missing client_id.")
+
+    entry: dict[str, Any] = {
+        "client_id": client_id,
+        "token_endpoint_auth_method": metadata["token_endpoint_auth_method"],
+        "grant_types": metadata["grant_types"],
+        "response_types": metadata["response_types"],
+        "client_name": metadata["client_name"],
+        "redirect_uris": metadata["redirect_uris"],
+    }
+    if registered.get("client_secret"):
+        entry["client_secret"] = registered["client_secret"]
+
+    data = _read_tokens()
+    data["vercel_client"] = entry
+    _write_tokens(data)
+    log.info("Registered new Vercel OAuth client (client_id=%s)", client_id)
+    return entry
+
+
+async def ensure_oauth_client(redirect_uri: str) -> dict[str, Any]:
+    """
+    Return the existing OAuth client, or register a new one via DCR if absent.
+    Idempotent: only one registration round-trip per fresh checkout.
+    """
+    existing = get_oauth_client()
+    if existing and existing.get("client_id"):
+        return existing
+    return await register_oauth_client(redirect_uri)
 
 
 def get_vercel_token() -> str | None:
