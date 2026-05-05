@@ -117,6 +117,16 @@ if IS_LOCAL_STAGE and not os.path.isdir(AI_WORKSPACE_ROOT):
 
 # HTTP client timeout settings
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+STARTUP_WARMUP_ENABLED = os.getenv("STARTUP_WARMUP_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STARTUP_WARMUP_URL = (
+    os.getenv("STARTUP_WARMUP_URL", "http://localhost:5002").strip().rstrip("/") + "/"
+)
+STARTUP_WARMUP_DELAY_SECONDS = float(os.getenv("STARTUP_WARMUP_DELAY_SECONDS", "10"))
 
 # Claude Code timeout (in seconds) - allow longer for complex queries
 CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "300"))  # 5 minutes default
@@ -323,6 +333,21 @@ async def save_chat_messages(
     )
 
 
+async def startup_warmup_request() -> None:
+    """Trigger a local warmup request after app startup (non-fatal)."""
+    if not STARTUP_WARMUP_ENABLED:
+        print("   Startup warmup: disabled")
+        return
+
+    await asyncio.sleep(max(0.0, STARTUP_WARMUP_DELAY_SECONDS))
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            response = await client.get(STARTUP_WARMUP_URL)
+        print(f"✅ Startup warmup request succeeded: {STARTUP_WARMUP_URL} ({response.status_code})")
+    except Exception as e:
+        print(f"⚠️ Startup warmup request failed (non-fatal): {STARTUP_WARMUP_URL} - {e}")
+
+
 # =============================================================================
 # FastAPI Application
 # =============================================================================
@@ -341,6 +366,7 @@ async def lifespan(app: FastAPI):
     print(f"   Claude Permission Mode: {CLAUDE_PERMISSION_MODE}")
     print(f"   AI Workspace Root: {AI_WORKSPACE_ROOT}")
     print(f"   Codex CLI: {CODEX_CLI_PATH} (timeout={CODEX_TIMEOUT}s)")
+    print(f"   Startup warmup: {'enabled' if STARTUP_WARMUP_ENABLED else 'disabled'} ({STARTUP_WARMUP_URL})")
     print("   Skills: .claude/skills (Claude-native)")
     print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
     startup_auth_session_id = os.getenv("XO_AUTH_SESSION_ID", "").strip()
@@ -366,6 +392,7 @@ async def lifespan(app: FastAPI):
 
     # Start daily usage sync background task
     _sync_task = None
+    _warmup_task = None
     if start_usage_sync_scheduler:
         try:
             _sync_task = asyncio.create_task(start_usage_sync_scheduler())
@@ -373,9 +400,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️ Usage sync failed to start (non-fatal): {e}")
 
+    _warmup_task = asyncio.create_task(startup_warmup_request())
+
     yield
 
     # Cleanup background task
+    if _warmup_task and not _warmup_task.done():
+        _warmup_task.cancel()
+        try:
+            await _warmup_task
+        except asyncio.CancelledError:
+            pass
+
     if _sync_task:
         _sync_task.cancel()
         try:
