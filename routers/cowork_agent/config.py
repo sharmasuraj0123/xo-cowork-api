@@ -204,23 +204,39 @@ def get_openclaw_config():
     return _mask_sensitive(cfg)
 
 
+def _resolve_projects_root() -> Path:
+    """User-facing projects directory exposed to the frontend sidebar.
+
+    Sourced from the ``XO_PROJECTS_ROOT`` env var; defaults to ``~/xo-projects``
+    when unset. Created on read so the frontend's first list-directory call
+    always succeeds even on a fresh machine.
+    """
+    raw = (os.getenv("XO_PROJECTS_ROOT", "") or "").strip() or "~/xo-projects"
+    root = Path(raw).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 @router.get("/api/config/workspace")
 def get_workspace_config():
     """
-    Return workspace root paths for each agent backend, sourced entirely from
-    their config files — no paths are hardcoded here.
+    Return workspace root paths for each agent backend.
+
+    The active agent's entry is overridden with ``XO_PROJECTS_ROOT`` (default
+    ``~/xo-projects``) so user-created projects live outside the agent's
+    internal workspace. Openclaw internals keep using ``_AGENT.workspace_dir``
+    directly — only what the frontend sees as "the projects root" changes.
 
     Response shape:
       {
-        "roots": { "openclaw": "/home/coder/.openclaw/workspace", "claude_code": "/home/coder/claude-cowork" },
-        "default": "claude_code"   // active backend (AGENT_NAME env or manifest default)
+        "roots": { "openclaw": "/home/coder/xo-projects", "claude_code": "/home/coder/claude-cowork" },
+        "default": "openclaw"   // active backend (AGENT_NAME env or manifest default)
       }
     """
     roots: dict[str, str] = {}
 
-    # OpenClaw workspace comes from the active manifest's workspace_dir.
-    if _AGENT.workspace_dir:
-        roots[_AGENT.name] = str(_AGENT.workspace_dir)
+    # Active agent's projects root is env-driven; the directory is created if missing.
+    roots[_AGENT.name] = str(_resolve_projects_root())
 
     # Claude Code workspace comes from config/agents/claude_code/settings.json → cowork_root.
     try:
