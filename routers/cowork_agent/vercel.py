@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from services.cowork_agent.vercel_connector import (
     delete_vercel_token,
+    ensure_oauth_client,
     exchange_code_for_tokens,
     get_oauth_client,
     get_status,
@@ -119,14 +120,14 @@ async def vercel_oauth_start(
     The frontend should open auth_url (e.g. in a popup) and listen for the
     postMessage from /callback to know when the flow completes.
     """
-    if not get_oauth_client():
-        raise HTTPException(500, detail="Vercel OAuth client not configured in mcp-tokens.json.")
-
     effective_redirect = redirect_uri or _DEFAULT_REDIRECT_URI
 
     try:
+        # Auto-register the OAuth client via Vercel's DCR endpoint on first
+        # use, so a fresh checkout works without manual mcp-tokens.json setup.
+        await ensure_oauth_client(effective_redirect)
         flow = start_oauth_flow(redirect_uri=effective_redirect)
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(500, detail=str(exc))
 
     return JSONResponse({
