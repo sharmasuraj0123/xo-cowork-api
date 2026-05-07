@@ -40,18 +40,24 @@ from services.cowork_agent.helpers import normalize_agent_id
 _SKIP_NAMES = {".git"}
 
 
-def _template_dir() -> Path | None:
-    """Return the project template directory, or None if not found.
+_BUNDLED_TEMPLATE = Path(__file__).parent / "project_template"
 
-    Checks ``XO_PROJECT_TEMPLATE`` env var first, then defaults to
-    ``~/ultimate-work``.
+
+def _template_dir() -> Path:
+    """Return the project template directory.
+
+    Priority: ``XO_PROJECT_TEMPLATE`` env var → ``~/ultimate-work`` →
+    bundled ``project_template/`` shipped with this package (always present).
     """
     raw = (os.getenv("XO_PROJECT_TEMPLATE", "") or "").strip()
     if raw:
         t = Path(raw).expanduser().resolve()
-        return t if t.is_dir() else None
+        if t.is_dir():
+            return t
     default = Path.home() / "ultimate-work"
-    return default if default.is_dir() else None
+    if default.is_dir():
+        return default
+    return _BUNDLED_TEMPLATE
 
 
 def _copy_template(src: Path, dst: Path) -> None:
@@ -149,10 +155,7 @@ def scaffold_project(
     pdir.mkdir(parents=True, exist_ok=True)
     xdir.mkdir(parents=True, exist_ok=True)
 
-    # Copy from the user's template directory
-    tpl = _template_dir()
-    if tpl:
-        _copy_template(tpl, pdir)
+    _copy_template(_template_dir(), pdir)
 
     # sessions.json is a system file the harness reads/writes; not in the template
     sessions_json = xdir / "sessions" / "sessions.json"
