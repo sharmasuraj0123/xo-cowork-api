@@ -124,6 +124,25 @@ class OpenclawAdapter(BaseAgentAdapter):
 
         xo_agent_id = kwargs.get("agent_id") or kwargs.get("xo_agent_id")
         oc_agent = kwargs.get("agent_type") or "main"
+        prefetch_task = kwargs.get("openclaw_prefetch_task")
+
+        if prefetch_task is not None:
+            # chat_prompt already started the openclaw HTTP call; await it rather
+            # than making a second request. Fake-stream the accumulated response.
+            try:
+                _key, native_id, response_text = await prefetch_task
+            except Exception as exc:
+                yield {"type": "error", "error": str(exc)}
+                yield {"done": True, "native_session_id": None}
+                return
+            # If chat_prompt's poll didn't resolve session_id in time, signal it
+            # now so _dispatcher_sse can emit session-created before any tokens.
+            if not session_id and native_id:
+                yield {"type": "session-id-resolved", "session_id": native_id}
+            for char in response_text:
+                yield {"type": "token", "token": char}
+            yield {"done": True, "native_session_id": native_id}
+            return
 
         if session_id:
             session_key = find_session_key(session_id)

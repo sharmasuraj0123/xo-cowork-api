@@ -73,6 +73,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     agent_type = stream_info.get("agent_type")
     agent_id = stream_info.get("agent_id")
     is_new_session = stream_info.get("is_new_session", False)
+    prefetch_task = stream_info.get("openclaw_prefetch_task")
 
     if is_new_session and our_session_id:
         event_id = 1
@@ -83,6 +84,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
 
     dispatcher = AgentDispatcher(agent_name)
     final_native_session_id = None
+    session_id_resolved_early = False
     queue: asyncio.Queue = asyncio.Queue()
 
     async def _produce():
@@ -94,6 +96,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 our_session_id=our_session_id,
                 agent_id=agent_id,
                 is_new_session=is_new_session,
+                openclaw_prefetch_task=prefetch_task,
             ):
                 await queue.put(event)
         except Exception as exc:
@@ -117,6 +120,14 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
             if event.get("done"):
                 final_native_session_id = event.get("native_session_id")
                 break
+            elif event.get("type") == "session-id-resolved":
+                # Adapter resolved the session ID mid-stream (e.g. new openclaw
+                # session where poll in chat_prompt didn't find it in time).
+                sid = event.get("session_id")
+                if sid and not our_session_id:
+                    yield f"id: {event_id}\nevent: session-created\ndata: {json.dumps({'session_id': sid})}\n\n"
+                    event_id += 1
+                    session_id_resolved_early = True
             elif event.get("type") == "token":
                 yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'text': event.get('token', '')})}\n\n"
                 event_id += 1
@@ -129,10 +140,10 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     resolved_session_id = our_session_id or final_native_session_id
     if _session_id_out is not None:
         _session_id_out.append(resolved_session_id)
-    if is_new_session and not our_session_id and resolved_session_id:
+    if is_new_session and not our_session_id and resolved_session_id and not session_id_resolved_early:
         yield f"id: {event_id}\nevent: session-created\ndata: {json.dumps({'session_id': resolved_session_id})}\n\n"
         event_id += 1
-    yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'session_id': resolved_session_id})}\n\n"
+    yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'finish_reason': 'stop', 'session_id': resolved_session_id})}\n\n"
 
 
 @router.post("/api/chat/prompt")
@@ -156,18 +167,9 @@ async def chat_prompt(request: Request):
 
     print(f"[chat] routing → agent_name={agent_name!r} session_id={session_id!r} workspace={body.get('workspace')!r}")
 
-    # All agents use AgentDispatcher → adapter.stream()
     is_new_session = not bool(session_id)
 
-    # OpenClaw assigns session IDs server-side; don't pre-generate a local UUID
-    # for new sessions — the native ID flows back via the session-created SSE event.
-    if agent_name == "openclaw" and is_new_session:
-        our_session_id = None
-    elif is_new_session:
-        our_session_id = str(uuid.uuid4())
-    else:
-        our_session_id = session_id
-
+    # Resolve agent_id from explicit field or workspace hint (all agents, new sessions only).
     agent_id = body.get("agent_id")
     if not agent_id and is_new_session:
         workspace_hint = body.get("workspace", "")
@@ -185,6 +187,38 @@ async def chat_prompt(request: Request):
             except Exception:
                 pass
 
+    if agent_name == "openclaw" and is_new_session:
+        # OpenClaw assigns session IDs server-side. Start the HTTP call as a
+        # background task and poll briefly so we can return a real session_id
+        # in this HTTP response. The SSE phase awaits the same task via the
+        # adapter — the openclaw API is only called once.
+        from services.cowork_agent.streaming import create_new_session, find_session_id_by_key
+        oc_agent = body.get("agent_type") or "main"
+        session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
+        prefetch_task = asyncio.create_task(
+            create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
+        )
+        our_session_id = None
+        for _ in range(20):
+            await asyncio.sleep(1.0)
+            our_session_id = find_session_id_by_key(session_key)
+            if our_session_id:
+                break
+        stream_id = str(uuid.uuid4())
+        active_streams[stream_id] = {
+            "question": text,
+            "session_id": our_session_id,
+            "our_session_id": our_session_id,
+            "agent_name": "openclaw",
+            "agent_type": body.get("agent_type"),
+            "agent_id": agent_id,
+            "is_new_session": True,
+            "openclaw_prefetch_task": prefetch_task,
+        }
+        return {"stream_id": stream_id, "session_id": our_session_id}
+
+    # All other cases (non-openclaw new sessions, all existing sessions).
+    our_session_id = str(uuid.uuid4()) if is_new_session else session_id
     stream_id = str(uuid.uuid4())
     active_streams[stream_id] = {
         "question": text,
