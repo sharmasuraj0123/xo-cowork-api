@@ -50,15 +50,27 @@ def _write_tokens(data: dict[str, Any]) -> None:
 
 
 def get_github_token() -> str | None:
-    """Return the stored GitHub PAT, or None."""
+    """Return the stored GitHub access token, or None."""
     entry = _read_tokens().get("github")
     if not entry:
         return None
     return entry.get("access_token") or None
 
 
-def save_github_token(token: str) -> None:
-    """Save a GitHub PAT to mcp-tokens.json."""
+def get_github_auth_method() -> str | None:
+    """Return the auth method used for the stored token: "pat", "cli", or None."""
+    entry = _read_tokens().get("github")
+    if not entry:
+        return None
+    # Pre-existing tokens (no auth_method field) are PATs.
+    return entry.get("auth_method") or "pat"
+
+
+def save_github_token(token: str, *, auth_method: str = "pat") -> None:
+    """Save a GitHub access token to mcp-tokens.json.
+
+    auth_method is "pat" (user-pasted PAT) or "cli" (from `gh auth login`).
+    """
     data = _read_tokens()
     data["github"] = {
         "access_token": token,
@@ -66,9 +78,10 @@ def save_github_token(token: str) -> None:
         "expires_at": 0,
         "token_type": "Bearer",
         "scope": "",
+        "auth_method": auth_method,
     }
     _write_tokens(data)
-    log.info("GitHub token saved to %s", TOKEN_FILE)
+    log.info("GitHub token saved to %s (method=%s)", TOKEN_FILE, auth_method)
 
 
 def delete_github_token() -> None:
@@ -153,11 +166,16 @@ async def get_status() -> dict[str, Any]:
     """
     Compute the current GitHub connector status.
 
-    Returns a dict with `status`, and optionally `username`, `avatar_url`, `scopes`.
+    Returns a dict with `status`, and optionally `username`, `avatar_url`,
+    `scopes`, and `auth_method` ("pat" | "cli") so the UI can show how the
+    user is connected.
     """
     token = get_github_token()
     if not token:
         return {"status": "needs_auth"}
 
     result = await validate_token(token)
+    method = get_github_auth_method()
+    if method:
+        result["auth_method"] = method
     return result
