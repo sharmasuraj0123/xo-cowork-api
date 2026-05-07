@@ -187,12 +187,9 @@ wait_for_port_release() {
 # Setup: Validate required env vars
 # ==============================================================
 validate_env() {
-    local missing=0
-
-    # At least one model provider key required
+    # At least one model provider key recommended (warning only, non-fatal)
     if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
-        log_error "No model provider key set. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
-        missing=1
+        log_warn "No model provider key set. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
     fi
 
     # Channel-specific validation
@@ -206,11 +203,7 @@ validate_env() {
         fi
     fi
 
-    if [ "$missing" -eq 1 ]; then
-        log_error "Set required vars in .env. Exiting."
-        exit 1
-    fi
-    log_success "Required environment variables are set"
+    log_success "Environment validation complete"
 }
 
 # ==============================================================
