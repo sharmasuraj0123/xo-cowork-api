@@ -192,11 +192,21 @@ async def chat_prompt(request: Request):
         # background task and poll briefly so we can return a real session_id
         # in this HTTP response. The SSE phase awaits the same task via the
         # adapter — the openclaw API is only called once.
-        from services.cowork_agent.streaming import create_new_session, find_session_id_by_key
-        oc_agent = body.get("agent_type") or "main"
+        from services.cowork_agent.streaming import (
+            create_new_session,
+            find_session_id_by_key,
+            openclaw_agent_id_from_prompt_body,
+        )
+        # Derive the openclaw agent id from body.model (e.g. "openclaw/research"
+        # → "research"); the frontend dropdown writes this field. Fall back to
+        # the xo-project agent_id so sessions land in the right sidebar bucket.
+        oc_agent = openclaw_agent_id_from_prompt_body(body)
+        if oc_agent == "main" and agent_id:
+            oc_agent = agent_id
+        xo_agent_id = agent_id or oc_agent
         session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
         prefetch_task = asyncio.create_task(
-            create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
+            create_new_session(text, session_key=session_key, xo_agent_id=xo_agent_id)
         )
         our_session_id = None
         for _ in range(20):
