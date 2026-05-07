@@ -342,39 +342,42 @@ def patch_agent_into_config(cfg: dict, agent_id: str, body: UpdateAgentBody) -> 
 
 @router.get("/api/agents")
 def list_agents():
+    import os
+    active_backend = os.getenv("AGENT_NAME", "openclaw")
     agents: list[dict] = []
 
-    # OpenClaw agents (registered in openclaw.json#agents.list[])
-    cfg = load_openclaw_config()
-    entries = {normalize_agent_id(str(e.get("id", ""))): e for e in list_agent_entries(cfg)}
-    if AGENTS_DIR.exists():
-        for d in sorted(AGENTS_DIR.iterdir()):
-            if not d.is_dir():
-                continue
-            aid = d.name
-            meta = entries.get(normalize_agent_id(aid), {})
-            display = meta.get("name") if isinstance(meta.get("name"), str) else None
-            desc = ""
-            if isinstance(meta.get("identity"), dict):
-                ident = meta["identity"]
-                if isinstance(ident.get("bio"), str):
-                    desc = ident["bio"]
-            agents.append(_agent_info_for_id(cfg, aid, display, desc))
-
-    # Claude Code agents — scan xo-projects for .xo/agent.json records.
-    projects_root = xo_projects_root()
-    if projects_root.exists():
-        for d in sorted(projects_root.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
-            meta_path = d / ".xo" / "agent.json"
-            if not meta_path.exists():
-                continue
-            try:
-                meta = json.loads(meta_path.read_text())
-            except Exception:
-                meta = {}
-            agents.append(_agent_info_claude(d.name, meta))
+    if active_backend == "claude_code":
+        # Claude Code: one agent per xo-project that has a .xo/agent.json record.
+        projects_root = xo_projects_root()
+        if projects_root.exists():
+            for d in sorted(projects_root.iterdir()):
+                if not d.is_dir() or d.name.startswith("."):
+                    continue
+                meta_path = d / ".xo" / "agent.json"
+                if not meta_path.exists():
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text())
+                except Exception:
+                    meta = {}
+                agents.append(_agent_info_claude(d.name, meta))
+    else:
+        # OpenClaw: agents registered in openclaw.json + their ~/.openclaw/agents/<id>/ dirs.
+        cfg = load_openclaw_config()
+        entries = {normalize_agent_id(str(e.get("id", ""))): e for e in list_agent_entries(cfg)}
+        if AGENTS_DIR.exists():
+            for d in sorted(AGENTS_DIR.iterdir()):
+                if not d.is_dir():
+                    continue
+                aid = d.name
+                meta = entries.get(normalize_agent_id(aid), {})
+                display = meta.get("name") if isinstance(meta.get("name"), str) else None
+                desc = ""
+                if isinstance(meta.get("identity"), dict):
+                    ident = meta["identity"]
+                    if isinstance(ident.get("bio"), str):
+                        desc = ident["bio"]
+                agents.append(_agent_info_for_id(cfg, aid, display, desc))
 
     return agents
 
