@@ -56,12 +56,21 @@ def load_all_sessions() -> list[dict]:
                         time_created = ts
                 title = derive_title(records)
 
+            # For openclaw sessions the session key is "agent:<id>:web:<random>".
+            # Use that embedded id so sessions group under the openclaw agent,
+            # not the project folder they happen to be stored in.
+            if meta.get("backend") == "openclaw":
+                parts = key.split(":")
+                effective_agent = parts[1] if len(parts) >= 2 and parts[1] else agent_name
+            else:
+                effective_agent = agent_name
+
             sessions.append({
                 "id": session_id,
                 "project_id": None,
                 "parent_id": None,
                 "slug": None,
-                "agent": agent_name,
+                "agent": effective_agent,
                 "directory": meta.get("directory") or str(project_dir),
                 "title": title,
                 "version": 1,
