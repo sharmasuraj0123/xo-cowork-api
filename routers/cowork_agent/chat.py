@@ -168,16 +168,20 @@ async def chat_prompt(request: Request):
         our_session_id = str(uuid.uuid4()) if is_new_session else session_id
 
         # Resolve agent_id — explicit body field wins; fall back to extracting from
-        # the workspace path hint the frontend sends (e.g. ~/claude-cowork/my-project).
+        # the workspace path hint the frontend sends (e.g. ~/xo-projects/my-project).
         agent_id = body.get("agent_id")
         if not agent_id and is_new_session:
             workspace_hint = body.get("workspace", "")
             if workspace_hint:
+                from services.cowork_agent.project_layout import xo_projects_root
                 from services.cowork_agent.settings import CLAUDE_COWORK_DIR
                 try:
                     ws_path = __import__("pathlib").Path(workspace_hint).expanduser().resolve()
+                    xo_root = xo_projects_root().resolve()
                     cc_path = CLAUDE_COWORK_DIR.resolve()
-                    if str(ws_path).startswith(str(cc_path) + "/"):
+                    if str(ws_path).startswith(str(xo_root) + "/"):
+                        agent_id = ws_path.relative_to(xo_root).parts[0]
+                    elif str(ws_path).startswith(str(cc_path) + "/"):
                         agent_id = ws_path.relative_to(cc_path).parts[0]
                 except Exception:
                     pass

@@ -144,7 +144,14 @@ def seed_agent_workspace(workspace_dir: Path, template_dir: Path) -> None:
 
 
 def ensure_openclaw_agent_disk(agent_id: str, workspace_dir: Path) -> None:
-    """Sessions store + optional workspace bootstrap; matches ~/.openclaw/agents/<id> layout."""
+    """Initialize OpenClaw's ~/.openclaw/agents/<id>/ store.
+
+    The workspace itself (xo-projects/<id>/) is scaffolded by
+    ``services.cowork_agent.project_layout.scaffold_project``; this
+    function only sets up the OpenClaw-internal session store and agent
+    dir. The ``workspace_dir`` argument is accepted for signature
+    compatibility but no longer seeded here.
+    """
     aid = normalize_agent_id(agent_id)
     sessions_dir = AGENTS_DIR / aid / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -152,5 +159,3 @@ def ensure_openclaw_agent_disk(agent_id: str, workspace_dir: Path) -> None:
     if not idx_file.exists():
         idx_file.write_text("{}", encoding="utf-8")
     (AGENTS_DIR / aid / "agent").mkdir(parents=True, exist_ok=True)
-    tpl = DEFAULT_OPENCLAW_WORKSPACE if DEFAULT_OPENCLAW_WORKSPACE.is_dir() else Path()
-    seed_agent_workspace(workspace_dir, tpl)
