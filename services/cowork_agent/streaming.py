@@ -70,7 +70,7 @@ def openclaw_agent_id_from_prompt_body(body: dict) -> str:
 # DEPRECATED: OpenClaw-specific parsing logic has moved to
 # services/cowork_agent/adapters/openclaw/streaming.py.
 # This function is kept here so existing callers continue to work.
-async def create_new_session(text: str, session_key: str) -> tuple[str, str, str]:
+async def create_new_session(text: str, session_key: str, xo_agent_id: str | None = None) -> tuple[str, str, str]:
     """
     Create a new OpenClaw session by sending the first message.
 
@@ -132,7 +132,7 @@ async def create_new_session(text: str, session_key: str) -> tuple[str, str, str
     # No-op for legacy workspaces (those without .xo/).
     try:
         from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
-        tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL)
+        tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL, xo_agent_id=xo_agent_id)
     except Exception:
         pass
 
@@ -155,6 +155,7 @@ async def stream_openclaw_to_sse(stream_id: str):
     session_id = stream_info["session_id"]
     text = stream_info["text"]
     session_key = stream_info["session_key"]
+    xo_agent_id = stream_info.get("agent_id")
 
     event_id = 0
     response_text = ""
@@ -257,7 +258,7 @@ async def stream_openclaw_to_sse(stream_id: str):
     if response_text:
         try:
             from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
-            tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL)
+            tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL, xo_agent_id=xo_agent_id)
         except Exception:
             pass
 

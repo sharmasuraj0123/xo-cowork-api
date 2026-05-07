@@ -7,9 +7,10 @@ transcript copy alongside the gateway's files so the canonical
 ``xo-projects/<project>/.xo/sessions/`` layout has the same data the
 harness reads for any other backend.
 
-Skips silently if the registered workspace for the openclaw agent_id
-isn't laid out as an xo-projects project (no ``.xo/`` directory). That
-keeps legacy ``~/.openclaw/workspace/<id>/`` agents working unchanged.
+The target project is determined by the explicit ``xo_agent_id`` argument
+(the subdirectory name under ``~/xo-projects/``). If not supplied it falls
+back to the agent ID embedded in the session key. The ``.xo/sessions/``
+directory is created on demand — no pre-existing project scaffold required.
 """
 
 from __future__ import annotations
@@ -19,28 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.cowork_agent.helpers import short_id
-from services.cowork_agent.openclaw_store import (
-    list_agent_entries,
-    load_openclaw_config,
-    resolve_agent_workspace_dir,
-)
+from services.cowork_agent.project_layout import xo_projects_root
 
 
 def _agent_id_from_session_key(session_key: str | None) -> str | None:
     """``agent:<agent_id>:web:<random>`` → ``<agent_id>`` (or None)."""
     parts = (session_key or "").split(":")
     return parts[1] if len(parts) >= 2 and parts[1] else None
-
-
-def _project_xo_dir_for_agent(agent_id: str) -> Path | None:
-    """Return ``<workspace>/.xo`` for the openclaw agent's registered workspace,
-    or ``None`` if the workspace doesn't have an ``.xo/`` (i.e. legacy layout)."""
-    cfg = load_openclaw_config()
-    if not list_agent_entries(cfg):
-        return None
-    workspace = resolve_agent_workspace_dir(cfg, agent_id)
-    xo = workspace / ".xo"
-    return xo if xo.is_dir() else None
 
 
 def _write_index_atomic(path: Path, data: dict) -> None:
@@ -56,20 +42,23 @@ def tee_exchange(
     question: str,
     response_text: str,
     model_id: str = "",
+    xo_agent_id: str | None = None,
 ) -> None:
     """Append (user, assistant) turn to ``<project>/.xo/sessions/{session_id}.jsonl``
-    and bump the project's sessions.json entry. Resume still goes through the
-    gateway; this is read-only mirror data for the harness.
+    and bump the project's sessions.json entry.
+
+    ``xo_agent_id`` is the subdirectory name under ``~/xo-projects/``. When
+    omitted the agent ID is extracted from ``session_key``. The sessions
+    directory is created if it doesn't exist yet.
     """
-    agent_id = _agent_id_from_session_key(session_key)
+    agent_id = xo_agent_id or _agent_id_from_session_key(session_key)
     if not agent_id or not session_id:
         return
-    xo = _project_xo_dir_for_agent(agent_id)
-    if xo is None:
-        return
 
+    xo = xo_projects_root() / agent_id / ".xo"
     sessions_dir = xo / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
+
     now_iso = datetime.now(timezone.utc).isoformat()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
