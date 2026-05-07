@@ -70,7 +70,7 @@ def openclaw_agent_id_from_prompt_body(body: dict) -> str:
 # DEPRECATED: OpenClaw-specific parsing logic has moved to
 # services/cowork_agent/adapters/openclaw/streaming.py.
 # This function is kept here so existing callers continue to work.
-async def create_new_session(text: str, session_key: str) -> tuple[str, str, str]:
+async def create_new_session(text: str, session_key: str, xo_agent_id: str | None = None) -> tuple[str, str, str]:
     """
     Create a new OpenClaw session by sending the first message.
 
@@ -127,6 +127,15 @@ async def create_new_session(text: str, session_key: str) -> tuple[str, str, str
     if not session_id:
         raise Exception("Session was created but could not find its ID in sessions.json")
 
+    # Tee the exchange into the project's .xo/sessions/ transcript so the
+    # harness can read it without depending on the gateway's filesystem.
+    # No-op for legacy workspaces (those without .xo/).
+    try:
+        from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
+        tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL, xo_agent_id=xo_agent_id)
+    except Exception:
+        pass
+
     return session_key, session_id, response_text
 
 
@@ -146,8 +155,10 @@ async def stream_openclaw_to_sse(stream_id: str):
     session_id = stream_info["session_id"]
     text = stream_info["text"]
     session_key = stream_info["session_key"]
+    xo_agent_id = stream_info.get("agent_id")
 
     event_id = 0
+    response_text = ""
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=10.0)) as client:
@@ -224,6 +235,7 @@ async def stream_openclaw_to_sse(stream_id: str):
 
                         if content:
                             event_id += 1
+                            response_text += content
                             yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'session_id': session_id, 'text': content})}\n\n"
                 finally:
                     if not reader_task.done():
@@ -240,6 +252,15 @@ async def stream_openclaw_to_sse(stream_id: str):
 
     event_id += 1
     yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'finish_reason': 'stop', 'session_id': session_id})}\n\n"
+
+    # Tee the exchange into the project's .xo/sessions/ transcript so the
+    # harness has a project-local copy alongside the gateway's truth.
+    if response_text:
+        try:
+            from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
+            tee_exchange(session_key, session_id, text, response_text, model_id=OPENCLAW_MODEL, xo_agent_id=xo_agent_id)
+        except Exception:
+            pass
 
 
 # DEPRECATED: moved to services/cowork_agent/adapters/openclaw/streaming.py.

@@ -9,31 +9,18 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
-from services.cowork_agent.settings import CLAUDE_COWORK_DIR
 from services.cowork_agent.helpers import short_id, iso_now
+from services.cowork_agent.project_layout import (
+    project_dir as _xo_project_dir,
+    sessions_dir as _xo_sessions_dir,
+    xo_dir as _xo_dir,
+    xo_projects_root,
+)
 
 
 # ── Module-level native session ID cache (session_key → native_session_id) ───
 
 _native_map: dict[str, str] = {}
-
-
-# ── Path helpers ───────────────────────────────────────────────────────────────
-
-
-def _sessions_dir(agent_id: str) -> Path:
-    """Sessions live inside the project folder: ~/claude-cowork/{agent_id}/sessions/"""
-    return CLAUDE_COWORK_DIR / agent_id / "sessions"
-
-
-def _legacy_sessions_dir(agent_id: str) -> Path:
-    """Pre-restructure path: ~/claude-cowork/agents/{agent_id}/sessions/"""
-    return CLAUDE_COWORK_DIR / "agents" / agent_id / "sessions"
-
-
-def _project_dir(agent_id: str) -> Path:
-    """Project working directory: ~/claude-cowork/{agent_id}/"""
-    return CLAUDE_COWORK_DIR / agent_id
 
 
 # ── Index I/O ──────────────────────────────────────────────────────────────────
@@ -55,21 +42,14 @@ def _write_index(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def _load_index_with_legacy(agent_id: str) -> tuple[dict, Path]:
-    """
-    Load sessions.json, trying the current layout first then the legacy layout.
-    Returns (index_dict, authoritative_path) so callers can write back to the right file.
-    """
-    new_path = _sessions_dir(agent_id) / "sessions.json"
-    if new_path.exists():
-        return _load_index(new_path), new_path
+def _index_path(agent_id: str) -> Path:
+    return _xo_sessions_dir(agent_id) / "sessions.json"
 
-    legacy_path = _legacy_sessions_dir(agent_id) / "sessions.json"
-    if legacy_path.exists():
-        return _load_index(legacy_path), legacy_path
 
-    # Neither exists — return the new path as the target for future writes
-    return {}, new_path
+def _load_agent_index(agent_id: str) -> tuple[dict, Path]:
+    """Return (index_dict, path) for the agent's sessions.json in xo-projects."""
+    path = _index_path(agent_id)
+    return _load_index(path), path
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
@@ -94,7 +74,7 @@ def _agent_id_from_key(session_key: str) -> str:
 
 def find_session_id_by_key(session_key: str) -> str | None:
     agent_id = _agent_id_from_key(session_key)
-    index, _ = _load_index_with_legacy(agent_id)
+    index, _ = _load_agent_index(agent_id)
     meta = index.get(session_key)
     return meta.get("sessionId") if meta else None
 
@@ -104,7 +84,7 @@ def get_native_session_id(session_key: str) -> str | None:
     if cached:
         return cached
     agent_id = _agent_id_from_key(session_key)
-    index, _ = _load_index_with_legacy(agent_id)
+    index, _ = _load_agent_index(agent_id)
     meta = index.get(session_key)
     if meta:
         native = meta.get("nativeSessionId")
@@ -116,7 +96,7 @@ def get_native_session_id(session_key: str) -> str | None:
 
 def get_session_directory(session_key: str) -> str | None:
     agent_id = _agent_id_from_key(session_key)
-    index, _ = _load_index_with_legacy(agent_id)
+    index, _ = _load_agent_index(agent_id)
     meta = index.get(session_key)
     return meta.get("directory") if meta else None
 
@@ -127,7 +107,7 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
     loop in chat.py can resolve session_id without waiting for the full response.
     """
     agent_id = _agent_id_from_key(session_key)
-    sd = _sessions_dir(agent_id)
+    sd = _xo_sessions_dir(agent_id)
     sd.mkdir(parents=True, exist_ok=True)
     index_path = sd / "sessions.json"
     index = _load_index(index_path)
@@ -135,6 +115,7 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
         "sessionId": session_id,
         "nativeSessionId": "",
         "directory": cwd,
+        "backend": "claude_code",
         "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
     }
     _write_index(index_path, index)
@@ -153,7 +134,7 @@ def _append_exchange(
     sessions directory. Also bumps updatedAt in sessions.json.
     """
     agent_id = _agent_id_from_key(session_key)
-    sd = _sessions_dir(agent_id)
+    sd = _xo_sessions_dir(agent_id)
     sd.mkdir(parents=True, exist_ok=True)
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -189,50 +170,31 @@ def _append_exchange(
             }) + "\n"
         )
 
-    # Bump updatedAt in the index (using whichever path the index is stored in)
-    index, index_path = _load_index_with_legacy(agent_id)
+    # Bump updatedAt in the index
+    index, index_path = _load_agent_index(agent_id)
     if session_key in index:
         index[session_key]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
         _write_index(index_path, index)
 
 
 def find_session_key_for_session_id(session_id: str) -> str | None:
-    """
-    Search all projects' sessions.json files for a matching session_id.
-    Checks the current layout (~/claude-cowork/{id}/sessions/) first,
-    then falls back to the legacy layout (~/claude-cowork/agents/{id}/sessions/).
-    """
-    if not CLAUDE_COWORK_DIR.exists():
+    """Search xo-projects sessions for a matching session_id."""
+    root = xo_projects_root()
+    if not root.exists():
         return None
-
-    def _search_dir(root: Path, skip_names: set) -> str | None:
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir() or entry.name.startswith(".") or entry.name in skip_names:
-                continue
-            index_path = entry / "sessions" / "sessions.json"
-            if not index_path.exists():
-                continue
-            index = _load_index(index_path)
-            for key, meta in index.items():
-                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
-                    native = meta.get("nativeSessionId")
-                    if native:
-                        _native_map[key] = native
-                    return key
-        return None
-
-    # Current layout: project dirs directly under claude-cowork (skip "agents" legacy dir)
-    result = _search_dir(CLAUDE_COWORK_DIR, skip_names={"agents"})
-    if result:
-        return result
-
-    # Legacy layout: ~/claude-cowork/agents/{agent_id}/sessions/
-    legacy_root = CLAUDE_COWORK_DIR / "agents"
-    if legacy_root.exists():
-        result = _search_dir(legacy_root, skip_names=set())
-        if result:
-            return result
-
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        index_path = entry / ".xo" / "sessions" / "sessions.json"
+        if not index_path.exists():
+            continue
+        index = _load_index(index_path)
+        for key, meta in index.items():
+            if isinstance(meta, dict) and meta.get("sessionId") == session_id:
+                native = meta.get("nativeSessionId")
+                if native:
+                    _native_map[key] = native
+                return key
     return None
 
 
@@ -247,24 +209,27 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     @classmethod
     def sessions_root(cls) -> Path:
-        return CLAUDE_COWORK_DIR
+        return xo_projects_root()
+
+    @classmethod
+    def session_lookup_specs(cls) -> list[tuple[Path, str]]:
+        return [(xo_projects_root(), ".xo/sessions")]
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.commands = self.load_commands()
-        raw_root = self.config.get("cowork_root", str(CLAUDE_COWORK_DIR))
-        self.cowork_root = Path(raw_root).expanduser().resolve()
 
     def _resolve_cwd(self, agent_id: str | None) -> str:
-        """
-        Compute the working directory for a Claude subprocess.
-        Named agents run inside their project folder; 'default'/None use cowork_root.
+        """Compute the working directory for a Claude subprocess.
+
+        All agents run inside ``~/xo-projects/<agent_id>/``. When agent_id
+        is None or "default", falls back to the xo-projects root itself.
         """
         if agent_id and agent_id not in ("default", ""):
-            project = self.cowork_root / agent_id
+            project = _xo_project_dir(agent_id)
             project.mkdir(parents=True, exist_ok=True)
             return str(project)
-        return str(self.cowork_root)
+        return str(xo_projects_root())
 
     def _build_cmd(
         self,
@@ -275,7 +240,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         cwd: str | None = None,
     ) -> list[str]:
         cli = self.config.get("cli_path") or "claude"
-        workspace = cwd or str(self.cowork_root)
+        workspace = cwd or str(xo_projects_root())
         fmt = "stream-json" if stream else "json"
 
         skill_prefix = None
@@ -393,7 +358,6 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             agent_id = _agent_id_from_key(sk)
 
         # For existing sessions, use the stored directory so user project selections are preserved.
-        # For new sessions, derive from agent_id.
         if not is_new and sk:
             stored_dir = get_session_directory(sk)
             effective_cwd = stored_dir if stored_dir and stored_dir not in (".", "") else self._resolve_cwd(agent_id)
@@ -401,20 +365,13 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             effective_cwd = self._resolve_cwd(agent_id)
 
         # Write preliminary sessions.json entry only for new sessions.
-        # Calling it for existing sessions would wipe nativeSessionId and the stored directory.
         if is_new and sk and our_session_id:
             write_preliminary_entry(sk, our_session_id, effective_cwd)
 
         # Resolve native --resume ID for existing sessions.
         native_resume_id: str | None = None
-        if not is_new:
-            if sk:
-                native_resume_id = get_native_session_id(sk)
-            if not native_resume_id and our_session_id:
-                from services.cowork_agent.claude_sessions import load_session
-                rec = load_session(our_session_id)
-                if rec:
-                    native_resume_id = rec.get("native_session_id")
+        if not is_new and sk:
+            native_resume_id = get_native_session_id(sk)
 
         cmd = self._build_cmd(question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd)
 
@@ -428,7 +385,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
         native_session_id: str | None = None
         response_parts: list[str] = []
-        result_text: str = ""  # fallback: text from the result event
+        result_text: str = ""
         usage: dict = {}
         model_id = ""
 
@@ -452,8 +409,6 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         await proc.wait()
 
         # Fall back to result event text when no token events were captured.
-        # This happens when Claude completes a task via tool calls only, with no
-        # streaming text blocks — the final summary lands only in the result event.
         if not response_parts and result_text:
             response_parts.append(result_text)
             yield {"type": "token", "token": result_text}
@@ -464,7 +419,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
             if native_session_id:
                 agent_id_for_key = _agent_id_from_key(sk)
-                sd = _sessions_dir(agent_id_for_key)
+                sd = _xo_sessions_dir(agent_id_for_key)
                 index_path = sd / "sessions.json"
                 index = _load_index(index_path)
                 if sk in index:
