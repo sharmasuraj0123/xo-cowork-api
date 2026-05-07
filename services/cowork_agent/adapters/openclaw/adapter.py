@@ -113,8 +113,17 @@ class OpenclawAdapter(BaseAgentAdapter):
         Wraps adapters.openclaw.streaming.stream_to_normalized.
         """
         from services.cowork_agent.adapters.openclaw.streaming import stream_to_normalized
+        from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
         from services.cowork_agent.sessions_io import find_session_key
         from services.cowork_agent.streaming import find_session_id_by_key
+        from services.cowork_agent.settings import OPENCLAW_MODEL
+
+        # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
+        if not session_id:
+            session_id = kwargs.get("our_session_id")
+
+        xo_agent_id = kwargs.get("agent_id") or kwargs.get("xo_agent_id")
+        oc_agent = kwargs.get("agent_type") or "main"
 
         if session_id:
             session_key = find_session_key(session_id)
@@ -124,17 +133,35 @@ class OpenclawAdapter(BaseAgentAdapter):
                 return
             native_session_id = session_id
         else:
-            oc_agent = "main"
             session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
             native_session_id = None
 
+        accumulated: list[str] = []
         async for event in stream_to_normalized(question, session_key, native_session_id):
-            if event.get("done") and native_session_id is None:
-                # Attempt to resolve the session id created during this stream
-                resolved = find_session_id_by_key(session_key)
+            if event.get("type") == "heartbeat":
+                continue
+            if event.get("type") == "token":
+                accumulated.append(event["token"])
+                yield event
+            elif event.get("done"):
+                resolved = native_session_id or find_session_id_by_key(session_key)
+                response_text = "".join(accumulated)
+                if response_text:
+                    try:
+                        tee_exchange(
+                            session_key,
+                            resolved or session_key,
+                            question,
+                            response_text,
+                            model_id=OPENCLAW_MODEL,
+                            xo_agent_id=xo_agent_id,
+                        )
+                    except Exception:
+                        pass
                 yield {"done": True, "native_session_id": resolved}
                 return
-            yield event
+            else:
+                yield event
 
     async def setup(self) -> bool:
         """OpenClaw gateway readiness — returns True (gateway is external)."""
