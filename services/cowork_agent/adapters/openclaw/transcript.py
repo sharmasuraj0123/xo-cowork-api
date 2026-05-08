@@ -23,12 +23,6 @@ from services.cowork_agent.helpers import short_id
 from services.cowork_agent.project_layout import xo_projects_root
 
 
-def _agent_id_from_session_key(session_key: str | None) -> str | None:
-    """``agent:<agent_id>:web:<random>`` → ``<agent_id>`` (or None)."""
-    parts = (session_key or "").split(":")
-    return parts[1] if len(parts) >= 2 and parts[1] else None
-
-
 def _write_index_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -48,12 +42,14 @@ def tee_exchange(
     and bump the project's sessions.json entry.
 
     ``xo_agent_id`` is the subdirectory name under ``~/xo-projects/``. When
-    omitted the agent ID is extracted from ``session_key``. The sessions
-    directory is created if it doesn't exist yet.
+    not supplied the function returns without writing — agent-only chats
+    (no project selected) are intentionally not mirrored under xo-projects;
+    the openclaw native session files in ``~/.openclaw/agents/<id>/sessions/``
+    are the source of truth in that case.
     """
-    agent_id = xo_agent_id or _agent_id_from_session_key(session_key)
-    if not agent_id or not session_id:
+    if not xo_agent_id or not session_id:
         return
+    agent_id = xo_agent_id
 
     xo = xo_projects_root() / agent_id / ".xo"
     sessions_dir = xo / "sessions"
