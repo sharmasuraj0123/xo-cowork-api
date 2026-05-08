@@ -20,9 +20,15 @@ from services.cowork_agent.project_layout import xo_projects_root
 def load_all_sessions() -> list[dict]:
     """Scan all agents and build SessionResponse objects.
 
-    Only loads sessions from the canonical xo-projects layout
-    (~/xo-projects/<id>/.xo/sessions/sessions.json). Legacy locations
-    (~/claude-cowork/, ~/.openclaw/agents/) are no longer surfaced.
+    Two scan roots:
+    - ``~/xo-projects/<id>/.xo/sessions/`` — project-tied sessions (claude_code
+      and openclaw chats with a project workspace selected).
+    - ``~/.openclaw/agents/<id>/sessions/`` — openclaw native sessions for
+      agent-only chats (no project picked). Their xo-projects mirror is
+      intentionally skipped to avoid polluting the project dropdown.
+
+    De-duplicated via ``sessionId`` so a session that is both project-tee'd
+    and natively present surfaces only once (project-tied wins).
     """
     sessions = []
     seen_ids: set[str] = set()
@@ -56,12 +62,21 @@ def load_all_sessions() -> list[dict]:
                         time_created = ts
                 title = derive_title(records)
 
+            # For openclaw sessions the session key is "agent:<id>:web:<random>".
+            # Use that embedded id so sessions group under the openclaw agent,
+            # not the project folder they happen to be stored in.
+            if meta.get("backend") == "openclaw":
+                parts = key.split(":")
+                effective_agent = parts[1] if len(parts) >= 2 and parts[1] else agent_name
+            else:
+                effective_agent = agent_name
+
             sessions.append({
                 "id": session_id,
                 "project_id": None,
                 "parent_id": None,
                 "slug": None,
-                "agent": agent_name,
+                "agent": effective_agent,
                 "directory": meta.get("directory") or str(project_dir),
                 "title": title,
                 "version": 1,
@@ -83,6 +98,69 @@ def load_all_sessions() -> list[dict]:
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
             _ingest_project_sessions_dir(agent_dir / ".xo" / "sessions", agent_dir.name, agent_dir)
+
+    # Openclaw native sessions (no project picked at chat time). Surfaced so
+    # agent-only chats still appear in the agents sidebar even though they
+    # have no xo-projects mirror.
+    if AGENTS_DIR.exists():
+        for agent_dir in sorted(AGENTS_DIR.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            sessions_dir = agent_dir / "sessions"
+            sessions_index = sessions_dir / "sessions.json"
+            if not sessions_index.exists():
+                continue
+            try:
+                with open(sessions_index, encoding="utf-8") as f:
+                    index_data = json.load(f)
+            except Exception:
+                continue
+            for key, meta in index_data.items():
+                if not isinstance(meta, dict):
+                    continue
+                session_id = meta.get("sessionId", "")
+                if not session_id or session_id in seen_ids:
+                    continue
+                seen_ids.add(session_id)
+
+                session_file = sessions_dir / f"{session_id}.jsonl"
+                updated_at = meta.get("updatedAt")
+                time_updated = ms_to_iso(updated_at) if updated_at else iso_now()
+                time_created = time_updated
+                title = "Untitled Session"
+                if session_file.exists():
+                    records = parse_jsonl(session_file)
+                    if records:
+                        ts = records[0].get("timestamp")
+                        if ts:
+                            time_created = ts
+                    title = derive_title(records)
+
+                # Bucket name: prefer the agent_id encoded in the session_key
+                # ("agent:<id>:web:<rand>"), fall back to the directory name.
+                parts = key.split(":")
+                effective_agent = parts[1] if len(parts) >= 2 and parts[1] else agent_dir.name
+
+                sessions.append({
+                    "id": session_id,
+                    "project_id": None,
+                    "parent_id": None,
+                    "slug": None,
+                    "agent": effective_agent,
+                    "directory": meta.get("directory") or "",
+                    "title": title,
+                    "version": 1,
+                    "summary_additions": 0,
+                    "summary_deletions": 0,
+                    "summary_files": 0,
+                    "summary_diffs": [],
+                    "is_pinned": False,
+                    "permission": {},
+                    "time_created": time_created,
+                    "time_updated": time_updated,
+                    "time_compacting": None,
+                    "time_archived": None,
+                })
 
     sessions.sort(key=lambda s: s["time_updated"], reverse=True)
     return sessions
