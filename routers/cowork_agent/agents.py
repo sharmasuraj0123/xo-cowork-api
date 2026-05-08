@@ -436,7 +436,10 @@ def create_agent(body: CreateAgentBody):
         workspace_dir = project_dir(agent_id)
 
     try:
-        scaffold_project(agent_id, display_name=display_name, description=description)
+        # OpenClaw agents live under ~/.openclaw/agents/<id>/ and are listed in
+        # ~/.openclaw/openclaw.json. They are NOT projects — do not scaffold a
+        # folder under xo-projects/. The project the user chats against is a
+        # separate workspace selection per chat.
         next_cfg = apply_agent_list_entry(cfg, agent_id, display_name, workspace_dir)
         write_openclaw_config(next_cfg)
         ensure_openclaw_agent_disk(agent_id, workspace_dir)
