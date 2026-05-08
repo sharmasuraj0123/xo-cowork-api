@@ -197,12 +197,11 @@ async def chat_prompt(request: Request):
             find_session_id_by_key,
             openclaw_agent_id_from_prompt_body,
         )
-        # Derive the openclaw agent id from body.model (e.g. "openclaw/research"
-        # → "research"); the frontend dropdown writes this field. Fall back to
-        # the xo-project agent_id so sessions land in the right sidebar bucket.
+        # oc_agent identifies the openclaw agent (sidebar bucket) — derived
+        # from body.model (e.g. "openclaw/research" → "research"). xo_agent_id
+        # is the xo-projects/<id>/ folder where the session transcript is
+        # mirrored — derived from the workspace path. These are independent.
         oc_agent = openclaw_agent_id_from_prompt_body(body)
-        if oc_agent == "main" and agent_id:
-            oc_agent = agent_id
         xo_agent_id = agent_id or oc_agent
         session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
         prefetch_task = asyncio.create_task(
