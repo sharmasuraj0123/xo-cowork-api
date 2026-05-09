@@ -1,20 +1,28 @@
-# Objectives
+# OBJECTIVES.md
 
-> [TEMPLATE] Replace this section before doing real work. Objectives are the north star — stable for weeks, not days. They answer "what does winning look like?" Tasks live in WORKSPACE.md; objectives live here.
+> The north-star outcomes for this project. Stable on the order of weeks. Edit when objectives genuinely shift — not when tasks shift (those go in `PLAN.md` / `TASKS.json`).
+>
+> **`[TEMPLATE]` markers below mean this folder is fresh.** Replace them on first boot.
 
-## Primary objective
-What is the single thing this folder is for?
+## Format
 
-## Success criteria
-- Concrete signal 1
-- Concrete signal 2
+Each objective: a one-line outcome statement, then 2–4 measurable key results.
 
-## Non-goals
-What this folder is *not* for. List things you might be tempted to do here but shouldn't.
-
-## Constraints
-Any hard rules — deadlines, stakeholders, technical boundaries, regulatory limits.
+> Outcome ≠ output. "Ship feature X" is an output. "Reduce time-to-first-result by 50%" is an outcome.
 
 ---
 
-*Edit this file rarely. If objectives change weekly, you are confusing objectives with tasks.*
+## O1 — `[TEMPLATE: outcome statement]`
+
+**Why now:** `[TEMPLATE: the trigger / context]`
+
+**Key results:**
+- KR1: `[TEMPLATE: measurable, time-bound]`
+- KR2: `[TEMPLATE]`
+- KR3: `[TEMPLATE]`
+
+**Status:** not started
+
+---
+
+*Add more as needed. If you have more than 5 active objectives, you don't have objectives — you have a backlog. Move some to `PLAN.md`.*
