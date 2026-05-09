@@ -1,10 +1,10 @@
 """
 Chat prompt / streaming / abort routes.
 
-All agents (openclaw, claude_code, …) go through AgentDispatcher → adapter.stream().
-`/api/chat/prompt` stores stream metadata; `/api/chat/stream/{id}` is the SSE
-consumer that calls _dispatcher_sse() to drive the adapter and translate events
-into SSE.
+OpenClaw: direct streaming path (chat_prompt prefetches new-session bootstrap,
+chat_stream dispatches to emit_prefetched_sse for new sessions or
+stream_openclaw_to_sse for existing ones). All other agents go through
+AgentDispatcher → adapter.stream() via _dispatcher_sse.
 """
 
 import asyncio
@@ -17,6 +17,14 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.cowork_agent.chat_state import active_streams
+from services.cowork_agent.sessions_io import find_session_key
+from services.cowork_agent.streaming import (
+    create_new_session,
+    emit_prefetched_sse,
+    find_session_id_by_key,
+    openclaw_agent_id_from_prompt_body,
+    stream_openclaw_to_sse,
+)
 
 # Tracks recently-started streams so a fast reconnect (e.g. navigation-caused
 # double-mount) gets a graceful done event rather than "Stream not found".
@@ -46,7 +54,7 @@ _SENTINEL = object()  # marks end-of-stream in the keepalive queue
 
 async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None):
     """
-    SSE generator for all agents using AgentDispatcher.
+    SSE generator for non-OpenClaw agents using AgentDispatcher.
 
     Emits named SSE events matching SSE_EVENTS in the frontend:
       event: text-delta    data: {"text":"..."}
@@ -73,7 +81,6 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     agent_type = stream_info.get("agent_type")
     agent_id = stream_info.get("agent_id")
     is_new_session = stream_info.get("is_new_session", False)
-    prefetch_task = stream_info.get("openclaw_prefetch_task")
 
     if is_new_session and our_session_id:
         event_id = 1
@@ -84,7 +91,6 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
 
     dispatcher = AgentDispatcher(agent_name)
     final_native_session_id = None
-    session_id_resolved_early = False
     queue: asyncio.Queue = asyncio.Queue()
 
     async def _produce():
@@ -96,7 +102,6 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 our_session_id=our_session_id,
                 agent_id=agent_id,
                 is_new_session=is_new_session,
-                openclaw_prefetch_task=prefetch_task,
             ):
                 await queue.put(event)
         except Exception as exc:
@@ -120,14 +125,6 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
             if event.get("done"):
                 final_native_session_id = event.get("native_session_id")
                 break
-            elif event.get("type") == "session-id-resolved":
-                # Adapter resolved the session ID mid-stream (e.g. new openclaw
-                # session where poll in chat_prompt didn't find it in time).
-                sid = event.get("session_id")
-                if sid and not our_session_id:
-                    yield f"id: {event_id}\nevent: session-created\ndata: {json.dumps({'session_id': sid})}\n\n"
-                    event_id += 1
-                    session_id_resolved_early = True
             elif event.get("type") == "token":
                 yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'text': event.get('token', '')})}\n\n"
                 event_id += 1
@@ -140,9 +137,6 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     resolved_session_id = our_session_id or final_native_session_id
     if _session_id_out is not None:
         _session_id_out.append(resolved_session_id)
-    if is_new_session and not our_session_id and resolved_session_id and not session_id_resolved_early:
-        yield f"id: {event_id}\nevent: session-created\ndata: {json.dumps({'session_id': resolved_session_id})}\n\n"
-        event_id += 1
     yield f"id: {event_id}\nevent: done\ndata: {json.dumps({'finish_reason': 'stop', 'session_id': resolved_session_id})}\n\n"
 
 
@@ -170,6 +164,7 @@ async def chat_prompt(request: Request):
     is_new_session = not bool(session_id)
 
     # Resolve agent_id from explicit field or workspace hint (all agents, new sessions only).
+    # For openclaw this becomes xo_agent_id (xo-projects subdir for the transcript tee).
     agent_id = body.get("agent_id")
     if not agent_id and is_new_session:
         workspace_hint = body.get("workspace", "")
@@ -187,48 +182,45 @@ async def chat_prompt(request: Request):
             except Exception:
                 pass
 
-    if agent_name == "openclaw" and is_new_session:
-        # OpenClaw assigns session IDs server-side. Start the HTTP call as a
-        # background task and poll briefly so we can return a real session_id
-        # in this HTTP response. The SSE phase awaits the same task via the
-        # adapter — the openclaw API is only called once.
-        from services.cowork_agent.streaming import (
-            create_new_session,
-            find_session_id_by_key,
-            openclaw_agent_id_from_prompt_body,
-        )
-        # oc_agent identifies the openclaw agent (sidebar bucket) — derived
-        # from body.model (e.g. "openclaw/research" → "research"). xo_agent_id
-        # is the xo-projects/<id>/ folder where the session transcript is
-        # mirrored — derived from the workspace path. When no project is
-        # selected, xo_agent_id is None and the tee is skipped: agent-only
-        # chats live only in ~/.openclaw/agents/<oc_agent>/sessions/.
-        oc_agent = openclaw_agent_id_from_prompt_body(body)
-        xo_agent_id = agent_id
-        session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
-        prefetch_task = asyncio.create_task(
-            create_new_session(text, session_key=session_key, xo_agent_id=xo_agent_id)
-        )
-        our_session_id = None
-        for _ in range(20):
-            await asyncio.sleep(1.0)
-            our_session_id = find_session_id_by_key(session_key)
-            if our_session_id:
-                break
+    # OpenClaw: direct streaming path (dev-branch behavior).
+    if agent_name == "openclaw":
+        if is_new_session:
+            oc_agent = openclaw_agent_id_from_prompt_body(body)
+            session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
+            task = asyncio.create_task(
+                create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
+            )
+
+            new_session_id = None
+            for _ in range(20):
+                await asyncio.sleep(1.0)
+                new_session_id = find_session_id_by_key(session_key)
+                if new_session_id:
+                    break
+
+            stream_id = str(uuid.uuid4())
+            active_streams[stream_id] = {
+                "task": task,
+                "prefetched": True,
+                "agent_id": agent_id,
+            }
+            return {"stream_id": stream_id, "session_id": new_session_id}
+
+        # Existing openclaw session: look up the session key and stream directly
+        session_key = find_session_key(session_id)
+        if not session_key:
+            return JSONResponse(status_code=404, content={"detail": "Session not found"})
+
         stream_id = str(uuid.uuid4())
         active_streams[stream_id] = {
-            "question": text,
-            "session_id": our_session_id,
-            "our_session_id": our_session_id,
-            "agent_name": "openclaw",
-            "agent_type": body.get("agent_type"),
+            "session_id": session_id,
+            "text": text,
+            "session_key": session_key,
             "agent_id": agent_id,
-            "is_new_session": True,
-            "openclaw_prefetch_task": prefetch_task,
         }
-        return {"stream_id": stream_id, "session_id": our_session_id}
+        return {"stream_id": stream_id, "session_id": session_id}
 
-    # All other cases (non-openclaw new sessions, all existing sessions).
+    # Non-openclaw agents: route through AgentDispatcher.
     our_session_id = str(uuid.uuid4()) if is_new_session else session_id
     stream_id = str(uuid.uuid4())
     active_streams[stream_id] = {
@@ -264,8 +256,6 @@ async def chat_stream(stream_id: str):
                         await asyncio.wait_for(done_event.wait(), timeout=300)
                     except asyncio.TimeoutError:
                         pass
-                # Re-read after waiting: the original stream may have resolved
-                # a server-assigned session ID (e.g. new openclaw sessions).
                 sid = recent["session_id"]
                 if sid:
                     yield f"id: 1\nevent: session-created\ndata: {json.dumps({'session_id': sid})}\n\n"
@@ -275,9 +265,14 @@ async def chat_stream(stream_id: str):
             async def not_found():
                 yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': 'Stream not found'})}\n\n"
             generator = not_found()
+    elif stream_info.get("prefetched"):
+        # OpenClaw new session — replay the bootstrap response as fake SSE.
+        generator = emit_prefetched_sse(stream_id)
+    elif stream_info.get("session_key"):
+        # OpenClaw existing session — live stream from the gateway.
+        generator = stream_openclaw_to_sse(stream_id)
     elif stream_info.get("agent_name"):
-        # Pop now so a reconnect triggers the recently-started path above
-        # instead of starting a duplicate subprocess.
+        # Non-openclaw agents — dispatcher path with reconnect signal.
         active_streams.pop(stream_id, None)
         done_event = asyncio.Event()
         _recently_started[stream_id] = {
@@ -291,8 +286,6 @@ async def chat_stream(stream_id: str):
                 async for chunk in _dispatcher_sse(stream_info, session_id_out):
                     yield chunk
             finally:
-                # Persist the resolved session ID before signalling done so
-                # a concurrent reconnect_done() sees it after done_event.wait().
                 if session_id_out:
                     _recently_started[stream_id]["session_id"] = session_id_out[0]
                 done_event.set()
