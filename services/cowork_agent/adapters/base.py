@@ -66,33 +66,3 @@ class BaseAgentAdapter(ABC):
     def adapter_name(self) -> str:
         """Snake-case name matching the config/agents/ directory, e.g. 'claude_code'."""
 
-    # ── Optional override for session ownership detection ─────────────────────
-
-    @classmethod
-    def sessions_root(cls) -> "pathlib.Path | None":
-        """Root directory whose immediate subdirs each contain a sessions/ folder.
-
-        Used by find_session_backend() to detect which adapter owns a session.
-        Return None if this adapter manages its own session detection.
-        When you add a new adapter, override this to point at its sessions root.
-        """
-        return None
-
-    @classmethod
-    def session_lookup_specs(cls) -> "list[tuple[pathlib.Path, str]]":
-        """Per-project session lookup tuples: ``(root, sessions_subpath)``.
-
-        ``find_session_backend()`` iterates each tuple and, for every
-        immediate subdirectory of ``root``, checks
-        ``<entry>/<sessions_subpath>/<session_id>.jsonl``. The first
-        adapter that owns a matching jsonl wins.
-
-        Default falls back to ``sessions_root()`` with the standard
-        ``"sessions"`` subpath. Adapters with multiple roots (e.g.
-        post-migration paths plus legacy ones) override this to declare
-        each scan target explicitly.
-        """
-        root = cls.sessions_root()
-        if root is None:
-            return []
-        return [(root, "sessions")]

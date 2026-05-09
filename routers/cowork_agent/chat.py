@@ -38,11 +38,7 @@ _AGENT_NAME = os.getenv("AGENT_NAME", "openclaw")
 
 
 def _resolve_backend_for_session(session_id: str) -> str | None:
-    """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default).
-
-    Delegates to find_session_backend() which is driven by each adapter's sessions_root().
-    Adding a new adapter only requires implementing sessions_root() — this function is zero-touch.
-    """
+    """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default)."""
     from services.cowork_agent.sessions_io import find_session_backend
     return find_session_backend(session_id)
 
