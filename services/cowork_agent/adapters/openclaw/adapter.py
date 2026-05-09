@@ -13,11 +13,6 @@ class OpenclawAdapter(BaseAgentAdapter):
     def adapter_name(self) -> str:
         return "openclaw"
 
-    @classmethod
-    def sessions_root(cls) -> "pathlib.Path":
-        from services.cowork_agent.settings import AGENTS_DIR
-        return AGENTS_DIR
-
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.commands = self.load_commands()

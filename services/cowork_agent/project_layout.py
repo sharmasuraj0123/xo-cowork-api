@@ -13,7 +13,7 @@ makes the agent perform well — this module owns it.
     └── .xo/
         ├── project.json     {name, display_name, description, created_at}
         ├── memory/{semantic,episodic,procedural,working}/
-        ├── sessions/        sessions.json + {sessionId}.jsonl + compressed/ + index.md
+        ├── sessions/        sessionslist.json (metadata only) + compressed/ + index.md
         ├── artifacts/{drafts,final}/
         ├── state/           SOUL.md, STATUS.md, IDENTITY.md, USER.md
         ├── skills/{user-built,learned}/
@@ -157,10 +157,12 @@ def scaffold_project(
 
     _copy_template(_template_dir(), pdir)
 
-    # sessions.json is a system file the harness reads/writes; not in the template
-    sessions_json = xdir / "sessions" / "sessions.json"
+    # sessionslist.json is a system file the harness reads/writes; not in the template.
+    # It holds session metadata only — messages stay in the provider's own storage.
+    sessions_dir = xdir / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    sessions_json = sessions_dir / "sessionslist.json"
     if not sessions_json.exists():
-        sessions_json.parent.mkdir(parents=True, exist_ok=True)
         sessions_json.write_text("{}\n", encoding="utf-8")
 
     return _upsert_metadata(pid, display_name=display_name, description=description)
