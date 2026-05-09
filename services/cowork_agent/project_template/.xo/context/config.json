@@ -1,0 +1,50 @@
+{
+  "$schema": "cowork-context-config-v1",
+  "description": "Declarative manifest for what loads where. The agent honors this via instructions in AGENTS.md — it is not auto-enforced by the harness.",
+
+  "stable_prefix": [
+    "AGENTS.md",
+    "OBJECTIVES.md",
+    "WORKSPACE.md",
+    ".xo/state/SOUL.md",
+    ".xo/memory/semantic/preferences.md",
+    ".xo/memory/semantic/project-facts.md",
+    ".xo/memory/semantic/constraints.md"
+  ],
+
+  "main_thread_on_demand": [
+    ".xo/sessions/index.md (last 3 lines only)",
+    ".xo/context/cache.md"
+  ],
+
+  "subagent_only": {
+    "memory-archivist": [
+      ".xo/memory/episodic/",
+      ".xo/sessions/{date}/",
+      ".xo/sessions/compressed/",
+      ".xo/artifacts/"
+    ],
+    "skill-finder": [
+      ".xo/memory/procedural/",
+      ".xo/skills/user-built/",
+      ".xo/skills/learned/"
+    ]
+  },
+
+  "session_scoped_scratch": [
+    ".xo/memory/working/"
+  ],
+
+  "budgets": {
+    "stable_prefix_target_tokens": 8000,
+    "subagent_response_target_tokens": 2000,
+    "main_thread_xo_read_max_lines": 50
+  },
+
+  "compression": {
+    "trigger": "session_close",
+    "policy": "if session-folder count > 20, fold oldest 5 into compressed/{YYYY-MM}.md",
+    "raw_session_count_threshold": 20,
+    "fold_count_per_run": 5
+  }
+}

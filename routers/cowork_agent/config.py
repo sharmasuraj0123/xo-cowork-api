@@ -24,6 +24,7 @@ from services.cowork_agent.agent_registry import get_default_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
 from services.cowork_agent.openclaw_env import upsert_env_entry
 from services.cowork_agent.openclaw_store import list_agent_entries, load_openclaw_config
+from services.cowork_agent.project_layout import xo_projects_root
 
 router = APIRouter()
 
@@ -207,28 +208,19 @@ def get_openclaw_config():
 @router.get("/api/config/workspace")
 def get_workspace_config():
     """
-    Return workspace root paths for each agent backend, sourced entirely from
-    their config files — no paths are hardcoded here.
+    Return workspace root paths for each agent backend.
+
+    All backends now resolve to the unified ``xo-projects`` root
+    (``XO_PROJECTS_ROOT`` env var, default ``~/xo-projects``). A project
+    is a backend-agnostic folder; the frontend lists and creates in the
+    same place regardless of which agent the user launches.
 
     Response shape:
       {
-        "roots": { "openclaw": "/home/coder/.openclaw/workspace", "claude_code": "/home/coder/claude-cowork" },
-        "default": "claude_code"   // active backend (AGENT_NAME env or manifest default)
+        "roots": { "openclaw": "/home/coder/xo-projects", "claude_code": "/home/coder/xo-projects" },
+        "default": "openclaw"   // active backend (AGENT_NAME env or manifest default)
       }
     """
-    roots: dict[str, str] = {}
-
-    # OpenClaw workspace comes from the active manifest's workspace_dir.
-    if _AGENT.workspace_dir:
-        roots[_AGENT.name] = str(_AGENT.workspace_dir)
-
-    # Claude Code workspace comes from config/agents/claude_code/settings.json → cowork_root.
-    try:
-        cc_cfg = load_agent_config("claude_code")
-        raw_root = cc_cfg.get("cowork_root") or str(CLAUDE_COWORK_DIR)
-        roots["claude_code"] = str(Path(raw_root).expanduser().resolve())
-    except FileNotFoundError:
-        roots["claude_code"] = str(CLAUDE_COWORK_DIR)
-
+    projects_root = str(xo_projects_root())
     default_backend = os.getenv("AGENT_NAME", _AGENT.name)
-    return {"roots": roots, "default": default_backend}
+    return {"roots": {default_backend: projects_root}, "default": default_backend}
