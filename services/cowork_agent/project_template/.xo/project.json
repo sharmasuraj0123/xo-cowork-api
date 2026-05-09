@@ -1,0 +1,9 @@
+{
+  "$schema": "./schema/project.schema.json",
+  "schema": 1,
+  "_template": true,
+  "pid": null,
+  "name": null,
+  "owner_user_id": null,
+  "created_at": null
+}
