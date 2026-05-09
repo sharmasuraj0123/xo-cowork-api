@@ -17,12 +17,11 @@ A working folder shared between a human and any number of AI agents. It contains
 
 |                                                          | Agent writes? | Notes |
 |----------------------------------------------------------|:-:|---|
-| `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md`, `TASKS.json` | yes | Co-edited with the human. |
-| `memory/{semantic,episodic,procedural,working}/` | yes | The agent's externalized cognition. |
-| `.xo/project.json` (first boot only)             | yes | One-time template fill. After that, read-only. |
-| `.xo/{todos,stats,activity,timeline,sync,peers}.json[l]` | **no** | A background **watcher service** maintains these by tailing runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.). The agent only reads. |
-| `.xo/sessions/sessionslist.json`                  | **no** | Watcher-maintained index. 
-If the agent needs something not listed as agent-writable, it almost certainly needs a different tool (a tool call that updates state) — not a direct edit.
+| `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md` | yes | Co-edited with the human. |
+| `memory/{semantic,episodic,procedural,working}/`        | yes | The agent's externalized cognition. |
+| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, sessions, timeline, todos, stats, activity, sync, peers, schemas. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
+
+If the agent needs something not listed as agent-writable, it almost certainly needs a different tool (a tool call that mutates state) — not a direct edit.
 
 Every agent that works here is expected to leave the folder in a **better state than it found it**: more accurate memory, cleaner plan, honest progress log.
 
@@ -38,7 +37,6 @@ Every agent that works here is expected to leave the folder in a **better state 
 ├── OBJECTIVES.md       ← OKRs / north-star outcomes. Stable, weeks.
 ├── PLAN.md             ← current plan. Agent-maintained, days.
 ├── PROGRESS.md         ← running narrative of work done. Append-only.
-├── TASKS.json          ← machine-readable task list. Project-meaningful IDs.
 │
 ├── memory/                  ← shared cognition. Committed.
 │   ├── semantic/            distilled facts (preferences, project-facts, constraints)
@@ -55,7 +53,17 @@ Every agent that works here is expected to leave the folder in a **better state 
 │   ├── sync.json            last-sync state per peer
 │   ├── activity.json        live: which sessions are open right now
 │   ├── sessions/
-│       └── sessionslist.json    index of past sessions — read this for history
+│   │   └── sessionslist.json    index of past sessions — read this for history
+│   └── schema/
+│       ├── activity.schema.json
+│       ├── peers.schema.json
+│       ├── project.schema.json
+│       ├── sessionslist.schema.json
+│       ├── stats.schema.json
+│       ├── sync.schema.json
+│       ├── timeline.schema.json
+│       └── todos.schema.json
+│
 └── ... (the actual project work files)
 ```
 
@@ -63,19 +71,11 @@ Every agent that works here is expected to leave the folder in a **better state 
 
 ## 3. First-boot behaviour (template detection)
 
-This folder ships as a **template**. On the very first session, before any real work:
+This folder ships as a **template**. On the very first session, before any real work, look for `[TEMPLATE]` markers in `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, and `PROGRESS.md`. If any are present, the folder is fresh — the human has not yet defined scope or objectives. **Ask them** to clarify before doing real work, then replace the markers with their answers.
 
-1. Read `.xo/project.json`. If `_template: true`, this folder has never been booted. Do this **once**, then never again:
-   - Generate a UUID v4 for `pid`.
-   - Set `name` from the folder name (or ask the user).
-   - Set `owner_user_id` from the harness env / user identity.
-   - Set `created_at` to the current ISO 8601 timestamp.
-   - Remove the `_template` field.
+`.xo/project.json` (identity: pid, name, owner, created_at) is initialised **by the watcher service**, not by you. The watcher detects the `_template: true` flag, generates a UUID, fills in identity from the harness, and removes the flag. By the time you boot, `.xo/project.json` is either still a template (watcher hasn't run yet — wait or read identity from the harness env) or fully populated. Either way, **don't edit it**.
 
-   This is the **only** time an agent writes to `.xo/`.
-2. Look for `[TEMPLATE]` markers in `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md`. If any are present, the folder is fresh. Acknowledge that to the user and ask them to clarify scope and objectives **before** doing real work.
-
-The watcher will detect the new `project.json` and write a `project.created` event to `.xo/timeline.jsonl` on its own. After first boot, jump to §4.
+After scope is clarified and template markers are gone, jump to §4.
 
 ---
 
@@ -89,7 +89,7 @@ Read these in order, **before answering**:
 4. `PLAN.md` — current plan
 5. `memory/semantic/*.md` — distilled facts (3 short files)
 6. `PROGRESS.md` — **last ~30 lines only**
-7. `TASKS.json` — open tasks
+7. `.xo/todos.json` — open todos across active sessions
 8. `.xo/sessions/sessionslist.json` — **last 3 entries only**, to know what was worked on most recently
 9. `.xo/activity.json` — is anyone else working here right now?
 
@@ -104,12 +104,11 @@ You don't need to "announce yourself." The watcher sees your runtime open a new 
 Keep these living:
 
 - **`PLAN.md`** — when the plan changes, edit it. A stale plan misleads the next agent.
-- **`TASKS.json`** — mark tasks `in_progress` / `done` as you go. New work? Add a task with the next `T-NNN` id, bump `next_id`.
 - **`memory/working/`** — scratchpad. Whatever you'd write on a whiteboard. Wiped at close.
 
 **Do not** edit `PROGRESS.md` mid-work — it is written once at session close.
 
-Use your runtime's **native** todo tool (e.g. Claude Code's TaskCreate/TaskUpdate) for in-session todos — the watcher will mirror those into `.xo/todos.json` automatically. Don't try to keep `.xo/todos.json` in sync yourself.
+Use your runtime's **native** todo tool (e.g. Claude Code's TaskCreate/TaskUpdate) for in-session todos — the watcher mirrors those into `.xo/todos.json` automatically. There is no project-level `TASKS.json`; project todos and session todos are the same list, surfaced through the watcher. If you need to see all in-flight todos across sessions, read `.xo/todos.json`.
 
 ---
 
@@ -122,10 +121,9 @@ When the human says "done", "wrap up", "good for today", or you detect a natural
 3. **`memory/semantic/*.md`** — distill any new facts that meet both criteria: (a) observed twice or explicitly stated by the user, (b) true regardless of context. One claim per line. No narrative.
 4. **`memory/procedural/{slug}.md`** — write **only if** a workflow has now succeeded ≥2 times. One success is not a pattern. Format: see §8.
 5. **`PLAN.md`** — if scope shifted, update. Move the superseded plan to "Recently superseded" as a one-liner.
-6. **`TASKS.json`** — mark closed tasks `done` with `completed_at`.
-7. **`memory/working/`** — wipe (`rm -f memory/working/*` except `.gitkeep`).
+6. **`memory/working/`** — wipe (`rm -f memory/working/*` except `.gitkeep`).
 
-Do all seven. Skipping for "the session was short" is how folders rot.
+Do all six. Skipping for "the session was short" is how folders rot.
 
 Everything in `.xo/` (`sessionslist.json`, `timeline.jsonl`, `activity.json`, `stats.json`, `todos.json`, `sync.json`) is updated by the watcher service from your runtime's native logs. **Do not write to those files** — your edits will conflict with the watcher and will be overwritten.
 
@@ -207,7 +205,7 @@ Procedural memory is the highest-leverage kind — it converts experience into r
 
 ## 9. Hard rules
 
-- **Never write to `.xo/`** with one exception: filling in `.xo/project.json` once on first boot (§3). Every other `.xo/` file is maintained by the watcher service; your edits will conflict with it and be overwritten.
+- **Never write to `.xo/`.** No exceptions — not even `.xo/project.json` on first boot. The watcher service owns the entire directory; your edits will conflict with it, be overwritten, or corrupt sync state.
 - **Never delete** anything in `memory/` outside the rules in §8 (and even then, only `working/` gets wiped). Memory loss is irreversible.
 - **Never edit** an episodic memory file after it is written. Append-only.
 - **Never** write narrative text to `memory/semantic/*`. That folder is for distilled claims only.
@@ -236,14 +234,23 @@ If the question is open-ended ("what have we been working on lately?"), read the
 
 ---
 
-## 11. If you're a new agent and lost
+## 11. Schemas
 
-Run §3 (if `.xo/project.json` has `_template: true`) or §4 (otherwise). By the time you finish you'll know:
+Every JSON file in `.xo/` has a JSON Schema in `.xo/schema/`, and each data file's `$schema` field points at its schema. The schemas are pure reference material — agents never write `.xo/` files (see §1), so schemas just describe what to expect when *reading*.
+
+If you find a `.xo/` file with a shape you don't recognise, read its schema first instead of guessing.
+
+---
+
+## 12. If you're a new agent and lost
+
+Run §3 (if there are `[TEMPLATE]` markers anywhere) or §4 (otherwise). By the time you finish you'll know:
 
 - What this project is (`PROJECT.md`)
 - What success looks like (`OBJECTIVES.md`)
-- The current plan (`PLAN.md`, `TASKS.json`)
+- The current plan (`PLAN.md`)
 - What has already been done (`PROGRESS.md` last 30 lines)
 - What facts are settled (`memory/semantic/`)
+- What's in flight (`.xo/todos.json`)
 
 That is enough to be useful. Ask the human if anything contradicts.
