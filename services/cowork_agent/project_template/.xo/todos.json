@@ -1,0 +1,6 @@
+{
+  "$schema": "./schema/todos.schema.json",
+  "schema": 1,
+  "updated_at": null,
+  "sessions": {}
+}

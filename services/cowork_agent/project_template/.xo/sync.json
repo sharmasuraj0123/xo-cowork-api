@@ -1,0 +1,6 @@
+{
+  "$schema": "./schema/sync.schema.json",
+  "schema": 1,
+  "last_sync_at": null,
+  "peers": {}
+}

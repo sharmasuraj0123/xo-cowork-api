@@ -1,74 +1,167 @@
-# AGENTS.md
+# AGENTS.md — operating contract for this folder
 
-You are running inside a properly harness engineered folder. This folder is your externalized cognition. Treat it as a first-class part of yourself: read from it on boot, write to it on close, delegate heavy reads to subagents.
-
-The folder layout is fixed. Do not invent new top-level files or new top-level `.xo/` subdirectories. Add content inside the existing structure.
-
----
-
-## Stable prefix (auto-loaded)
-
-The following files are inlined into your context every session. They form the cache-warm prefix — keep edits to them small and targeted so the cache stays hot.
-
-@OBJECTIVES.md
-@WORKSPACE.md
-@.xo/state/SOUL.md
-@.xo/memory/semantic/preferences.md
-@.xo/memory/semantic/project-facts.md
-@.xo/memory/semantic/constraints.md
-
-If any of these files contain `[TEMPLATE]` markers, this is a freshly-copied cowork folder. On your first user turn, acknowledge it and ask the user to clarify objectives before doing real work.
+> You are an agent (Claude, Codex, Cursor, Aider, or other) working inside a well harness engineered folder. This file is the contract every agent reads first. It is short on purpose.
+>
+> Ignore it and you will duplicate work, lose context, and corrupt the human's externalized memory. Don't.
 
 ---
 
-## Boot ritual
+## 1. What this folder is
 
-On the first turn of a new session:
+A working folder shared between a human and any number of AI agents. It contains the actual project work, plus two persistence layers:
 
-1. The stable prefix above is already in context — do not re-read those files.
-2. Read **only** the last 3 lines of `.xo/sessions/index.md` to know what was worked on most recently. Do not load the index in full.
-3. If the user's first request references prior work ("continue", "the bug from yesterday", "what we discussed"), dispatch the **memory-archivist** subagent to retrieve relevant episodes. Do **not** grep `.xo/memory/episodic/` or `.xo/sessions/` from the main thread — the volume will rot your context.
-4. If the user's first request triggers a known recurring workflow (deploy, release, migration, review), dispatch the **skill-finder** subagent before starting.
+- **`memory/`** — shared cognition. Committed to git. Distilled facts, past episodes, reusable procedures. Visible to every teammate and every agent.
+- **`.xo/`** — ephemeral per-machine state. Gitignored. Identity, sessions, sync, peers, stats, todos, timeline.
 
----
+### Who writes what
 
-## During-session rules
+|                                                          | Agent writes? | Notes |
+|----------------------------------------------------------|:-:|---|
+| `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md` | yes | Co-edited with the human. |
+| `memory/{semantic,episodic,procedural,working}/`        | yes | The agent's externalized cognition. |
+| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, sessions, timeline, todos, stats, activity, sync, peers, schemas. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
 
-**Artifact destinations.** All outputs you produce go inside `.xo/artifacts/`:
-- Work-in-progress → `.xo/artifacts/drafts/{date}-{slug}/`
-- Finished deliverables (only after user accepts) → `.xo/artifacts/final/{date}-{slug}/`
+If the agent needs something not listed as agent-writable, it almost certainly needs a different tool (a tool call that mutates state) — not a direct edit.
 
-Never write outputs to the project root unless the artifact *is* a project file (e.g. source code in a code project). Drafts and notes always go in `drafts/`.
-
-**Working memory.** Use `.xo/memory/working/scratch.md` for mid-session reasoning that you want to preserve across tool calls but don't need long-term. This file is wiped on session close.
-
-**Subagent dispatch — the one rule that matters most.** When you need to read anything inside `.xo/memory/episodic/`, `.xo/memory/procedural/`, `.xo/sessions/`, `.xo/artifacts/`, or `.xo/skills/`, dispatch the appropriate subagent. These directories accumulate fast. Reading them directly poisons your working context with stale tokens.
-
-| Need                                              | Subagent          |
-|---------------------------------------------------|-------------------|
-| Recall a past episode, decision, or session       | memory-archivist  |
-| Find a procedural skill or recipe                 | skill-finder      |
-| Locate a past artifact (draft or final)           | memory-archivist  |
-| Close out the current session                     | session-closer    |
-
-You may read `.xo/memory/semantic/*` directly — those files are small, distilled, and already in your stable prefix.
+Every agent that works here is expected to leave the folder in a **better state than it found it**: more accurate memory, cleaner plan, honest progress log.
 
 ---
 
-## Memory writing discipline
+## 2. File map (this folder *is* the spec — don't invent new top-level files)
 
-You write three kinds of memory. The discipline of *which* is the difference between a useful folder and a cluttered one.
+```
+<project>/
+├── AGENTS.md           ← this file. The contract. Read first.
+├── CLAUDE.md           ← imports AGENTS.md for Claude Code (`@AGENTS.md`).
+├── PROJECT.md          ← what this is for. Stable.
+├── OBJECTIVES.md       ← OKRs / north-star outcomes. Stable, weeks.
+├── PLAN.md             ← current plan. Agent-maintained, days.
+├── PROGRESS.md         ← running narrative of work done. Append-only.
+│
+├── memory/                  ← shared cognition. Committed.
+│   ├── semantic/            distilled facts (preferences, project-facts, constraints)
+│   ├── episodic/            what happened, with context (one file per episode)
+│   ├── procedural/          how to do recurring things (validated twice)
+│   └── working/             session-scoped scratch (wiped at close)
+│
+├── .xo/                     ← ephemeral state. Gitignored.
+│   ├── project.json         identity: pid, name, owner_user_id, created_at
+│   ├── todos.json           aggregated todos across active sessions
+│   ├── stats.json           rolling 7d/30d: tokens, models, files, sessions, time
+│   ├── timeline.jsonl       append-only event log (sessions, todos, edits, syncs)
+│   ├── peers.json           who this folder is shared with
+│   ├── sync.json            last-sync state per peer
+│   ├── activity.json        live: which sessions are open right now
+│   ├── sessions/
+│   │   └── sessionslist.json    index of past sessions — read this for history
+│   └── schema/
+│       ├── activity.schema.json
+│       ├── peers.schema.json
+│       ├── project.schema.json
+│       ├── sessionslist.schema.json
+│       ├── stats.schema.json
+│       ├── sync.schema.json
+│       ├── timeline.schema.json
+│       └── todos.schema.json
+│
+└── ... (the actual project work files)
+```
 
-### Semantic — `.xo/memory/semantic/`
-Distilled, de-contextualized facts. One claim per line. No narrative. No timestamps. Examples:
-- "User prefers DD/MM/YYYY date format."
-- "This project uses pnpm, not npm."
-- "Never use em-dashes in user-facing copy."
+---
 
-Update semantic memory only when a fact has been **observed twice** or **explicitly stated by the user**. One-off observations go to episodic, not semantic. When you update semantic memory, edit the existing file in place — do not create new files.
+## 3. First-boot behaviour (template detection)
 
-### Episodic — `.xo/memory/episodic/`
-What happened, with context. One file per episode, named `YYYY-MM-DD-{slug}.md`. Format:
+This folder ships as a **template**. On the very first session, before any real work, look for `[TEMPLATE]` markers in `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, and `PROGRESS.md`. If any are present, the folder is fresh — the human has not yet defined scope or objectives. **Ask them** to clarify before doing real work, then replace the markers with their answers.
+
+`.xo/project.json` (identity: pid, name, owner, created_at) is initialised **by the watcher service**, not by you. The watcher detects the `_template: true` flag, generates a UUID, fills in identity from the harness, and removes the flag. By the time you boot, `.xo/project.json` is either still a template (watcher hasn't run yet — wait or read identity from the harness env) or fully populated. Either way, **don't edit it**.
+
+After scope is clarified and template markers are gone, jump to §4.
+
+---
+
+## 4. Boot ritual — every session
+
+Read these in order, **before answering**:
+
+1. `AGENTS.md` (this file)
+2. `PROJECT.md` — what we're building
+3. `OBJECTIVES.md` — why
+4. `PLAN.md` — current plan
+5. `memory/semantic/*.md` — distilled facts (3 short files)
+6. `PROGRESS.md` — **last ~30 lines only**
+7. `.xo/todos.json` — open todos across active sessions
+8. `.xo/sessions/sessionslist.json` — **last 3 entries only**, to know what was worked on most recently
+9. `.xo/activity.json` — is anyone else working here right now?
+
+You don't need to "announce yourself." The watcher sees your runtime open a new native session log and writes the corresponding `session.started` event, the `sessionslist.json` entry, and the `activity.json` heartbeat on your behalf.
+
+**Do not read** `memory/episodic/`, `memory/procedural/`, the full `.xo/sessions/sessionslist.json`, or the full `.xo/timeline.jsonl` from the main thread. They grow without bound. To inspect past session history, follow the rule in §10.
+
+---
+
+## 5. During work
+
+Keep these living:
+
+- **`PLAN.md`** — when the plan changes, edit it. A stale plan misleads the next agent.
+- **`memory/working/`** — scratchpad. Whatever you'd write on a whiteboard. Wiped at close.
+
+**Do not** edit `PROGRESS.md` mid-work — it is written once at session close.
+
+Use your runtime's **native** todo tool (e.g. Claude Code's TaskCreate/TaskUpdate) for in-session todos — the watcher mirrors those into `.xo/todos.json` automatically. There is no project-level `TASKS.json`; project todos and session todos are the same list, surfaced through the watcher. If you need to see all in-flight todos across sessions, read `.xo/todos.json`.
+
+---
+
+## 6. Closing ritual — when the user signals done
+
+When the human says "done", "wrap up", "good for today", or you detect a natural close, do these in order:
+
+1. **`memory/episodic/{YYYY-MM-DD}-{slug}.md`** — write **only if** the session contained a non-trivial decision, a hard problem solved, an unexpected failure, or strong user feedback. Routine work does not deserve an episode. Format: see §8.
+2. **`PROGRESS.md`** — append one paragraph (newest at the bottom). See format in §7.
+3. **`memory/semantic/*.md`** — distill any new facts that meet both criteria: (a) observed twice or explicitly stated by the user, (b) true regardless of context. One claim per line. No narrative.
+4. **`memory/procedural/{slug}.md`** — write **only if** a workflow has now succeeded ≥2 times. One success is not a pattern. Format: see §8.
+5. **`PLAN.md`** — if scope shifted, update. Move the superseded plan to "Recently superseded" as a one-liner.
+6. **`memory/working/`** — wipe (`rm -f memory/working/*` except `.gitkeep`).
+
+Do all six. Skipping for "the session was short" is how folders rot.
+
+Everything in `.xo/` (`sessionslist.json`, `timeline.jsonl`, `activity.json`, `stats.json`, `todos.json`, `sync.json`) is updated by the watcher service from your runtime's native logs. **Do not write to those files** — your edits will conflict with the watcher and will be overwritten.
+
+---
+
+## 7. The three logs (don't mix them up)
+
+| Log                              | Format                          | Purpose                                            | Read by                              |
+|----------------------------------|---------------------------------|----------------------------------------------------|--------------------------------------|
+| `PROGRESS.md`                    | append-only paragraphs          | human-readable progress, scrolled by humans        | every agent at boot (last ~30 lines) |
+| `.xo/sessions/sessionslist.json` | append-only array               | one entry per session — the **index** of history   | every agent at boot (last 3 entries) |
+| `.xo/timeline.jsonl`             | one JSON event per line         | machine-readable firehose (audit, sync, dashboards)| watcher writes; agents read only via §10        |
+| `memory/episodic/*.md`           | one file per noteworthy episode | distilled context for future recall                | memory subagent (never main thread)  |
+
+**`PROGRESS.md` paragraph format:**
+```
+## YYYY-MM-DD — [outcome] one-line headline
+agent: <model id>
+
+3–6 sentences: what was attempted, what shipped, what's blocked, what's next.
+```
+`[outcome]` ∈ `shipped | progress | blocked | pivoted | cleanup | research`.
+
+**`.xo/timeline.jsonl` event shape:**
+```json
+{"ts": "2026-05-09T14:33:00Z", "type": "session.start", "session": "2026-05-09", "agent": "claude-opus-4-7", "user": "tools@kosh.network"}
+```
+Common types: `project.created`, `session.start`, `session.close`, `task.created`, `task.completed`, `plan.updated`, `file.edited`, `episode.written`, `peer.sync`.
+
+---
+
+## 8. Memory discipline
+
+`memory/` has four flavours. The discipline of *which* is the difference between a useful folder and a cluttered one.
+
+**Semantic — `memory/semantic/`** — distilled facts. One claim per line. No narrative. No timestamps. Only update when a fact is observed twice or stated by the user. Three files only: `preferences.md`, `project-facts.md`, `constraints.md`. Do not add new files in this directory.
+
+**Episodic — `memory/episodic/`** — append-only. One file per episode, named `YYYY-MM-DD-{slug}.md`:
 ```markdown
 ---
 date: YYYY-MM-DD
@@ -83,13 +176,11 @@ One sentence.
 One or two sentences.
 
 ## How it went
-Raw narrative. Do not summarize at write time — summarization destroys episodic signal.
+Raw narrative. Do not summarise at write time — summarisation destroys episodic signal.
 ```
+Never edit an episode after writing. If context changed, write a new episode that references the old one by filename.
 
-Write an episode when: a non-trivial decision was made, a hard problem was solved, a workflow failed unexpectedly, or the user gave strong feedback. **Do not** write an episode for routine work — that's session-log territory.
-
-### Procedural — `.xo/memory/procedural/`
-How to do recurring things. Write a procedural skill when the same workflow has succeeded **at least twice**. Format:
+**Procedural — `memory/procedural/`** — only after a workflow has succeeded ≥2 times:
 ```markdown
 ---
 name: skill-name
@@ -106,55 +197,60 @@ trigger_when: human-readable trigger condition
 ## Last validated
 YYYY-MM-DD
 ```
+Procedural memory is the highest-leverage kind — it converts experience into reusable capability. It is also the most dangerous to fabricate. Never write a procedural skill from a single success.
 
-Procedural memory is the highest-leverage kind — it converts experience into reusable capability. But it is also the most dangerous to fabricate. Never write a procedural skill from a single success.
-
----
-
-## Session close ritual
-
-When the user signals end-of-session (says "done", "let's wrap", "stop", "good for today", or you detect a natural close), **dispatch the session-closer subagent before your final response.**
-
-The session-closer will:
-1. Write `.xo/sessions/{date}/session.md` (narrative) and append a one-liner to `.xo/sessions/index.md`.
-2. Distill any new semantic facts into `.xo/memory/semantic/*`.
-3. Promote completed artifacts from `drafts/` to `final/` (only with explicit user accept — otherwise leave in drafts).
-4. Update `WORKSPACE.md` with current active/blocked/next state.
-5. If a workflow repeated successfully, write a procedural skill.
-6. Wipe `.xo/memory/working/`.
-7. Run cheap compression (see below).
-
-Do not perform these steps in the main thread. Always dispatch the subagent — it has the full ritual encoded.
+**Working — `memory/working/`** — live scratchpad for the current session. Wiped at close. Use it for mid-session reasoning you want to preserve across tool calls.
 
 ---
 
-## Compression policy (cheap and predictable)
+## 9. Hard rules
 
-At session-close, the session-closer runs this rule and nothing more:
-
-> If `.xo/sessions/` contains more than **20** date-stamped session folders, fold the oldest **5** into a single file `.xo/sessions/compressed/{YYYY-MM}.md` containing one paragraph per folded session. Delete the folded folders only after the compressed file is written and verified non-empty.
-
-That's the entire policy. No semantic compression, no token-counting, no thresholds. Predictable trigger, bounded work, easy to reason about.
-
----
-
-## Forbidden
-
-- **Never delete** anything in `.xo/sessions/` outside the compression policy. Session loss is irreversible.
-- **Never edit** an episodic memory file after it is written. Episodes are append-only — if context changed, write a new episode that references the old one.
-- **Never** write narrative text to `.xo/memory/semantic/*`. That folder is for distilled claims only.
-- **Never** dump tool output, full file contents, or raw logs into any memory file. Memory is *distilled*; logs live in `sessions/`.
-- **Never** auto-promote drafts to final. Only the user accepts work into `final/`.
-- **Never** commit `.xo/`. It is in `.gitignore` for a reason — it is personal state, not project config.
+- **Never write to `.xo/`.** No exceptions — not even `.xo/project.json` on first boot. The watcher service owns the entire directory; your edits will conflict with it, be overwritten, or corrupt sync state.
+- **Never delete** anything in `memory/` outside the rules in §8 (and even then, only `working/` gets wiped). Memory loss is irreversible.
+- **Never edit** an episodic memory file after it is written. Append-only.
+- **Never** write narrative text to `memory/semantic/*`. That folder is for distilled claims only.
+- **Never** dump tool output, full file contents, or raw logs into any memory file. Memory is *distilled*; raw logs live in `.xo/timeline.jsonl`.
+- **Never claim work as done** without verifying it (run the test, open the page, read the diff).
+- **Never put secrets** in `memory/` (it is committed) or `.xo/` (it may be synced to peers).
+- **Never invent** peer/sync state. If `.xo/peers.json` is empty, you are working solo.
+- **Stop and ask** if `PLAN.md` and the user's request disagree. Don't silently re-plan.
 
 ---
 
-## Self-check before responding
+## 10. Looking up past sessions (read-only)
 
-If you are about to:
-- Read more than ~50 lines from anywhere in `.xo/` → stop, dispatch a subagent instead.
-- Write to `.xo/memory/semantic/*` based on a one-off observation → stop, write to episodic instead.
-- Edit `WORKSPACE.md` mid-session → stop, that file is updated only at session close.
-- Skip the session-close ritual because "the session was short" → stop, run it anyway. Even a short session may have produced a fact worth distilling.
+`.xo/sessions/sessionslist.json` and `.xo/timeline.jsonl` are **read-only for agents** — the watcher service maintains them. You consult them; you never edit them.
 
-The folder works only if you follow the lifecycle. A cowork folder neglected for one session loses one session of memory. A cowork folder neglected for a month loses the agent.
+When the user references prior work ("continue the auth thing", "the bug from yesterday", "what we discussed"), or whenever you need history older than the last 3 sessions:
+
+1. **Start at the index, not the log.** Open `.xo/sessions/sessionslist.json` and find the relevant `id` by `started_at`, `summary`, or `outcome`. This is a small file — scanning it is cheap.
+2. **Pull only that session's events.** Filter `.xo/timeline.jsonl` by `session_id` (e.g. `grep '"session_id":"ses_abc123"' .xo/timeline.jsonl`). Don't read the full log.
+3. **For narrative detail**, look at the `episode_refs` on that session's entry — those point into `memory/episodic/`. Have a subagent read them; never main-thread.
+4. **For raw artefact recovery**, the entry's `source_file` points at the runtime's native session log (e.g. `~/.claude/projects/.../ses_abc123.jsonl`).
+
+If the question is open-ended ("what have we been working on lately?"), read the last 5–10 entries of `sessionslist.json` and summarise — do not load the whole timeline.
+
+> **Why two files?** `sessionslist.json` is the human/agent-readable index; `timeline.jsonl` is the firehose. They are joined on `session_id`. Most lookups need only the index.
+
+---
+
+## 11. Schemas
+
+Every JSON file in `.xo/` has a JSON Schema in `.xo/schema/`, and each data file's `$schema` field points at its schema. The schemas are pure reference material — agents never write `.xo/` files (see §1), so schemas just describe what to expect when *reading*.
+
+If you find a `.xo/` file with a shape you don't recognise, read its schema first instead of guessing.
+
+---
+
+## 12. If you're a new agent and lost
+
+Run §3 (if there are `[TEMPLATE]` markers anywhere) or §4 (otherwise). By the time you finish you'll know:
+
+- What this project is (`PROJECT.md`)
+- What success looks like (`OBJECTIVES.md`)
+- The current plan (`PLAN.md`)
+- What has already been done (`PROGRESS.md` last 30 lines)
+- What facts are settled (`memory/semantic/`)
+- What's in flight (`.xo/todos.json`)
+
+That is enough to be useful. Ask the human if anything contradicts.

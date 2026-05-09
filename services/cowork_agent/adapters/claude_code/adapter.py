@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
-from services.cowork_agent.helpers import short_id, iso_now
+from services.cowork_agent.helpers import iso_now
 from services.cowork_agent.project_layout import (
     project_dir as _xo_project_dir,
     sessions_dir as _xo_sessions_dir,
@@ -43,12 +43,17 @@ def _write_index(path: Path, data: dict) -> None:
 
 
 def _index_path(agent_id: str) -> Path:
-    return _xo_sessions_dir(agent_id) / "sessions.json"
+    return _xo_sessions_dir(agent_id) / "sessionslist.json"
 
 
 def _load_agent_index(agent_id: str) -> tuple[dict, Path]:
-    """Return (index_dict, path) for the agent's sessions.json in xo-projects."""
+    """Return (index_dict, path) for the agent's sessionslist.json in xo-projects."""
     path = _index_path(agent_id)
+    # Fall back to legacy sessions.json so existing projects keep working.
+    if not path.exists():
+        legacy = _xo_sessions_dir(agent_id) / "sessions.json"
+        if legacy.exists():
+            return _load_index(legacy), legacy
     return _load_index(path), path
 
 
@@ -103,13 +108,14 @@ def get_session_directory(session_key: str) -> str | None:
 
 def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None:
     """
-    Write a sessions.json entry BEFORE the subprocess starts so the polling
+    Write a sessionslist.json entry BEFORE the subprocess starts so the polling
     loop in chat.py can resolve session_id without waiting for the full response.
+    Messages are NOT stored here — they live in ~/.claude/projects/.
     """
     agent_id = _agent_id_from_key(session_key)
     sd = _xo_sessions_dir(agent_id)
     sd.mkdir(parents=True, exist_ok=True)
-    index_path = sd / "sessions.json"
+    index_path = sd / "sessionslist.json"
     index = _load_index(index_path)
     index[session_key] = {
         "sessionId": session_id,
@@ -117,64 +123,9 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
         "directory": cwd,
         "backend": "claude_code",
         "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
     }
     _write_index(index_path, index)
-
-
-def _append_exchange(
-    session_id: str,
-    session_key: str,
-    user_text: str,
-    assistant_text: str,
-    usage: dict,
-    model_id: str,
-) -> None:
-    """
-    Append a user+assistant turn to {session_id}.jsonl inside the project's
-    sessions directory. Also bumps updatedAt in sessions.json.
-    """
-    agent_id = _agent_id_from_key(session_key)
-    sd = _xo_sessions_dir(agent_id)
-    sd.mkdir(parents=True, exist_ok=True)
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    with open(sd / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
-        f.write(
-            json.dumps({
-                "type": "message",
-                "id": short_id(),
-                "timestamp": now_iso,
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": user_text}],
-                },
-            }) + "\n"
-        )
-        f.write(
-            json.dumps({
-                "type": "message",
-                "id": short_id(),
-                "timestamp": now_iso,
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": assistant_text}],
-                    "model": model_id,
-                    "stopReason": "stop",
-                    "usage": {
-                        "input": usage.get("input_tokens", 0),
-                        "output": usage.get("output_tokens", 0),
-                        "cacheRead": usage.get("cache_read_input_tokens", 0),
-                        "cacheWrite": usage.get("cache_creation_input_tokens", 0),
-                    },
-                },
-            }) + "\n"
-        )
-
-    # Bump updatedAt in the index
-    index, index_path = _load_agent_index(agent_id)
-    if session_key in index:
-        index[session_key]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-        _write_index(index_path, index)
 
 
 def find_session_key_for_session_id(session_id: str) -> str | None:
@@ -185,16 +136,19 @@ def find_session_key_for_session_id(session_id: str) -> str | None:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("."):
             continue
-        index_path = entry / ".xo" / "sessions" / "sessions.json"
-        if not index_path.exists():
-            continue
-        index = _load_index(index_path)
-        for key, meta in index.items():
-            if isinstance(meta, dict) and meta.get("sessionId") == session_id:
-                native = meta.get("nativeSessionId")
-                if native:
-                    _native_map[key] = native
-                return key
+        sessions_base = entry / ".xo" / "sessions"
+        # Try new name first, then legacy
+        for fname in ("sessionslist.json", "sessions.json"):
+            index_path = sessions_base / fname
+            if not index_path.exists():
+                continue
+            index = _load_index(index_path)
+            for key, meta in index.items():
+                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
+                    native = meta.get("nativeSessionId")
+                    if native:
+                        _native_map[key] = native
+                    return key
     return None
 
 
@@ -206,14 +160,6 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
     @property
     def adapter_name(self) -> str:
         return "claude_code"
-
-    @classmethod
-    def sessions_root(cls) -> Path:
-        return xo_projects_root()
-
-    @classmethod
-    def session_lookup_specs(cls) -> list[tuple[Path, str]]:
-        return [(xo_projects_root(), ".xo/sessions")]
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
@@ -413,19 +359,22 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             response_parts.append(result_text)
             yield {"type": "token", "token": result_text}
 
-        if sk and our_session_id and response_parts:
-            full_response = "".join(response_parts)
-            _append_exchange(our_session_id, sk, question, full_response, usage, model_id)
-
-            if native_session_id:
-                agent_id_for_key = _agent_id_from_key(sk)
-                sd = _xo_sessions_dir(agent_id_for_key)
-                index_path = sd / "sessions.json"
-                index = _load_index(index_path)
-                if sk in index:
-                    index[sk]["nativeSessionId"] = native_session_id
-                    _write_index(index_path, index)
-                _native_map[sk] = native_session_id
+        if sk and native_session_id:
+            # Persist nativeSessionId so resume works; messages live in ~/.claude/projects/.
+            agent_id_for_key = _agent_id_from_key(sk)
+            index, index_path = _load_agent_index(agent_id_for_key)
+            if sk in index:
+                existing_usage = index[sk].get("usage") or {}
+                index[sk]["nativeSessionId"] = native_session_id
+                index[sk]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                index[sk]["usage"] = {
+                    "input_tokens": existing_usage.get("input_tokens", 0) + usage.get("input_tokens", 0),
+                    "output_tokens": existing_usage.get("output_tokens", 0) + usage.get("output_tokens", 0),
+                    "cache_creation_input_tokens": existing_usage.get("cache_creation_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": existing_usage.get("cache_read_input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
+                }
+                _write_index(index_path, index)
+            _native_map[sk] = native_session_id
 
         yield {"done": True, "native_session_id": native_session_id}
 

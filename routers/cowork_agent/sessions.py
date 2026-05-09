@@ -13,8 +13,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from services.cowork_agent.helpers import parse_jsonl
-from services.cowork_agent.messages import convert_messages
+from services.cowork_agent.messages import convert_messages, convert_native_claude_messages
 from services.cowork_agent.sessions_io import (
+    find_session_backend,
     find_session_file,
     load_all_sessions,
     update_session_directory,
@@ -60,7 +61,11 @@ def get_messages(session_id: str, limit: int = 50, offset: int = -1):
         return {"total": 0, "offset": 0, "messages": []}
 
     records = parse_jsonl(path)
-    all_messages = convert_messages(session_id, records)
+    backend = find_session_backend(session_id)
+    if backend == "claude_code":
+        all_messages = convert_native_claude_messages(session_id, records)
+    else:
+        all_messages = convert_messages(session_id, records)
     total = len(all_messages)
 
     if offset == -1:

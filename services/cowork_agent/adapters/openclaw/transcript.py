@@ -19,8 +19,48 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.helpers import short_id
 from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.settings import AGENTS_DIR
+
+
+def _sum_usage(session_id: str, agent_name: str) -> dict | None:
+    """Sum token usage across all assistant messages in the native OpenClaw JSONL."""
+    path = AGENTS_DIR / agent_name / "sessions" / f"{session_id}.jsonl"
+    if not path.exists():
+        return None
+    totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "cost": 0.0}
+    found = False
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("type") != "message":
+                continue
+            msg = record.get("message", {})
+            if msg.get("role") != "assistant":
+                continue
+            usage = msg.get("usage")
+            if not usage:
+                continue
+            found = True
+            totals["input_tokens"] += int(usage.get("input", 0) or 0)
+            totals["output_tokens"] += int(usage.get("output", 0) or 0)
+            totals["cache_read_input_tokens"] += int(usage.get("cacheRead", 0) or 0)
+            totals["cache_creation_input_tokens"] += int(usage.get("cacheWrite", 0) or 0)
+            cost_raw = usage.get("cost", 0)
+            cost_val = float(cost_raw.get("total") or 0) if isinstance(cost_raw, dict) else float(cost_raw or 0)
+            totals["cost"] += cost_val
+    except Exception:
+        pass
+    if not found:
+        return None
+    totals["cost"] = round(totals["cost"], 6)
+    return totals
 
 
 def _write_index_atomic(path: Path, data: dict) -> None:
@@ -38,14 +78,16 @@ def tee_exchange(
     model_id: str = "",
     xo_agent_id: str | None = None,
 ) -> None:
-    """Append (user, assistant) turn to ``<project>/.xo/sessions/{session_id}.jsonl``
-    and bump the project's sessions.json entry.
+    """Record session metadata in ``<project>/.xo/sessions/sessionslist.json``.
+
+    Messages are NOT stored here — they live in the OpenClaw native session
+    files under ``~/.openclaw/agents/<id>/sessions/``. This keeps the project
+    folder free of chat content so it can be shared safely.
 
     ``xo_agent_id`` is the subdirectory name under ``~/xo-projects/``. When
     not supplied the function returns without writing — agent-only chats
-    (no project selected) are intentionally not mirrored under xo-projects;
-    the openclaw native session files in ``~/.openclaw/agents/<id>/sessions/``
-    are the source of truth in that case.
+    (no project selected) are not mirrored; the openclaw native files are the
+    source of truth in that case.
     """
     if not xo_agent_id or not session_id:
         return
@@ -55,33 +97,14 @@ def tee_exchange(
     sessions_dir = xo / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    transcript = sessions_dir / f"{session_id}.jsonl"
-    with transcript.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "type": "message",
-            "id": short_id(),
-            "timestamp": now_iso,
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": question}],
-            },
-        }) + "\n")
-        f.write(json.dumps({
-            "type": "message",
-            "id": short_id(),
-            "timestamp": now_iso,
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": response_text}],
-                "model": model_id,
-                "stopReason": "stop",
-            },
-        }) + "\n")
-
-    index_path = sessions_dir / "sessions.json"
+    index_path = sessions_dir / "sessionslist.json"
+    # Fall back to legacy sessions.json if it exists and new file doesn't yet.
+    if not index_path.exists():
+        legacy = sessions_dir / "sessions.json"
+        if legacy.exists():
+            index_path = legacy
     try:
         index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
     except Exception:
@@ -97,5 +120,16 @@ def tee_exchange(
         "backend": "openclaw",
         "updatedAt": now_ms,
     })
+
+    # Read cumulative token usage directly from the native OpenClaw JSONL.
+    # Summing the whole file on each turn avoids double-counting — we replace
+    # rather than accumulate, so it stays accurate even if tee_exchange is
+    # called multiple times for the same session.
+    agent_name = session_key.split(":")[1] if ":" in session_key else "main"
+    usage_totals = _sum_usage(session_id, agent_name)
+    if usage_totals:
+        entry["usage"] = usage_totals
+
     index[session_key] = entry
-    _write_index_atomic(index_path, index)
+    # Always write to sessionslist.json going forward.
+    _write_index_atomic(sessions_dir / "sessionslist.json", index)
