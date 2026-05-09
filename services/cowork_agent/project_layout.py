@@ -46,17 +46,14 @@ _BUNDLED_TEMPLATE = Path(__file__).parent / "project_template"
 def _template_dir() -> Path:
     """Return the project template directory.
 
-    Priority: ``XO_PROJECT_TEMPLATE`` env var → ``~/ultimate-work`` →
-    bundled ``project_template/`` shipped with this package (always present).
+    Priority: ``XO_PROJECT_TEMPLATE`` env var → bundled ``project_template/``
+    shipped with this package (always present).
     """
     raw = (os.getenv("XO_PROJECT_TEMPLATE", "") or "").strip()
     if raw:
         t = Path(raw).expanduser().resolve()
         if t.is_dir():
             return t
-    default = Path.home() / "ultimate-work"
-    if default.is_dir():
-        return default
     return _BUNDLED_TEMPLATE
 
 
