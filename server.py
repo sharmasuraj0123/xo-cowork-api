@@ -35,6 +35,7 @@ from routers.auth import (
 )
 from routers.claude_setup_token import router as claude_setup_token_router
 from routers.codex_setup import router as codex_setup_router
+from routers.openclaw_setup import router as openclaw_setup_router
 from routers.openclaw_usage import router as openclaw_usage_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
@@ -452,6 +453,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)
+app.include_router(openclaw_setup_router)
 app.include_router(openclaw_usage_router)
 
 # Cowork Agent API (migrated from bridge/) — serves the xo-cowork frontend.
