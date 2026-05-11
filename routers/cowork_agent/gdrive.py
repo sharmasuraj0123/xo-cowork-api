@@ -11,7 +11,7 @@ Exposes:
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -19,14 +19,22 @@ from services.cowork_agent.gdrive_rclone import (
     cancel_session,
     create_remote_session,
     delete_remote,
+    delete_remote_folder,
     get_session,
     list_drive_remotes,
+    list_remote_folders,
+    mkdir_remote_path,
     rclone_available,
+    upload_file_to_remote,
     validate_remote_name,
 )
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+# v1 cap: large enough for ordinary docs/images, conservative enough that the
+# Coder edge proxy and Next.js dev rewrite stay reliable.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -149,3 +157,123 @@ async def submit_gdrive_code(session_id: str, body: SubmitCodeBody) -> JSONRespo
 
     session.verification_input = code
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/connectors/gdrive/remotes/{name}/mkdir
+# Body: {"path": "<folder path on remote>"}
+# ---------------------------------------------------------------------------
+
+class MkdirBody(BaseModel):
+    path: str
+
+
+@router.post("/api/connectors/gdrive/remotes/{name}/mkdir")
+async def mkdir_gdrive_remote(name: str, body: MkdirBody) -> JSONResponse:
+    if not await rclone_available():
+        raise HTTPException(503, detail="Could not reach rclone.")
+
+    remotes = await list_drive_remotes()
+    if not any(r.get("name") == name for r in remotes):
+        raise HTTPException(404, detail=f"Remote '{name}' not found.")
+
+    try:
+        await mkdir_remote_path(name, body.path)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+    return JSONResponse({"ok": True, "path": body.path})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/connectors/gdrive/remotes/{name}/folders
+# Lists top-level folders visible to rclone on the remote.
+# ---------------------------------------------------------------------------
+
+@router.get("/api/connectors/gdrive/remotes/{name}/folders")
+async def list_gdrive_remote_folders(name: str) -> JSONResponse:
+    if not await rclone_available():
+        raise HTTPException(503, detail="Could not reach rclone.")
+
+    remotes = await list_drive_remotes()
+    if not any(r.get("name") == name for r in remotes):
+        raise HTTPException(404, detail=f"Remote '{name}' not found.")
+
+    try:
+        folders = await list_remote_folders(name)
+    except RuntimeError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+    return JSONResponse({"folders": folders})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/connectors/gdrive/remotes/{name}/rmdir
+# Body: {"path": "<folder path>"} — purges folder + rclone-visible contents.
+# ---------------------------------------------------------------------------
+
+class RmdirBody(BaseModel):
+    path: str
+
+
+@router.post("/api/connectors/gdrive/remotes/{name}/rmdir")
+async def rmdir_gdrive_remote(name: str, body: RmdirBody) -> JSONResponse:
+    if not await rclone_available():
+        raise HTTPException(503, detail="Could not reach rclone.")
+
+    remotes = await list_drive_remotes()
+    if not any(r.get("name") == name for r in remotes):
+        raise HTTPException(404, detail=f"Remote '{name}' not found.")
+
+    try:
+        await delete_remote_folder(name, body.path)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+    return JSONResponse({"ok": True, "path": body.path})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/connectors/gdrive/remotes/{name}/upload?path=<folder>&filename=<f>
+# Body is the raw file bytes (Content-Type: application/octet-stream).
+# Streams to `rclone rcat` stdin — no disk spool, no RAM buffer.
+# ---------------------------------------------------------------------------
+
+@router.post("/api/connectors/gdrive/remotes/{name}/upload")
+async def upload_to_gdrive_remote(
+    name: str,
+    request: Request,
+    path: str = "",
+    filename: str = "",
+) -> JSONResponse:
+    if not await rclone_available():
+        raise HTTPException(503, detail="Could not reach rclone.")
+
+    remotes = await list_drive_remotes()
+    if not any(r.get("name") == name for r in remotes):
+        raise HTTPException(404, detail=f"Remote '{name}' not found.")
+
+    size_hdr = request.headers.get("content-length")
+    size: int | None = None
+    if size_hdr and size_hdr.isdigit():
+        size = int(size_hdr)
+        if size > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413,
+                detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB cap.",
+            )
+
+    try:
+        final_path = await upload_file_to_remote(
+            name, path, filename, size, request.stream(),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, detail=f"rclone upload failed: {exc}") from exc
+
+    return JSONResponse({"ok": True, "path": final_path, "size": size})
