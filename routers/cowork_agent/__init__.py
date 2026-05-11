@@ -26,6 +26,7 @@ from .sessions import router as sessions_router
 from .usage import router as usage_router
 from .vercel import router as vercel_router
 from .workspace_memory import router as workspace_memory_router
+from .bff import bff_routers
 
 all_routers: list[APIRouter] = [
     sessions_router,
@@ -45,4 +46,5 @@ all_routers: list[APIRouter] = [
     github_router,
     vercel_router,
     manus_router,
+    *bff_routers,
 ]
