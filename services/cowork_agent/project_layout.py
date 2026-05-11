@@ -262,9 +262,114 @@ def list_projects() -> list[dict]:
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
-        meta.setdefault("name", entry.name)
-        meta.setdefault("display_name", meta["name"])
+        if not meta.get("name"):
+            meta["name"] = entry.name
+        if not meta.get("display_name"):
+            meta["display_name"] = meta["name"]
         meta["path"] = str(entry)
         out.append(meta)
+
+    return out
+
+
+def project_dir_exists(name: str) -> bool:
+    """True iff the project root directory exists (scaffolded or not)."""
+    return project_dir(name).is_dir()
+
+
+def list_project_tree(name: str, relative_path: str = "") -> dict | None:
+    """List dirs/files at a path inside a project.
+
+    Returns ``None`` if the project doesn't exist or the resolved
+    relative path doesn't point to an existing directory. Raises
+    ``ValueError`` for invalid ``relative_path`` (contains ``..`` or
+    ``.``, a leading separator, a null byte, or escapes the project
+    root after resolve).
+
+    The returned entries are raw — the BFF layer applies UI filtering
+    (hidden entries, agent files at root). This helper only enforces
+    path safety.
+    """
+    project_id = normalize_agent_id(name)
+    root = project_dir(project_id)
+    if not root.is_dir():
+        return None
+    root_resolved = root.resolve()
+
+    rel = (relative_path or "")
+    if "\x00" in rel:
+        raise ValueError("relative_path must not contain null bytes")
+    if rel.startswith("/") or rel.startswith("\\"):
+        raise ValueError("relative_path must not start with a path separator")
+    rel = rel.replace("\\", "/").strip("/")
+    if rel:
+        parts = rel.split("/")
+        if any(p in ("..", ".") or p == "" for p in parts):
+            raise ValueError("relative_path must not contain '..' or '.' segments")
+
+    target = (root_resolved / rel) if rel else root_resolved
+    try:
+        target = target.resolve()
+        target.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError("relative_path escapes project root") from None
+
+    if not target.is_dir():
+        return None
+
+    dirs: list[dict] = []
+    files: list[dict] = []
+    for entry in sorted(target.iterdir()):
+        entry_rel = str(entry.relative_to(root_resolved)).replace("\\", "/")
+        info = {"name": entry.name, "relative_path": entry_rel}
+        if entry.is_dir():
+            dirs.append(info)
+        else:
+            files.append(info)
+
+    parent_rel: str | None
+    if rel:
+        head = "/".join(rel.split("/")[:-1])
+        parent_rel = head
+    else:
+        parent_rel = None
+
+    return {
+        "project_id": project_id,
+        "relative_path": rel,
+        "parent_relative_path": parent_rel,
+        "dirs": dirs,
+        "files": files,
+    }
+
+
+def list_unscaffolded_dirs() -> list[dict]:
+    """Directories under xo-projects/ that lack ``.xo/project.json``.
+
+    Same baseline filtering as ``list_projects`` (non-hidden, is a
+    directory), but returns only the entries that have NOT been
+    scaffolded — useful when the UI wants to surface "complete this
+    folder's setup" prompts.
+
+    Each entry has ``name`` (the directory name) and ``mtime`` (POSIX
+    timestamp of the directory; ``None`` if ``stat`` failed). ISO
+    conversion and any further filtering (e.g. system-leaf names) is
+    the BFF layer's job, not this helper's.
+    """
+    root = xo_projects_root()
+    out: list[dict] = []
+    if not root.exists():
+        return out
+
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if (entry / ".xo" / "project.json").exists():
+            continue
+        try:
+            mtime: float | None = entry.stat().st_mtime
+        except OSError:
+            mtime = None
+        out.append({"name": entry.name, "mtime": mtime})
 
     return out
