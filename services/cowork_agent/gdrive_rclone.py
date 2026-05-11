@@ -28,7 +28,7 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 
@@ -151,6 +151,102 @@ async def _rclone_cli(*args: str, timeout: int = 30) -> str:
     return stdout.decode(errors="replace")
 
 
+async def _rclone_cli_stdin_stream(
+    *args: str,
+    chunk_iter: AsyncIterator[bytes],
+) -> None:
+    """
+    Spawn `rclone` and stream `chunk_iter` to its stdin. Raises RuntimeError on
+    non-zero exit (with stderr tail). Always passes --config.
+
+    No subprocess timeout — the natural backstop is the caller's HTTP request.
+    On any error or early return, kills the subprocess in a finally block to
+    avoid zombie rclone processes.
+    """
+    full_args = ("rclone",) + args + ("--config", RCLONE_CONFIG_PATH)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *full_args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("rclone binary not found in PATH") from exc
+
+    assert proc.stdin is not None and proc.stderr is not None
+
+    # Bounded stderr ring (last 64 KiB) for diagnostics on failure.
+    stderr_buf = bytearray()
+    _STDERR_MAX = 64 * 1024
+
+    async def drain_stderr() -> None:
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            stderr_buf.extend(chunk)
+            if len(stderr_buf) > _STDERR_MAX:
+                del stderr_buf[: len(stderr_buf) - _STDERR_MAX]
+
+    client_disconnected = False
+
+    async def feed_stdin() -> None:
+        nonlocal client_disconnected
+        try:
+            async for chunk in chunk_iter:
+                if not chunk:
+                    continue
+                proc.stdin.write(chunk)
+                await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # rclone closed stdin (e.g. exited early on validation failure).
+            # Swallow — the non-zero return code surfaces the real error.
+            pass
+        except Exception as exc:
+            # Starlette raises ClientDisconnect when the browser/proxy drops
+            # the upload mid-stream. Re-raise as a clean RuntimeError so the
+            # caller's exception handler maps it to a useful HTTP error.
+            if exc.__class__.__name__ == "ClientDisconnect":
+                client_disconnected = True
+                return
+            raise
+        finally:
+            try:
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    stderr_task = asyncio.create_task(drain_stderr())
+    try:
+        await feed_stdin()
+        rc = await proc.wait()
+        await stderr_task
+        if client_disconnected:
+            raise RuntimeError(
+                "Upload connection dropped before all bytes arrived. "
+                "If you're behind the Next.js dev proxy, configure "
+                "NEXT_PUBLIC_XO_COWORK_API_URL to bypass it."
+            )
+        if rc != 0:
+            tail = bytes(stderr_buf).decode(errors="replace").strip()
+            raise RuntimeError(tail or f"rclone exit {rc}")
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+        if not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 async def _rc_post(endpoint: str, body: dict | None = None, timeout: int = 15) -> dict:
     """
     Compatibility shim: maps the legacy rclone rc HTTP endpoints used by this
@@ -258,6 +354,104 @@ async def validate_remote_name(name: str) -> str | None:
     return None
 
 
+async def mkdir_remote_path(name: str, path: str) -> None:
+    """Create a folder on a configured remote via `rclone mkdir <name>:<path>`.
+
+    Raises ValueError on invalid input; lets RuntimeError from the CLI bubble up
+    so the router can surface it.
+    """
+    cleaned = path.strip().lstrip("/")
+    if not cleaned:
+        raise ValueError("Folder path is required.")
+    segments = cleaned.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        raise ValueError("Invalid folder path.")
+    await _rclone_cli("mkdir", f"{name}:{cleaned}", timeout=30)
+
+
+async def delete_remote_folder(name: str, path: str) -> None:
+    """Delete a folder on a configured remote via `rclone purge <name>:<path>`.
+
+    `purge` removes the folder and all of its contents that rclone can see.
+    Under drive.file scope, that's only files/folders rclone itself created.
+
+    Raises ValueError on invalid input; lets RuntimeError from the CLI bubble up.
+    """
+    cleaned = path.strip().lstrip("/")
+    if not cleaned:
+        raise ValueError("Folder path is required.")
+    segments = cleaned.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        raise ValueError("Invalid folder path.")
+    await _rclone_cli("purge", f"{name}:{cleaned}", timeout=60)
+
+
+def _validate_upload_filename(filename: str) -> str:
+    """Validate and return the cleaned filename. Raises ValueError on bad input."""
+    cleaned = filename.strip()
+    if not cleaned:
+        raise ValueError("Filename is required.")
+    if "/" in cleaned or "\\" in cleaned:
+        raise ValueError("Filename must not contain '/' or '\\'.")
+    if cleaned in (".", ".."):
+        raise ValueError("Invalid filename.")
+    if any(ord(c) < 0x20 for c in cleaned):
+        raise ValueError("Filename contains control characters.")
+    return cleaned
+
+
+async def upload_file_to_remote(
+    name: str,
+    folder_path: str,
+    filename: str,
+    size: int | None,
+    chunk_iter: AsyncIterator[bytes],
+) -> str:
+    """Stream `chunk_iter` to `<name>:<folder_path>/<filename>` via `rclone rcat`.
+
+    folder_path may be empty (root). Returns the cleaned remote-relative path.
+    Raises ValueError on invalid path/filename; RuntimeError on rclone failure.
+    """
+    safe_name = _validate_upload_filename(filename)
+
+    cleaned_folder = folder_path.strip().lstrip("/")
+    if cleaned_folder:
+        if any(seg in ("", ".", "..") for seg in cleaned_folder.split("/")):
+            raise ValueError("Invalid folder path.")
+        rel_path = f"{cleaned_folder}/{safe_name}"
+    else:
+        rel_path = safe_name
+
+    target = f"{name}:{rel_path}"
+    if size is not None:
+        argv: tuple[str, ...] = ("rcat", "--size", str(size), target)
+    else:
+        argv = ("rcat", target)
+
+    await _rclone_cli_stdin_stream(*argv, chunk_iter=chunk_iter)
+    return rel_path
+
+
+async def list_remote_folders(name: str) -> list[dict]:
+    """List top-level folders on a remote via `rclone lsjson --dirs-only`.
+
+    Returns a list of {name, modified} dicts. With drive.file scope, only
+    folders rclone itself created are visible.
+    """
+    raw = await _rclone_cli(
+        "lsjson", f"{name}:", "--dirs-only", "--max-depth", "1", timeout=30
+    )
+    try:
+        items = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"rclone returned non-JSON output: {exc}") from exc
+    return [
+        {"name": it.get("Name") or it.get("Path") or "", "modified": it.get("ModTime")}
+        for it in items
+        if it.get("IsDir")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # OAuth flow
 # ---------------------------------------------------------------------------
@@ -353,6 +547,7 @@ async def _run_oauth_flow(session: GDriveSession) -> None:
         log.info("GDrive %s: spawning rclone authorize", session.session_id)
         proc = subprocess.Popen(
             ["rclone", "authorize", "--auth-no-open-browser", "drive",
+             "--drive-scope=drive.file",
              f"--config={RCLONE_CONFIG_PATH}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -480,7 +675,7 @@ async def _run_oauth_flow(session: GDriveSession) -> None:
         config_section = (
             f"\n[{name}]\n"
             f"type = drive\n"
-            f"scope = drive\n"
+            f"scope = drive.file\n"
             f"token = {token_json}\n"
         )
         try:
