@@ -1,0 +1,4 @@
+{
+  "gateway_token_env": "API_SERVER_KEY",
+  "timeout": 120
+}
