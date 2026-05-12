@@ -418,12 +418,23 @@ async def lifespan(app: FastAPI):
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
+    _watcher_task = None
     if start_usage_sync_scheduler:
         try:
             _sync_task = asyncio.create_task(start_usage_sync_scheduler())
             print("   Usage sync: background task started")
         except Exception as e:
             print(f"⚠️ Usage sync failed to start (non-fatal): {e}")
+
+    # Visualizer watcher — materialises <project>/.xo/* from the
+    # runtime logs Claude Code writes under ~/.claude/projects/.
+    # Non-fatal: BFF endpoints keep serving whatever is on disk.
+    try:
+        from services.cowork_agent.visualizer.watcher import start_watcher
+        _watcher_task = asyncio.create_task(start_watcher())
+        print("   Watcher: background task started")
+    except Exception as e:
+        print(f"⚠️ Watcher failed to start (non-fatal): {e}")
 
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
@@ -441,6 +452,13 @@ async def lifespan(app: FastAPI):
         _sync_task.cancel()
         try:
             await _sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _watcher_task:
+        _watcher_task.cancel()
+        try:
+            await _watcher_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")
