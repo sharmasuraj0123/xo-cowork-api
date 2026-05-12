@@ -33,10 +33,30 @@ _DEFAULT_WATERMARK_PATH = os.path.join(_REPO_DIR, "data", "openclaw", "usage_syn
 SYNC_STATE_FILE = os.getenv("USAGE_SYNC_STATE_FILE", _DEFAULT_WATERMARK_PATH)
 
 SYNC_HOUR_UTC = int(os.getenv("USAGE_SYNC_HOUR_UTC", "2"))
+DEBUG_ENABLED = (os.getenv("USAGE_SYNC_DEBUG", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+DEBUG_INTERVAL_MINUTES = int(os.getenv("USAGE_SYNC_DEBUG_INTERVAL_MINUTES", "0") or "0")
 
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "main")
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+
+def _timestamp_prefix() -> str:
+    tz_pref = (os.getenv("USAGE_SYNC_LOG_TZ", "UTC") or "UTC").strip().upper()
+    if tz_pref == "IST":
+        tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30), name="IST")
+        tz_name = "IST"
+    else:
+        tz = datetime.timezone.utc
+        tz_name = "UTC"
+
+    ts = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    return f"[{ts} {tz_name}]"
+
+
+def _debug_log(message: str) -> None:
+    if DEBUG_ENABLED:
+        print(f"{_timestamp_prefix()} usage_sync_debug: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +209,7 @@ async def _run_sync(is_backfill: bool = False) -> None:
 
     session_files = _discover_session_files(OPENCLAW_AGENT_ID)
     if not session_files:
-        print("usage_sync: no session files found, skipping")
+        print(f"{_timestamp_prefix()} usage_sync: no session files found, skipping")
         return
 
     # Parse all session files and collect entries + per-date session counts
@@ -212,7 +232,7 @@ async def _run_sync(is_backfill: bool = False) -> None:
         all_entries.extend(entries)
 
     if not all_entries:
-        print(f"usage_sync: no new entries since {last_synced_date}, skipping")
+        print(f"{_timestamp_prefix()} usage_sync: no new entries since {last_synced_date}, skipping")
         return
 
     # Aggregate by date
@@ -241,7 +261,7 @@ async def _run_sync(is_backfill: bool = False) -> None:
         if response.status_code == 200:
             result = response.json()
             upserted = result.get("upserted", 0)
-            print(f"usage_sync: successfully synced {upserted} day(s) to swarm")
+            print(f"{_timestamp_prefix()} usage_sync: successfully synced {upserted} day(s) to swarm")
 
             # Advance watermark to yesterday (not today) so today's partial
             # data gets re-sent and updated on the next cycle.
@@ -256,9 +276,9 @@ async def _run_sync(is_backfill: bool = False) -> None:
             state["last_sync_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             _save_sync_state(state)
         else:
-            print(f"usage_sync: POST failed with {response.status_code}: {response.text[:200]}")
+            print(f"{_timestamp_prefix()} usage_sync: POST failed with {response.status_code}: {response.text[:200]}")
     except Exception as e:
-        print(f"usage_sync: error posting to swarm (will retry next cycle): {e}")
+        print(f"{_timestamp_prefix()} usage_sync: error posting to swarm (will retry next cycle): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -267,12 +287,25 @@ async def _run_sync(is_backfill: bool = False) -> None:
 
 
 async def _seconds_until_next_run() -> float:
-    """Calculate seconds until next SYNC_HOUR_UTC:00 UTC."""
+    """Calculate seconds until next scheduled run (hourly target or debug interval)."""
+    if DEBUG_INTERVAL_MINUTES > 0:
+        return float(DEBUG_INTERVAL_MINUTES * 60)
+
     now = datetime.datetime.now(datetime.timezone.utc)
     target = now.replace(hour=SYNC_HOUR_UTC, minute=0, second=0, microsecond=0)
     if target <= now:
         target += datetime.timedelta(days=1)
     return (target - now).total_seconds()
+
+
+def _next_target_utc(now: datetime.datetime | None = None) -> datetime.datetime:
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    if DEBUG_INTERVAL_MINUTES > 0:
+        return current + datetime.timedelta(minutes=DEBUG_INTERVAL_MINUTES)
+    target = current.replace(hour=SYNC_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if target <= current:
+        target += datetime.timedelta(days=1)
+    return target
 
 
 async def start_usage_sync_scheduler() -> None:
@@ -287,44 +320,80 @@ async def start_usage_sync_scheduler() -> None:
     await asyncio.sleep(5)
 
     state = _load_sync_state()
+    _debug_log(
+        f"scheduler_started pid={os.getpid()} state_file={SYNC_STATE_FILE} "
+        f"last_synced_date={state.get('last_synced_date')} last_sync_at={state.get('last_sync_at')} "
+        f"mode={'debug_interval' if DEBUG_INTERVAL_MINUTES > 0 else 'daily'} "
+        f"interval_minutes={DEBUG_INTERVAL_MINUTES if DEBUG_INTERVAL_MINUTES > 0 else 'n/a'}"
+    )
     if not state.get("last_synced_date"):
         # First-ever run: full historical backfill
-        print("usage_sync: no watermark found, starting historical backfill...")
+        print(f"{_timestamp_prefix()} usage_sync: no watermark found, starting historical backfill...")
+        _debug_log("initial_path=backfill reason=no_watermark")
         try:
             await _run_sync(is_backfill=True)
-            print("usage_sync: backfill complete")
+            print(f"{_timestamp_prefix()} usage_sync: backfill complete")
+            _debug_log("backfill_completed")
         except Exception as e:
-            print(f"usage_sync: backfill error (non-fatal): {e}")
+            print(f"{_timestamp_prefix()} usage_sync: backfill error (non-fatal): {e}")
+            _debug_log(f"backfill_failed error={e}")
     else:
         # Check if we missed a scheduled run (last sync > 24h ago).
         # This handles restarts after the 2 AM window was missed.
         last_sync_at = state.get("last_sync_at")
         needs_catchup = False
+        catchup_reason = "no_last_sync_at"
         if last_sync_at:
             try:
                 last_dt = datetime.datetime.fromisoformat(last_sync_at)
                 hours_since = (datetime.datetime.now(datetime.timezone.utc) - last_dt).total_seconds() / 3600
                 if hours_since > 24:
                     needs_catchup = True
-                    print(f"usage_sync: last sync was {hours_since:.1f}h ago, running catch-up sync...")
+                    catchup_reason = f"hours_since_gt_24 ({hours_since:.2f})"
+                    print(f"{_timestamp_prefix()} usage_sync: last sync was {hours_since:.1f}h ago, running catch-up sync...")
+                else:
+                    catchup_reason = f"hours_since_le_24 ({hours_since:.2f})"
             except Exception:
                 needs_catchup = True
+                catchup_reason = "last_sync_at_parse_error"
+
+        _debug_log(f"catchup_decision needs_catchup={needs_catchup} reason={catchup_reason}")
 
         if needs_catchup:
             try:
+                _debug_log("trigger_enter source=startup_catchup")
                 await _run_sync(is_backfill=False)
-                print("usage_sync: catch-up sync complete")
+                print(f"{_timestamp_prefix()} usage_sync: catch-up sync complete")
+                _debug_log("trigger_exit source=startup_catchup status=ok")
             except Exception as e:
-                print(f"usage_sync: catch-up sync error (non-fatal): {e}")
+                print(f"{_timestamp_prefix()} usage_sync: catch-up sync error (non-fatal): {e}")
+                _debug_log(f"trigger_exit source=startup_catchup status=error error={e}")
         else:
-            print(f"usage_sync: watermark found (last synced: {state['last_synced_date']}), next run at {SYNC_HOUR_UTC:02d}:00 UTC")
+            print(f"{_timestamp_prefix()} usage_sync: watermark found (last synced: {state['last_synced_date']}), next run at {SYNC_HOUR_UTC:02d}:00 UTC")
 
     # Daily loop
     while True:
+        now = datetime.datetime.now(datetime.timezone.utc)
         wait = await _seconds_until_next_run()
-        print(f"usage_sync: next sync in {wait / 3600:.1f}h (at {SYNC_HOUR_UTC:02d}:00 UTC)")
+        target = _next_target_utc(now)
+        _debug_log(
+            f"sleep_begin pid={os.getpid()} now_utc={now.isoformat()} "
+            f"target_utc={target.isoformat()} wait_seconds={wait:.1f}"
+        )
+        if DEBUG_INTERVAL_MINUTES > 0:
+            print(
+                f"{_timestamp_prefix()} usage_sync: next sync in {wait / 60:.1f}m "
+                f"(debug interval mode: every {DEBUG_INTERVAL_MINUTES}m)"
+            )
+        else:
+            print(f"{_timestamp_prefix()} usage_sync: next sync in {wait / 3600:.1f}h (at {SYNC_HOUR_UTC:02d}:00 UTC)")
         await asyncio.sleep(wait)
+        wake = datetime.datetime.now(datetime.timezone.utc)
+        _debug_log(f"sleep_end pid={os.getpid()} woke_at_utc={wake.isoformat()} skew_seconds={(wake - target).total_seconds():.1f}")
         try:
+            _debug_log("trigger_enter source=daily_loop")
             await _run_sync(is_backfill=False)
+            _debug_log("trigger_exit source=daily_loop status=ok")
         except Exception as e:
-            print(f"usage_sync: daily sync error (will retry tomorrow): {e}")
+            print(f"{_timestamp_prefix()} usage_sync: daily sync error (will retry tomorrow): {e}")
+            _debug_log(f"trigger_exit source=daily_loop status=error error={e}")
