@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/stats.schema.json",
+  "title": "xo stats — rolling project metrics",
+  "description": "Rolling 7d/30d activity stats plus per-session and per-runtime breakdowns. Rebuilt periodically (≈60s) by the watcher from `.xo/timeline.jsonl` — never hand-edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rolling"],
+  "properties": {
+    "$schema":    { "type": "string" },
+    "schema":     { "type": "integer", "const": 1 },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "rolling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["7d", "30d"],
+      "properties": {
+        "7d":  { "$ref": "#/definitions/window" },
+        "30d": { "$ref": "#/definitions/window" }
+      }
+    },
+    "by_session": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/session_stats" }
+    },
+    "by_runtime": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/window" }
+    }
+  },
+  "definitions": {
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input":  { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["input", "output"]
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens":         { "$ref": "#/definitions/tokens" },
+        "by_model":       { "type": "object", "description": "Map of model id → window-scoped sub-stats.", "additionalProperties": true },
+        "files_edited":   { "type": "integer", "minimum": 0 },
+        "sessions":       { "type": "integer", "minimum": 0 },
+        "active_minutes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "session_stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tokens":      { "$ref": "#/definitions/tokens" },
+        "files":       { "type": "array", "items": { "type": "string" } },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

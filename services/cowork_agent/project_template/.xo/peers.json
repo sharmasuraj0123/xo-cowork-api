@@ -1,5 +1,4 @@
 {
-  "$schema": "./schema/peers.schema.json",
   "schema": 1,
   "updated_at": null,
   "peers": []

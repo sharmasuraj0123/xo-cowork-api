@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/timeline.schema.json",
+  "title": "xo timeline event (one line of timeline.jsonl)",
+  "description": "Append-only event log. The file is JSONL — one JSON object per line, newline-terminated. This schema describes a single event. Validators should run line-by-line.",
+  "type": "object",
+  "required": ["ts", "type"],
+  "properties": {
+    "ts":           { "type": "string", "format": "date-time", "description": "ISO 8601 UTC." },
+    "type":         { "type": "string", "description": "Dotted event name, e.g. `session.started`, `file.edited`." },
+    "session_id":   { "type": "string", "description": "Set on most events; absent on project-wide events like `project.created`." },
+    "runtime":      { "type": "string", "description": "Source runtime, e.g. `claude_code`, `openclaw`." },
+    "user_id":      { "type": "string" },
+    "agent":        { "type": "string", "description": "Model id, e.g. `claude-opus-4-7`." }
+  },
+  "oneOf": [
+    { "$ref": "#/definitions/project_created" },
+    { "$ref": "#/definitions/session_started" },
+    { "$ref": "#/definitions/session_closed" },
+    { "$ref": "#/definitions/todo_added" },
+    { "$ref": "#/definitions/todo_completed" },
+    { "$ref": "#/definitions/file_edited" },
+    { "$ref": "#/definitions/file_created" },
+    { "$ref": "#/definitions/plan_written" },
+    { "$ref": "#/definitions/episode_written" },
+    { "$ref": "#/definitions/peer_sync_started" },
+    { "$ref": "#/definitions/peer_sync_applied" },
+    { "$ref": "#/definitions/peer_sync_conflict" }
+  ],
+  "definitions": {
+    "project_created":    { "properties": { "type": { "const": "project.created" } } },
+    "session_started":    { "properties": { "type": { "const": "session.started" }, "session_id": { "type": "string" } }, "required": ["session_id"] },
+    "session_closed":     { "properties": { "type": { "const": "session.closed" }, "session_id": { "type": "string" }, "outcome": { "type": "string" } }, "required": ["session_id"] },
+    "todo_added":         { "properties": { "type": { "const": "todo.added" }, "session_id": { "type": "string" }, "todo": { "type": "object" } } },
+    "todo_completed":     { "properties": { "type": { "const": "todo.completed" }, "session_id": { "type": "string" }, "todo_id": { "type": "string" } } },
+    "file_edited":        { "properties": { "type": { "const": "file.edited" }, "path": { "type": "string" } }, "required": ["path"] },
+    "file_created":       { "properties": { "type": { "const": "file.created" }, "path": { "type": "string" } }, "required": ["path"] },
+    "plan_written":       { "properties": { "type": { "const": "plan.written" }, "path": { "type": "string" } } },
+    "episode_written":    { "properties": { "type": { "const": "episode.written" }, "path": { "type": "string" } } },
+    "peer_sync_started":  { "properties": { "type": { "const": "peer.sync.started" }, "peer_user_id": { "type": "string" } } },
+    "peer_sync_applied":  { "properties": { "type": { "const": "peer.sync.applied" }, "peer_user_id": { "type": "string" }, "files": { "type": "array", "items": { "type": "string" } } } },
+    "peer_sync_conflict": { "properties": { "type": { "const": "peer.sync.conflict" }, "path": { "type": "string" }, "peers": { "type": "array", "items": { "type": "string" } } } }
+  }
+}
