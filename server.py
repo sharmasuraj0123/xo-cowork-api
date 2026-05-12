@@ -774,11 +774,15 @@ async def ask_question_streaming(data: AskQuestionRequest):
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "5002"))
+    reload = os.getenv("UVICORN_RELOAD", "").strip().lower() in ("1", "true", "yes")
 
-    uvicorn.run(
-        "server:app",
-        host=host,
-        port=port,
-        reload=True,
-        reload_dirs=[str(Path(__file__).resolve().parent)]
-    )
+    if reload:
+        uvicorn.run(
+            "server:app",
+            host=host,
+            port=port,
+            reload=True,
+            reload_dirs=[str(Path(__file__).resolve().parent)],
+        )
+    else:
+        uvicorn.run("server:app", host=host, port=port, reload=False)
