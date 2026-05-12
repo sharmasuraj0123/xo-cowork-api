@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/activity.schema.json",
+  "title": "xo activity — live presence",
+  "description": "Which sessions are open right now and when they last did something. Heartbeat-style: refreshed on every meaningful action, stale entries pruned by the watcher.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "open_sessions"],
+  "properties": {
+    "$schema":    { "type": "string" },
+    "schema":     { "type": "integer", "const": 1 },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "open_sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "agent", "user_id", "opened_at", "last_activity_at"],
+        "properties": {
+          "session_id":       { "type": "string" },
+          "runtime":          { "type": ["string", "null"], "description": "e.g. `claude_code`, `openclaw`." },
+          "agent":            { "type": "string", "description": "Model id, e.g. `claude-opus-4-7`." },
+          "user_id":          { "type": "string" },
+          "opened_at":        { "type": "string", "format": "date-time" },
+          "last_activity_at": { "type": "string", "format": "date-time" },
+          "host":             { "type": ["string", "null"], "description": "Machine the session is running on." }
+        }
+      }
+    }
+  }
+}

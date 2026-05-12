@@ -1,5 +1,4 @@
 {
-  "$schema": "./schema/activity.schema.json",
   "schema": 1,
   "updated_at": null,
   "open_sessions": []

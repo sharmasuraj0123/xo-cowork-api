@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/peers.schema.json",
+  "title": "xo peers — who this project is shared with",
+  "description": "Roster of human collaborators. Empty list = solo project. Sync state lives separately in sync.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "peers"],
+  "properties": {
+    "$schema":    { "type": "string" },
+    "schema":     { "type": "integer", "const": 1 },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "peers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["user_id", "role", "added_at"],
+        "properties": {
+          "user_id":  { "type": "string" },
+          "role":     { "type": "string", "enum": ["owner", "collaborator", "viewer"] },
+          "added_at": { "type": "string", "format": "date-time" },
+          "endpoint": { "type": ["string", "null"], "description": "Optional sync endpoint URL." },
+          "label":    { "type": ["string", "null"], "description": "Display name." }
+        }
+      }
+    }
+  }
+}

@@ -85,6 +85,17 @@ def xo_projects_root() -> Path:
     return root
 
 
+def workspace_xo_dir() -> Path:
+    """Workspace-tier ``.xo/`` directory at ``~/xo-projects/.xo/``.
+
+    Mirrors the per-project ``.xo/`` shape but aggregates across all
+    projects. Materialised by the watcher's workspace tier (see
+    docs/watcher-design.md §3.2). Does not auto-create on read — the
+    watcher creates it explicitly on its first tick.
+    """
+    return xo_projects_root() / ".xo"
+
+
 # ── Per-project paths ─────────────────────────────────────────────────────────
 
 

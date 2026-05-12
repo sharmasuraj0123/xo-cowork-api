@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/project.schema.json",
+  "title": "xo project identity",
+  "description": "Single-row identity for this cowork folder. Written once on first boot; immutable thereafter (except `name` which the user may rename).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "pid", "name", "owner_user_id", "created_at"],
+  "properties": {
+    "$schema":     { "type": "string", "description": "Editor hint — points at this schema file." },
+    "schema":      { "type": "integer", "const": 1 },
+    "_template":   { "type": "boolean", "description": "Present and true on a fresh template. The first agent to boot must populate identity fields and remove this flag." },
+    "pid":         { "type": ["string", "null"], "format": "uuid", "description": "UUID v4. Generated once on first boot. Never regenerated." },
+    "name":        { "type": ["string", "null"], "description": "Human-readable project name. Defaults to the folder name." },
+    "owner_user_id": { "type": ["string", "null"], "description": "Stable user identifier of the project owner." },
+    "created_at":  { "type": ["string", "null"], "format": "date-time", "description": "ISO 8601 UTC timestamp of first boot." }
+  }
+}
