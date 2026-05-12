@@ -26,6 +26,26 @@ def _empty_tokens():
     return {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
 
 
+def _openclaw_session_id_from_filename(name: str) -> str | None:
+    """Return the base session id for any transcript file OpenClaw counts.
+
+    Matches OpenClaw's `isUsageCountedSessionTranscriptFileName` (active +
+    `.reset.<iso>` + `.deleted.<iso>` archives). Excludes `.bak.<iso>` and
+    `*.checkpoint.<uuid>.jsonl`, which OpenClaw's dashboard also excludes.
+
+    Without the archive variants we miss every compacted/deleted session,
+    which is what was causing /api/usage to undercount tokens vs the
+    OpenClaw dashboard by ~10x.
+    """
+    for marker in (".jsonl.reset.", ".jsonl.deleted."):
+        idx = name.find(marker)
+        if idx > 0:
+            return name[:idx]
+    if name.endswith(".jsonl") and ".checkpoint." not in name:
+        return name[:-len(".jsonl")]
+    return None
+
+
 @router.get("/api/usage")
 def usage(days: int = 30):
     """
@@ -64,8 +84,12 @@ def usage(days: int = 30):
             if not sessions_dir.is_dir():
                 continue
 
-            for session_file in sessions_dir.glob("*.jsonl"):
-                session_id = session_file.stem
+            for session_file in sessions_dir.iterdir():
+                if not session_file.is_file():
+                    continue
+                session_id = _openclaw_session_id_from_filename(session_file.name)
+                if session_id is None:
+                    continue
                 try:
                     records = parse_jsonl(session_file)
                 except Exception:
