@@ -52,7 +52,49 @@ def list_connectors():
 
 @router.get("/api/channels")
 def list_channels():
-    return []
+    """Return the list of messaging channels with their connection state.
+
+    Always returns ``{channels: {...}, gateway_running: bool}`` regardless
+    of backend. Openclaw has no on-disk equivalent of hermes's
+    ``~/.hermes/gateway_state.json`` to read connected channels from, so
+    it just reports ``{}`` — but the *shape* stays the same so FE
+    consumers can do ``data.channels[id]`` without runtime guards.
+    """
+    import os
+    if os.getenv("AGENT_NAME", "openclaw") != "hermes":
+        return {"channels": {}, "gateway_running": False}
+
+    from services.cowork_agent.agent_registry import get_agent
+    state_file = get_agent("hermes").home_dir / "gateway_state.json"
+    if not state_file.is_file():
+        return {"channels": {}, "gateway_running": False}
+
+    try:
+        state = json.loads(state_file.read_text())
+    except Exception:
+        return {"channels": {}, "gateway_running": False}
+
+    platforms = state.get("platforms") or {}
+    channels: dict[str, dict] = {}
+    for platform_id, info in platforms.items():
+        if not isinstance(info, dict):
+            continue
+        # The gateway lists api_server too — that's the hermes API itself,
+        # not a user-facing messaging channel. Hide it from the UI list.
+        if platform_id == "api_server":
+            continue
+        channels[platform_id] = {
+            "id": platform_id,
+            "name": platform_id,
+            "type": platform_id,
+            "status": info.get("state") or "unknown",
+            "account": info.get("error_message") or None,
+        }
+
+    return {
+        "channels": channels,
+        "gateway_running": (state.get("gateway_state") == "running"),
+    }
 
 
 @router.get("/api/automations")

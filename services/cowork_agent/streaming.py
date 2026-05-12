@@ -51,11 +51,22 @@ def find_session_id_by_key(session_key: str) -> str | None:
 
 
 def openclaw_agent_id_from_prompt_body(body: dict) -> str:
-    """Resolve agent id from `model` (e.g. `<prefix>/research`) for new sessions.
+    """Resolve openclaw agent id for new sessions.
 
-    The expected prefix comes from the active agent's manifest
-    (`model_prefix`), so swapping the default agent swaps the namespace.
+    Resolution order:
+      1. Explicit ``agent_id`` in the body — set when the user picks an
+         agent from the sidebar. Lets the frontend just send the agent
+         name instead of encoding it as ``openclaw/<name>`` in the model
+         string.
+      2. ``model`` field with the openclaw prefix (e.g.
+         ``openclaw/research``). The prefix comes from the active agent's
+         manifest (``model_prefix``).
+      3. Fallback: ``"main"``.
     """
+    explicit_id = body.get("agent_id")
+    if isinstance(explicit_id, str) and explicit_id.strip():
+        return normalize_agent_id(explicit_id)
+
     model = body.get("model")
     if isinstance(model, str):
         lowered = model.strip().lower()

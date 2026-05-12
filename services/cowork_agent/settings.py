@@ -1,28 +1,41 @@
 """
 Environment, paths, and constants for the cowork_agent subsystem.
 
-Values previously hardcoded to OpenClaw are now sourced from the active
-agent manifest (see `services/cowork_agent/agent_registry.py` and
-`config/agents/*.json`). The module-level names are preserved so the rest
-of the subsystem keeps working without edits.
+The ``OPENCLAW_*`` module-level constants are anchored to the **openclaw
+manifest specifically** (``get_agent("openclaw")``), NOT to the active
+default agent. Every consumer of these constants is openclaw-specific
+(the openclaw adapter, openclaw_store, the ``/api/config/openclaw``
+endpoint, ...) and must always see openclaw paths regardless of
+``DEFAULT_AGENT``. Same for ``HERMES_*``.
+
+Code that needs the *active* agent's manifest must call
+``get_default_agent()`` explicitly. Code that targets a specific backend
+must call ``get_agent("<name>")``.
+
+Background: previously these constants resolved against
+``get_default_agent()``. With ``DEFAULT_AGENT=hermes`` that made
+``OPENCLAW_JSON = ~/.hermes/config.yaml`` and ``AGENTS_DIR =
+~/.hermes/profiles``, so an openclaw-shaped write (e.g.
+``write_openclaw_config`` from the agent-create flow) silently
+overwrote hermes's config. Re-anchoring closes that foot-gun.
 """
 
 import re
 
 from dotenv import load_dotenv
 
-from services.cowork_agent.agent_registry import get_default_agent
+from services.cowork_agent.agent_registry import get_agent
 
 load_dotenv()
 
-_AGENT = get_default_agent()
+_OPENCLAW = get_agent("openclaw")
 
-# ── Active-agent on-disk layout (sourced from manifest) ──────────────────────
+# ── OpenClaw on-disk layout (sourced from openclaw manifest) ─────────────────
 
-OPENCLAW_DIR = _AGENT.home_dir
-AGENTS_DIR = _AGENT.agents_dir
-OPENCLAW_JSON = _AGENT.config_file
-DEFAULT_OPENCLAW_WORKSPACE = _AGENT.workspace_dir
+OPENCLAW_DIR = _OPENCLAW.home_dir
+AGENTS_DIR = _OPENCLAW.agents_dir
+OPENCLAW_JSON = _OPENCLAW.config_file
+DEFAULT_OPENCLAW_WORKSPACE = _OPENCLAW.workspace_dir
 
 # ── Agent id normalization regexes ───────────────────────────────────────────
 
@@ -56,13 +69,28 @@ _WORKSPACE_DOC_FILES = (
 
 _MAX_AGENT_PAYLOAD_BYTES = 256_000
 
-# ── Active-agent API config (sourced from manifest + env) ────────────────────
+# ── OpenClaw API config (sourced from openclaw manifest + env) ──────────────
 
-OPENCLAW_API_URL = _AGENT.api_url
-OPENCLAW_GATEWAY_TOKEN = _AGENT.api_token
-OPENCLAW_MODEL = _AGENT.api_model
+OPENCLAW_API_URL = _OPENCLAW.api_url
+OPENCLAW_GATEWAY_TOKEN = _OPENCLAW.api_token
+OPENCLAW_MODEL = _OPENCLAW.api_model
 
-OPENCLAW_MODEL_CAPABILITIES: dict = dict(_AGENT.model_capabilities)
+OPENCLAW_MODEL_CAPABILITIES: dict = dict(_OPENCLAW.model_capabilities)
+
+# ── Hermes on-disk layout + API config (sourced from hermes manifest + env) ──
+
+_HERMES = get_agent("hermes")
+
+HERMES_DIR = _HERMES.home_dir
+HERMES_PROFILES_DIR = _HERMES.agents_dir
+HERMES_CONFIG_FILE = _HERMES.config_file
+
+HERMES_API_URL = _HERMES.api_url
+HERMES_API_TOKEN = _HERMES.api_token
+HERMES_MODEL = _HERMES.api_model
+HERMES_SESSION_HEADER = (_HERMES.raw.get("api") or {}).get("session_header", "")
+
+HERMES_MODEL_CAPABILITIES: dict = dict(_HERMES.model_capabilities)
 
 
 # ── Adapter config loader ─────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ from .files import router as files_router
 from .fts import router as fts_router
 from .gdrive import router as gdrive_router
 from .github import router as github_router
+from .hermes_profile import router as hermes_profile_router
 from .manus import router as manus_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
@@ -35,6 +36,7 @@ all_routers: list[APIRouter] = [
     agents_router,
     config_router,
     channels_router,
+    hermes_profile_router,
     files_router,
     workspace_memory_router,
     secrets_router,

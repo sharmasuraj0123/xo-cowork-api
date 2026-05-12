@@ -14,6 +14,8 @@ Chat messages are never written there. They live in the provider's own
 storage:
   claude_code → ~/.claude/projects/{encoded_dir}/{nativeSessionId}.jsonl
   openclaw    → ~/.openclaw/agents/{agent}/sessions/{sessionId}.jsonl
+  hermes      → ~/.hermes/state.db (or ~/.hermes/profiles/<name>/state.db) — SQLite,
+                read-only via services.cowork_agent.hermes_state_db.
 """
 
 import json
@@ -27,6 +29,10 @@ from services.cowork_agent.helpers import (
     iso_now,
     ms_to_iso,
     parse_jsonl,
+)
+from services.cowork_agent.hermes_state_db import (
+    find_hermes_profile,
+    list_hermes_sessions,
 )
 from services.cowork_agent.project_layout import xo_projects_root
 
@@ -68,17 +74,26 @@ def _resolve_index_path(sessions_dir: Path) -> Path | None:
 
 
 def load_all_sessions() -> list[dict]:
-    """Scan all agents and build SessionResponse objects.
+    """Scan agents and build SessionResponse objects, filtered by active backend.
 
-    Two scan roots:
-    - ``~/xo-projects/<id>/.xo/sessions/`` — project-tied sessions (claude_code
-      and openclaw chats with a project workspace selected).
-    - ``~/.openclaw/agents/<id>/sessions/`` — openclaw native sessions for
-      agent-only chats (no project picked).
+    Scan roots considered:
+    - ``~/xo-projects/<id>/.xo/sessions/`` — project-tied sessions
+      (claude_code + openclaw with a project workspace).
+    - ``~/.openclaw/agents/<id>/sessions/`` — openclaw native (no project).
+    - ``~/.hermes/state.db`` and per-profile state.dbs — hermes sessions.
+
+    Only sessions belonging to the active backend (``AGENT_NAME`` env) are
+    returned. When the user has switched to hermes, openclaw scan paths
+    aren't touched at all and openclaw sessions don't leak into the
+    sidebar — and vice versa. Per the user's mental model: ``AGENT_NAME``
+    decides which world we're in; the other backends stay invisible.
 
     De-duplicated via ``sessionId`` so a session that is both project-tee'd
     and natively present surfaces only once (project-tied wins).
     """
+    import os
+    active_backend = os.getenv("AGENT_NAME", "openclaw")
+
     sessions = []
     seen_ids: set[str] = set()
 
@@ -163,15 +178,20 @@ def load_all_sessions() -> list[dict]:
                 "time_archived": None,
             })
 
-    projects_root = xo_projects_root()
-    if projects_root.exists():
-        for agent_dir in sorted(projects_root.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
-                continue
-            _ingest_project_sessions_dir(agent_dir / ".xo" / "sessions", agent_dir.name, agent_dir)
+    # Project-tied scan: only relevant when the active backend stores its
+    # session metadata under xo-projects (openclaw / claude_code).
+    if active_backend in ("openclaw", "claude_code"):
+        projects_root = xo_projects_root()
+        if projects_root.exists():
+            for agent_dir in sorted(projects_root.iterdir()):
+                if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                    continue
+                _ingest_project_sessions_dir(agent_dir / ".xo" / "sessions", agent_dir.name, agent_dir)
 
-    # OpenClaw native sessions (no project picked at chat time).
-    if AGENTS_DIR.exists():
+    # OpenClaw native sessions (no project picked at chat time). Skip
+    # entirely when the active backend is hermes so openclaw sessions
+    # don't leak into the hermes sidebar.
+    if active_backend == "openclaw" and AGENTS_DIR.exists():
         for agent_dir in sorted(AGENTS_DIR.iterdir()):
             if not agent_dir.is_dir():
                 continue
@@ -231,6 +251,17 @@ def load_all_sessions() -> list[dict]:
                     "time_compacting": None,
                     "time_archived": None,
                 })
+
+    # Hermes sessions — only scanned when the active backend is hermes.
+    # Read from ~/.hermes/state.db + per-profile state.dbs; one sidebar
+    # bucket per profile. Ids never overlap with openclaw/claude_code in
+    # practice (hermes uses uuid4 / timestamp-hex) but we de-dup anyway.
+    if active_backend == "hermes":
+        for hermes_session in list_hermes_sessions():
+            if hermes_session["id"] in seen_ids:
+                continue
+            seen_ids.add(hermes_session["id"])
+            sessions.append(hermes_session)
 
     sessions.sort(key=lambda s: s["time_updated"], reverse=True)
     return sessions
@@ -320,6 +351,10 @@ def find_session_backend(session_id: str) -> str | None:
                 continue
             if (agent_dir / "sessions" / f"{session_id}.jsonl").exists():
                 return "openclaw"
+
+    # Hermes sessions (SQLite-backed, scanned across every profile).
+    if find_hermes_profile(session_id) is not None:
+        return "hermes"
 
     return None
 
