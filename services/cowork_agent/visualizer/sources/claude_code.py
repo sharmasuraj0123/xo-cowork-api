@@ -1,0 +1,342 @@
+"""Claude Code source — tails ``~/.claude/projects/*.jsonl`` and reads
+``~/.claude/sessions/<pid>.json`` for live presence.
+
+Responsibilities:
+
+* Walk every workspace project, enumerate its Claude jsonls, tail
+  each via :mod:`ingest.jsonl_tail` (offsets persisted across
+  restarts).
+* Normalise lines through :mod:`ingest.pii_filter` and yield
+  sink-consumable events.
+* **Pair** ``TaskCreateObserved`` events with their matching
+  ``ToolResultObserved`` to recover the user-visible task id
+  (``"Task #N created successfully…"`` in the result text) and emit
+  a final :class:`events.TaskCreated`.
+* **Re-anchor** ``FileTouchPending`` events: turn the absolute
+  ``file_path`` from an Edit/Write/NotebookEdit tool_use into a
+  project-relative path, dropping events that escape the project.
+* Emit a single :class:`events.SessionFirstSeen` per session id.
+* Poll ``~/.claude/sessions/<pid>.json`` files for the live presence
+  snapshot (used by the activity sink).
+
+Internal carriers (``TaskCreateObserved``, ``ToolResultObserved``,
+``FileTouchPending``) never leave the source — they are converted
+into final events here, or dropped. Sinks only see clean events.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Iterator, Optional
+
+from services.cowork_agent.visualizer.ingest import jsonl_tail, pii_filter
+from services.cowork_agent.visualizer.ingest.events import (
+    Event,
+    FileTouched,
+    SessionFirstSeen,
+    TaskCreated,
+    TaskCreateObserved,
+    ToolResultObserved,
+)
+from services.cowork_agent.visualizer.project_index import (
+    encoded_cwd_for_project,
+    project_id_for_cwd,
+)
+from services.cowork_agent.visualizer.workspace_index import list_project_ids
+from services.cowork_agent.project_layout import xo_dir, xo_projects_root
+
+logger = logging.getLogger(__name__)
+
+
+_CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+_CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+
+_TASK_RESULT_RE = re.compile(r"Task #(\d+) created", re.IGNORECASE)
+
+
+class ClaudeCodeSource:
+    """Concrete :class:`Source` implementation for Claude Code."""
+
+    name = "claude_code"
+
+    def __init__(self, offsets: Optional[jsonl_tail.OffsetStore] = None) -> None:
+        self.offsets = offsets or jsonl_tail.OffsetStore()
+        # Native session id → True. Seeded lazily; used to emit
+        # exactly one SessionFirstSeen per session.
+        self._sessions_seen: set[str] = set()
+        # (native_session_id, tool_use_id) → pending TaskCreate.
+        self._pending_creates: dict[tuple[str, str], TaskCreateObserved] = {}
+        # Claude Code's jsonl emits MULTIPLE records per actual assistant
+        # turn (streaming chunks + final), each carrying the same
+        # ``message.id`` (the Anthropic ``msg_*`` id) and the same
+        # ``usage`` block. Summing across these duplicates over-counts
+        # tokens by 3-7×. We dedupe by ``(native_session_id, message.id)``
+        # at line-read time so every downstream Event (MessageObserved,
+        # UsageObserved, ToolUseObserved, TaskCreateObserved) is emitted
+        # exactly once per real turn.
+        self._seen_anthropic_message_ids: set[tuple[str, str]] = set()
+
+    # ── Public protocol ─────────────────────────────────────────────────
+
+    def poll_events(self) -> Iterator[Event]:
+        """One tick. Yields normalised events from every workspace
+        project's Claude jsonls. Flushes the offset store at the
+        end (atomic; survives crashes mid-tick).
+        """
+        for project_id, jsonl_path in self._discover_jsonls():
+            yield from self._tail_one(project_id, jsonl_path)
+
+        # Persist offsets so restarts don't double-count.
+        try:
+            self.offsets.flush()
+        except Exception as exc:
+            logger.warning("Claude source: offset flush failed: %s", exc)
+
+    def poll_presence(self) -> list[dict]:
+        """Snapshot of every live Claude process matching a workspace
+        project. Each row is the shape the activity sink expects.
+
+        ``<pid>.json`` looks like::
+
+            {"pid": 2578, "sessionId": "ac4029fc-…", "cwd": "/home/coder/xo-projects/blackhole",
+             "startedAt": 1778591539234, "status": "busy", "updatedAt": 1778593116251,
+             "version": "2.1.138", "entrypoint": "cli", "kind": "interactive"}
+
+        We translate ``cwd`` to ``project_id`` (drop rows outside the
+        workspace) and pass the rest through with a stable key
+        layout.
+        """
+        rows: list[dict] = []
+        if not _CLAUDE_SESSIONS_DIR.is_dir():
+            return rows
+        for f in _CLAUDE_SESSIONS_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            cwd = data.get("cwd") or ""
+            project_id = project_id_for_cwd(cwd) if isinstance(cwd, str) else None
+            if not project_id:
+                continue
+            pid_int = data.get("pid")
+            if isinstance(pid_int, int) and not _pid_alive(pid_int):
+                # Stale — the process exited but the file lingered.
+                continue
+            rows.append({
+                "session_id":  str(data.get("sessionId", "")),
+                "runtime":     "claude_code",
+                "project_id":  project_id,
+                "started_at_ms": int(data.get("startedAt", 0) or 0),
+                "updated_at_ms": int(data.get("updatedAt", 0) or 0),
+                "status":      str(data.get("status", "")),
+                "entrypoint":  str(data.get("entrypoint", "")),
+                "version":     str(data.get("version", "")),
+            })
+        return rows
+
+    # ── Discovery ───────────────────────────────────────────────────────
+
+    def _discover_jsonls(self) -> Iterator[tuple[str, Path]]:
+        """Yield ``(project_id, jsonl_path)`` for every Claude jsonl
+        the runtime adapters have recorded in any project's
+        ``sessionslist.json``.
+
+        We iterate the adapter rows (not the encoded-cwd directories)
+        because the session's actual ``cwd`` doesn't always match the
+        project id — e.g. the cowork-api ``default`` project routes
+        chats at ``/home/coder/xo-projects/`` (the workspace root)
+        rather than ``/home/coder/xo-projects/default/``. The encoded
+        directory ``-home-coder-xo-projects`` belongs to ``default``
+        in this case, and a project-id-driven glob would miss it.
+
+        Sessions that don't have an adapter row are intentionally
+        skipped (e.g. someone running ``claude`` directly in a project
+        folder outside the cowork-api chat flow). Watching them would
+        also pollute usage totals with sessions the rest of the
+        system doesn't know about.
+        """
+        if not _CLAUDE_PROJECTS_DIR.is_dir():
+            return
+        for project_id in list_project_ids():
+            sl_path = xo_dir(project_id) / "sessions" / "sessionslist.json"
+            if not sl_path.is_file():
+                continue
+            try:
+                sl = json.loads(sl_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(sl, dict):
+                continue
+            for row in sl.values():
+                if not isinstance(row, dict):
+                    continue
+                if row.get("backend") != "claude_code":
+                    continue
+                native = row.get("nativeSessionId")
+                directory = row.get("directory")
+                if not isinstance(native, str) or not native:
+                    continue
+                if not isinstance(directory, str) or not directory:
+                    continue
+                # Claude's encoding: '/foo/bar' → '-foo-bar' (lossless forward).
+                encoded = directory.replace("/", "-")
+                jsonl = _CLAUDE_PROJECTS_DIR / encoded / f"{native}.jsonl"
+                if jsonl.is_file():
+                    yield project_id, jsonl
+
+    # ── Per-jsonl pipeline ──────────────────────────────────────────────
+
+    def _tail_one(self, project_id: str, jsonl_path: Path) -> Iterator[Event]:
+        for line in jsonl_tail.read_new_lines(jsonl_path, self.offsets):
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Claude source: dropped malformed line in %s", jsonl_path)
+                continue
+            if not isinstance(raw, dict):
+                continue
+
+            # Dedup duplicate assistant streaming records by the Anthropic
+            # message id. Without this, summed token counts in stats.json
+            # over-count by the number of streaming chunks per turn (3-7×
+            # in practice). See sources/claude_code.py __init__ comment.
+            if raw.get("type") == "assistant":
+                msg = raw.get("message") if isinstance(raw.get("message"), dict) else None
+                anth_mid = msg.get("id") if msg else None
+                if isinstance(anth_mid, str) and anth_mid:
+                    sid = raw.get("sessionId")
+                    if isinstance(sid, str) and sid:
+                        key = (sid, anth_mid)
+                        if key in self._seen_anthropic_message_ids:
+                            continue  # duplicate streaming chunk — skip whole line
+                        self._seen_anthropic_message_ids.add(key)
+
+            cwd = raw.get("cwd") if isinstance(raw, dict) else None
+            for ev in pii_filter.normalize_event(raw, runtime=self.name):
+                # Back-fill project_id on every event (the filter is
+                # stateless; the source is the only place that knows).
+                ev = dataclasses.replace(ev, project_id=project_id)
+                yield from self._post_process(ev, cwd=cwd, fallback_project_id=project_id)
+
+    def _post_process(
+        self,
+        ev: Event,
+        *,
+        cwd: Optional[str],
+        fallback_project_id: str,
+    ) -> Iterator[Event]:
+        # 1) Emit SessionFirstSeen once per session, before anything else.
+        nsid = ev.native_session_id
+        if nsid and nsid not in self._sessions_seen:
+            self._sessions_seen.add(nsid)
+            yield SessionFirstSeen(
+                ts=ev.ts,
+                native_session_id=nsid,
+                runtime=self.name,
+                project_id=ev.project_id or fallback_project_id,
+                cwd=cwd or "",
+            )
+
+        # 2) Task pairing — buffer creates, emit finals on results.
+        if isinstance(ev, TaskCreateObserved):
+            key = (nsid, ev.tool_use_id)
+            self._pending_creates[key] = ev
+            return  # don't yield to sinks yet
+
+        if isinstance(ev, ToolResultObserved):
+            yield from self._pair_task_result(ev)
+            return  # ToolResultObserved is internal-only
+
+        # 3) File-touch re-anchoring.
+        if isinstance(ev, pii_filter.FileTouchPending):
+            yield from self._reanchor_path(ev, cwd=cwd)
+            return  # FileTouchPending is internal-only
+
+        # 4) Everything else passes straight to the sinks.
+        yield ev
+
+    def _pair_task_result(self, ev: ToolResultObserved) -> Iterator[TaskCreated]:
+        key = (ev.native_session_id, ev.tool_use_id)
+        pending = self._pending_creates.pop(key, None)
+        if pending is None:
+            # Result for a non-Task tool — drop entirely. The result
+            # text may contain PII (Bash output, file contents) so we
+            # must NOT leak it onward.
+            return
+        m = _TASK_RESULT_RE.match(ev.content_text or "")
+        if not m:
+            # Couldn't recover the task id — drop. The TaskUpdate
+            # events still reference the id directly, so the todos
+            # sink can fall back to those if it tracks creations by
+            # subject text. For v1 we accept the loss; rare in
+            # practice (Claude's result text is stable).
+            logger.warning(
+                "Claude source: TaskCreate result missing 'Task #N' prefix; "
+                "tool_use_id=%s", ev.tool_use_id,
+            )
+            return
+        task_id = m.group(1)
+        yield TaskCreated(
+            ts=pending.ts,
+            native_session_id=pending.native_session_id,
+            runtime=pending.runtime,
+            project_id=pending.project_id,
+            task_id=task_id,
+            content=pending.content,
+            description=pending.description,
+            active_form=pending.active_form,
+        )
+
+    def _reanchor_path(
+        self, ev: "pii_filter.FileTouchPending", *, cwd: Optional[str]
+    ) -> Iterator[FileTouched]:
+        """Convert an absolute ``file_path`` into a project-relative
+        path. Drops the event if the path escapes the project root.
+        """
+        # Resolve project from the event's authoritative ``cwd`` — falls
+        # back to the encoded-dir discovery if cwd is missing.
+        project_id = project_id_for_cwd(cwd) if cwd else None
+        if project_id is None:
+            return
+        project_root = (xo_projects_root() / project_id).resolve()
+        try:
+            abs_target = Path(ev.abs_file_path).resolve()
+            rel = abs_target.relative_to(project_root)
+        except (ValueError, OSError):
+            return  # outside project root — drop
+        yield FileTouched(
+            ts=ev.ts,
+            native_session_id=ev.native_session_id,
+            runtime=ev.runtime,
+            project_id=project_id,
+            relative_path=str(rel).replace("\\", "/"),
+            created=(ev.tool == "Write"),
+        )
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _pid_alive(pid: int) -> bool:
+    """Cheap process-alive probe; same UID-only check the design's
+    activity sink would use anyway. POSIX-only.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we lack permission to signal — count as alive.
+        return True
+    except OSError:
+        return False
+    return True
