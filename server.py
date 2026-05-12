@@ -398,6 +398,23 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ rclone startup skipped (non-fatal): {exc}")
 
+    # Check gnupg availability (required by xo-projects-sync; non-fatal — does NOT install).
+    # Mirrors the rclone pattern: surface missing system deps at boot so they don't
+    # only appear as confused 500s on the first /setup attempt.
+    try:
+        from services.cowork_agent.xo_projects_sync.crypto import check_gpg_available
+        check_gpg_available()
+        print("   gnupg: available (xo-projects-sync ready)")
+    except Exception as exc:
+        print(f"⚠️ gnupg not available — xo-projects-sync /setup will return 500 until installed: {exc}")
+
+    # Install bundled skills into Claude Code and OpenClaw skill dirs (non-fatal)
+    try:
+        from services.cowork_agent.skill_installer import install_xo_projects_skill
+        install_xo_projects_skill()
+    except Exception as exc:
+        print(f"⚠️ Skill install failed (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
