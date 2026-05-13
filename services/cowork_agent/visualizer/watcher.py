@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import Optional
 
 from services.cowork_agent.project_layout import xo_dir
+from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import UsageObserved
 from services.cowork_agent.visualizer.sinks import (
     activity,
@@ -29,6 +30,7 @@ from services.cowork_agent.visualizer.sinks import (
     todos,
 )
 from services.cowork_agent.visualizer.sources.claude_code import ClaudeCodeSource
+from services.cowork_agent.visualizer.sources.openclaw import OpenClawSource
 from services.cowork_agent.visualizer.workspace import (
     activity as ws_activity,
 )
@@ -68,14 +70,25 @@ class Watcher:
     """
 
     def __init__(self) -> None:
-        self.source = ClaudeCodeSource()
+        # Share one OffsetStore across runtimes so both tails persist
+        # into the same ~/.xo-cowork/watcher/offsets.json file.
+        offsets = jsonl_tail.OffsetStore()
+        self.sources = [
+            ClaudeCodeSource(offsets=offsets),
+            OpenClawSource(offsets=offsets),
+        ]
         self.model_by_session: dict[str, str] = {}
 
     # ── One tick ────────────────────────────────────────────────────────
 
     def tick(self) -> None:
-        # 1. Drain the source.
-        events = list(self.source.poll_events())
+        # 1. Drain every source.
+        events: list = []
+        for src in self.sources:
+            try:
+                events.extend(src.poll_events())
+            except Exception:
+                logger.exception("source %s failed; continuing with others", src.name)
 
         # 2. Maintain the model cache from UsageObserved (model id is
         # attached there for assistant turns).
@@ -115,11 +128,12 @@ class Watcher:
         # 5. Activity sink — driven by presence snapshot, not events.
         # Runs for every project (even those with no events this tick)
         # so a session that exited gets evicted from activity.json.
-        try:
-            presence = self.source.poll_presence()
-        except Exception:
-            logger.exception("presence poll failed")
-            presence = []
+        presence: list[dict] = []
+        for src in self.sources:
+            try:
+                presence.extend(src.poll_presence())
+            except Exception:
+                logger.exception("presence poll failed for %s", src.name)
         presence_by_project: dict[str, list] = defaultdict(list)
         for row in presence:
             pid = row.get("project_id")
