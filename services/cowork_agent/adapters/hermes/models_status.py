@@ -1,14 +1,19 @@
 """
 Hermes models-status view.
 
-Returns the same openclaw-shaped envelope (`{default, models[id,status]}`)
-plus a hermes-specific `fallback_providers` field, derived from `hermes dump`.
+Returns the openclaw-shaped envelope `{default, models[id,status]}` — strict
+schema parity with the other agents. The fallback chain from
+`config_overrides.fallback_providers` is already expanded into the `models`
+list, so there is no redundant top-level extra.
 
 Status mapping:
 - Provider's api_key == "set" → "ok"
 - Anything else (or provider absent) → "error"
 
-Hermes exposes no expiry information, so "warn" never appears.
+Provider matching is *exact first*, then falls back to the segment before
+the first `-` to handle hermes' routing labels (e.g. provider `kimi-coding`
+maps to api_key `kimi`). Hermes exposes no expiry information, so "warn"
+never appears.
 """
 
 from __future__ import annotations
@@ -22,7 +27,18 @@ from services.cowork_agent.adapters.hermes.dump import (
 
 
 def _status_for_provider(provider: str, api_keys: dict[str, Any]) -> str:
-    raw = api_keys.get(provider) if isinstance(api_keys, dict) else None
+    """Resolve a hermes provider label to an api-key status.
+
+    Hermes uses routing labels in the model id (e.g. ``kimi-coding/kimi-k2.5``)
+    whose first segment doesn't always match the api_key name in the dump
+    (``kimi``). Try the exact label first, then fall back to the prefix
+    before the first ``-`` so common cases like kimi-coding resolve.
+    """
+    if not isinstance(api_keys, dict) or not provider:
+        return "error"
+    raw = api_keys.get(provider)
+    if raw is None and "-" in provider:
+        raw = api_keys.get(provider.split("-", 1)[0])
     return "ok" if isinstance(raw, str) and raw.strip().lower() == "set" else "error"
 
 
@@ -82,7 +98,6 @@ def build_status_view(dump: dict[str, Any]) -> dict[str, Any]:
     return {
         "default": default_id,
         "models": models,
-        "fallback_providers": fallback_providers,
     }
 
 
