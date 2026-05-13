@@ -23,11 +23,11 @@ from services.cowork_agent.settings import (
     OPENCLAW_API_URL,
     OPENCLAW_MODEL,
 )
-from services.cowork_agent.agent_registry import get_default_agent
+from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.chat_state import active_streams
 from services.cowork_agent.helpers import normalize_agent_id
 
-_AGENT = get_default_agent()
+_AGENT = get_active_agent()
 _SESSION_HEADER = _AGENT.session_header
 _MODEL_PREFIX = _AGENT.model_prefix.lower()
 
@@ -51,11 +51,22 @@ def find_session_id_by_key(session_key: str) -> str | None:
 
 
 def openclaw_agent_id_from_prompt_body(body: dict) -> str:
-    """Resolve agent id from `model` (e.g. `<prefix>/research`) for new sessions.
+    """Resolve openclaw agent id for new sessions.
 
-    The expected prefix comes from the active agent's manifest
-    (`model_prefix`), so swapping the default agent swaps the namespace.
+    Resolution order:
+      1. Explicit ``agent_id`` in the body — set when the user picks an
+         agent from the sidebar. Lets the frontend just send the agent
+         name instead of encoding it as ``openclaw/<name>`` in the model
+         string.
+      2. ``model`` field with the openclaw prefix (e.g.
+         ``openclaw/research``). The prefix comes from the active agent's
+         manifest (``model_prefix``).
+      3. Fallback: ``"main"``.
     """
+    explicit_id = body.get("agent_id")
+    if isinstance(explicit_id, str) and explicit_id.strip():
+        return normalize_agent_id(explicit_id)
+
     model = body.get("model")
     if isinstance(model, str):
         lowered = model.strip().lower()

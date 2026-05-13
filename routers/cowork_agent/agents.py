@@ -48,13 +48,13 @@ router = APIRouter()
 
 
 class CreateAgentBody(BaseModel):
-    """Payload for POST /api/agents — supports openclaw and claude_code backends."""
+    """Payload for POST /api/agents — supports openclaw, claude_code, and hermes backends."""
 
     name: str = Field(..., min_length=1, max_length=200)
     id: str | None = Field(None, max_length=80)
     description: str | None = Field(None, max_length=4000)
     workspace: str | None = Field(None, max_length=2048)
-    backend: Literal["openclaw", "claude_code"] = "openclaw"
+    backend: Literal["openclaw", "claude_code", "hermes"] = "openclaw"
 
 
 class UpdateAgentBody(BaseModel):
@@ -66,6 +66,9 @@ class UpdateAgentBody(BaseModel):
     model: str | None = Field(None, max_length=400)
     identity_name: str | None = Field(None, max_length=200)
     identity_emoji: str | None = Field(None, max_length=32)
+    # Hermes-only today: writes to ``<profile>/SOUL.md``. OpenClaw uses
+    # ``identity_*`` for the same role; claude_code doesn't take it.
+    system_prompt: str | None = Field(None, max_length=64_000)
 
 
 # ── Claude Code agent helpers ────────────────────────────────────────────────
@@ -151,10 +154,166 @@ def _agent_info_for_id(cfg: dict, agent_id: str, display_name: str | None, descr
     }
 
 
+def _agent_info_hermes(profile_name: str) -> dict:
+    """xo-cowork AgentInfo shape for a hermes profile.
+
+    Hermes profiles are independent state DBs under
+    ``~/.hermes/profiles/<name>/state.db`` — *not* workspace directories.
+    They don't map to a single project folder, so ``workspace`` stays empty.
+    Frontend routing should read ``metadata.backend`` directly when this
+    agent is selected (don't derive backend from workspaceDirectory for
+    hermes — multiple profiles would collide on the same path).
+    """
+    return {
+        "name": profile_name,
+        "description": profile_name,
+        "mode": "primary",
+        "tools": [],
+        "permissions": {"rules": []},
+        "system_prompt": None,
+        "temperature": None,
+        "metadata": {
+            "backend": "hermes",
+            "hermes_profile": profile_name,
+            "display_name": profile_name,
+            "workspace": "",
+        },
+    }
+
+
+def _agent_detail_hermes(profile_name: str) -> dict:
+    """Full agent snapshot for a hermes profile, parallel to the openclaw
+    branch below. Surfaces only what xo-cowork can read cheaply from disk:
+    the profile dir, SOUL.md preview, .env keys (no values), session count,
+    and gateway pool entry. The fine-grained per-profile edits live under
+    ``/api/agents/hermes/{profile}/...`` so the FE can fetch what it needs.
+    """
+    from services.cowork_agent.agent_registry import get_agent
+    from services.cowork_agent.adapters.hermes import gateway_pool
+    from services.cowork_agent.settings import HERMES_DIR
+
+    hermes_manifest = get_agent("hermes")
+    # ``default`` profile lives at HERMES_DIR (~/.hermes/) itself, not under
+    # the profiles subdir — match the layout hermes uses on disk.
+    profile_dir = HERMES_DIR if profile_name == "default" else hermes_manifest.agents_dir / profile_name
+
+    description_sidecar = profile_dir / ".xo_description"
+    description = ""
+    if description_sidecar.is_file():
+        try:
+            description = description_sidecar.read_text(errors="replace").strip()
+        except OSError:
+            description = ""
+
+    display_sidecar = profile_dir / ".xo_display_name"
+    display_name = profile_name
+    if display_sidecar.is_file():
+        try:
+            candidate = display_sidecar.read_text(errors="replace").strip()
+            if candidate:
+                display_name = candidate
+        except OSError:
+            pass
+
+    soul_path = profile_dir / "SOUL.md"
+    soul_preview: str | None = None
+    if soul_path.is_file():
+        try:
+            soul_preview = soul_path.read_text(errors="replace")[:800]
+        except OSError:
+            soul_preview = None
+
+    # Session count — read from this profile's state.db only (don't walk
+    # every profile; the global hermes_state_db helpers are aggregate).
+    session_count = 0
+    state_db = profile_dir / "state.db"
+    if state_db.is_file():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+                session_count = int(row[0]) if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            session_count = 0
+
+    # .env keys — no values, mirrors /api/secrets/env/keys' shape.
+    env_path = profile_dir / ".env"
+    env_keys: list[str] = []
+    if env_path.is_file():
+        try:
+            for line in env_path.read_text(errors="replace").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key = stripped.split("=", 1)[0].strip()
+                if key:
+                    env_keys.append(key)
+        except OSError:
+            pass
+
+    # Gateway pool entry — lazy, only includes status for non-default
+    # profiles (default lives outside the pool, managed by hermes.sh).
+    gateway: dict = {"managed_by": "hermes.sh"} if profile_name == "default" else {}
+    if profile_name != "default":
+        for entry in gateway_pool.list_pool():
+            if entry.get("profile") == profile_name:
+                gateway = {
+                    "managed_by": "pool",
+                    "port": entry.get("port"),
+                    "pid": entry.get("pid"),
+                    "alive": entry.get("alive"),
+                    "listening": entry.get("listening"),
+                    "started_at": entry.get("started_at"),
+                }
+                break
+        else:
+            gateway = {"managed_by": "pool", "running": False}
+
+    return {
+        "id": profile_name,
+        "display_name": display_name,
+        "description": description,
+        "workspace": str(profile_dir),
+        "model": None,
+        "model_raw": None,
+        "identity": {"name": display_name, "emoji": None, "bio": description or None},
+        "config_entry": {},
+        "agents_defaults": {},
+        "workspace_files": {},
+        "on_disk": {
+            "agent_dir": str(profile_dir),
+            "config_yaml": str(profile_dir / "config.yaml"),
+            "env_file": str(env_path),
+            "soul_md": str(soul_path) if soul_path.is_file() else None,
+            "state_db": str(state_db) if state_db.is_file() else None,
+            "env_keys": env_keys,
+        },
+        "soul_preview": soul_preview,
+        "gateway": gateway,
+        "sessions": {
+            "index_path": str(profile_dir / "sessions"),
+            "count": session_count,
+            "session_ids": [],
+        },
+        "openclaw_global_auth": {},
+        "backend": "hermes",
+        "hermes_profile": profile_name,
+    }
+
+
 def get_agent_detail(agent_id: str) -> dict | None:
     """
     Full agent snapshot for the UI: OpenClaw config, workspace docs, on-disk models,
     redacted auth, sessions index, and global auth summary.
+
+    Dispatch by backend (in order):
+    - Claude Code: matches when ``.xo/agent.json`` exists for ``agent_id``.
+    - Hermes: matches when ``agent_id`` is a profile under ``~/.hermes/profiles/``.
+    - OpenClaw: fallback when the openclaw agents dir contains ``agent_id``.
+    Returns ``None`` if no backend recognizes the id.
     """
     aid = normalize_agent_id(agent_id)
 
@@ -187,6 +346,14 @@ def get_agent_detail(agent_id: str) -> dict | None:
             "openclaw_global_auth": {},
             "backend": "claude_code",
         }
+
+    # Check hermes backend next. Profile name == agent_id (1:1 by design).
+    # We look this up via the state-db helper because it's the same code
+    # path that powers /api/agents listing — staying consistent prevents
+    # GET /api/agents returning a profile that GET /api/agents/{id} 404s on.
+    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    if aid in list_all_profile_names():
+        return _agent_detail_hermes(aid)
 
     agent_root = AGENTS_DIR / aid
     if not agent_root.is_dir():
@@ -342,12 +509,19 @@ def patch_agent_into_config(cfg: dict, agent_id: str, body: UpdateAgentBody) -> 
 
 @router.get("/api/agents")
 def list_agents():
+    """Return the sidebar agents for the active backend (``AGENT_NAME`` env).
+
+    With ``AGENT_NAME=hermes`` we surface only hermes profiles; openclaw and
+    claude_code stay invisible. This matches the user's mental model: if
+    they've switched to hermes, openclaw isn't supposed to be touched at
+    all — showing openclaw agents leads to chats accidentally routing
+    through the wrong backend.
+    """
     import os
     active_backend = os.getenv("AGENT_NAME", "openclaw")
     agents: list[dict] = []
 
     if active_backend == "claude_code":
-        # Claude Code: one agent per xo-project that has a .xo/agent.json record.
         projects_root = xo_projects_root()
         if projects_root.exists():
             for d in sorted(projects_root.iterdir()):
@@ -361,8 +535,11 @@ def list_agents():
                 except Exception:
                     meta = {}
                 agents.append(_agent_info_claude(d.name, meta))
+    elif active_backend == "hermes":
+        from services.cowork_agent.hermes_state_db import list_all_profile_names
+        for profile_name in list_all_profile_names():
+            agents.append(_agent_info_hermes(profile_name))
     else:
-        # OpenClaw: agents registered in openclaw.json + their ~/.openclaw/agents/<id>/ dirs.
         cfg = load_openclaw_config()
         entries = {normalize_agent_id(str(e.get("id", ""))): e for e in list_agent_entries(cfg)}
         if AGENTS_DIR.exists():
@@ -416,6 +593,62 @@ def create_agent(body: CreateAgentBody):
 
         return _agent_info_claude(agent_id, meta)
 
+    if body.backend == "hermes":
+        # Hermes profiles are managed by the hermes CLI (`hermes profile create`).
+        # Profile id == sidebar bucket name; the on-disk layout is
+        # ``~/.hermes/profiles/<id>/`` with its own state.db once the first
+        # chat happens. We delegate creation to the CLI so future hermes
+        # changes (extra directories, schema bumps) don't drift here.
+        import subprocess
+        from services.cowork_agent.agent_registry import get_agent
+
+        hermes_manifest = get_agent("hermes")
+        hermes_home = hermes_manifest.home_dir
+        profiles_dir = hermes_manifest.agents_dir  # ~/.hermes/profiles
+
+        # Reject collisions with the default profile or an existing on-disk dir.
+        if agent_id == "default":
+            return JSONResponse(status_code=400, content={"detail": 'Profile id "default" is reserved.'})
+        if profiles_dir.exists() and (profiles_dir / agent_id).is_dir():
+            return JSONResponse(status_code=409, content={"detail": f'Hermes profile "{agent_id}" already exists.'})
+
+        argv = [hermes_manifest.binary, "profile", "create", agent_id]
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(hermes_manifest.cwd),
+                capture_output=True,
+                text=True,
+                timeout=hermes_manifest.cli_timeout_seconds,
+            )
+        except FileNotFoundError:
+            return JSONResponse(status_code=500, content={"detail": "hermes CLI not found on PATH"})
+        except subprocess.TimeoutExpired:
+            return JSONResponse(status_code=504, content={"detail": "hermes profile create timed out"})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=500, content={"detail": f"hermes profile create failed: {e}"})
+
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()[:500]
+            return JSONResponse(
+                status_code=500,
+                content={"detail": f"hermes profile create exited {result.returncode}: {stderr}"},
+            )
+
+        # Best-effort: stamp the display name into the profile dir as a
+        # ``.xo_display_name`` sidecar so future frontend renames have a
+        # place to read from. The profile dir is created by the CLI above;
+        # if anything in that chain went sideways, we still surface the
+        # AgentInfo so the user sees the bucket in the sidebar.
+        try:
+            profile_dir = profiles_dir / agent_id
+            if profile_dir.is_dir() and display_name and display_name != agent_id:
+                (profile_dir / ".xo_display_name").write_text(display_name + "\n")
+        except Exception:
+            pass
+
+        return _agent_info_hermes(agent_id)
+
     # OpenClaw agent (default)
     cfg = load_openclaw_config()
     existing_entries = list_agent_entries(cfg)
@@ -462,9 +695,137 @@ def get_agent(agent_id: str):
     return detail
 
 
+def _run_hermes_profile_cli(argv: list[str]) -> tuple[int, str]:
+    """Run a hermes CLI command synchronously, return ``(returncode, output)``.
+
+    Used by profile create / delete / rename. argv is built from trusted
+    pieces (manifest binary + normalized id), so no shell interpolation.
+    """
+    import subprocess
+    from services.cowork_agent.agent_registry import get_agent
+
+    manifest = get_agent("hermes")
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=str(manifest.cwd),
+            capture_output=True,
+            text=True,
+            timeout=manifest.cli_timeout_seconds,
+        )
+    except FileNotFoundError:
+        return -1, "hermes CLI not found on PATH"
+    except subprocess.TimeoutExpired:
+        return -1, "hermes CLI timed out"
+    except Exception as e:  # noqa: BLE001
+        return -1, f"hermes CLI failed: {e}"
+    output = (result.stderr or result.stdout or "").strip()[:500]
+    return result.returncode, output
+
+
+def _hermes_profile_dir(profile_id: str) -> Path:
+    """Return the on-disk path for a hermes profile (used for collision checks)."""
+    from services.cowork_agent.agent_registry import get_agent
+    return get_agent("hermes").agents_dir / profile_id
+
+
+@router.delete("/api/agents/{agent_id}")
+def delete_agent(agent_id: str):
+    """Delete an agent. Currently only supports hermes profiles —
+    openclaw / claude_code don't have a delete contract today and we
+    don't want to invent one silently. Hermes profile deletion shells
+    out to ``hermes profile delete -y <id>``, which removes the entire
+    profile directory (state.db, skills, sessions). The ``default``
+    profile is rejected — that's hermes's root.
+    """
+    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    # Local import: the module-level ``get_agent`` is shadowed by the
+    # ``GET /api/agents/{agent_id}`` route handler at line ~691, so calling
+    # bare ``get_agent("hermes")`` here would invoke the route handler and
+    # blow up with ``'JSONResponse' object has no attribute 'binary'``.
+    from services.cowork_agent.agent_registry import get_agent as registry_get_agent
+
+    aid = normalize_agent_id(agent_id)
+
+    if aid == "default":
+        return JSONResponse(status_code=400, content={"detail": '"default" profile cannot be deleted.'})
+
+    if aid not in list_all_profile_names():
+        # Not a known hermes profile — fall through with a clear message
+        # so the user knows we currently only delete hermes profiles.
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f'No hermes profile named "{aid}". Delete is currently only supported for hermes profiles.'},
+        )
+
+    rc, output = _run_hermes_profile_cli(
+        [registry_get_agent("hermes").binary, "profile", "delete", "-y", aid]
+    )
+    if rc != 0:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"hermes profile delete exited {rc}: {output}"},
+        )
+    return {"ok": True, "id": aid}
+
+
 @router.patch("/api/agents/{agent_id}")
 def patch_agent(agent_id: str, body: UpdateAgentBody):
     aid = normalize_agent_id(agent_id)
+
+    # Hermes profiles: only ``name`` is meaningful — it's the rename target.
+    # workspace / model / identity_* don't apply to hermes profiles (they
+    # don't carry per-profile workspaces or identity files the way openclaw
+    # agents do). Other fields are silently ignored to keep the PATCH
+    # contract permissive.
+    from services.cowork_agent.hermes_state_db import list_all_profile_names
+
+    if aid in list_all_profile_names() and aid != "default":
+        if not body.model_fields_set:
+            return _agent_info_hermes(aid)
+
+        new_name = (body.name or "").strip() if body.name is not None else ""
+        if new_name and new_name != aid:
+            new_id = normalize_agent_id(new_name)
+            if new_id == "default":
+                return JSONResponse(status_code=400, content={"detail": '"default" is reserved.'})
+            if _hermes_profile_dir(new_id).is_dir():
+                return JSONResponse(status_code=409, content={"detail": f'Hermes profile "{new_id}" already exists.'})
+
+            from services.cowork_agent.agent_registry import get_agent
+            rc, output = _run_hermes_profile_cli(
+                [get_agent("hermes").binary, "profile", "rename", aid, new_id]
+            )
+            if rc != 0:
+                return JSONResponse(
+                    status_code=500,
+                    content={"detail": f"hermes profile rename exited {rc}: {output}"},
+                )
+            return _agent_info_hermes(new_id)
+
+        # description-only update → stamp the sidecar; no CLI call needed.
+        if body.description is not None:
+            try:
+                _hermes_profile_dir(aid).mkdir(parents=True, exist_ok=True)
+                (_hermes_profile_dir(aid) / ".xo_description").write_text((body.description or "").strip() + "\n")
+            except Exception:
+                pass
+
+        # system_prompt → writes the profile's SOUL.md. Hermes reads this on
+        # gateway startup, so the FE should prompt for a gateway restart
+        # after a successful write (same pattern as channel/provider edits).
+        if body.system_prompt is not None:
+            try:
+                profile_dir = _hermes_profile_dir(aid)
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                (profile_dir / "SOUL.md").write_text(body.system_prompt)
+            except Exception as e:  # noqa: BLE001
+                return JSONResponse(
+                    status_code=500,
+                    content={"detail": f"failed to write SOUL.md: {e}"},
+                )
+
+        return _agent_info_hermes(aid)
 
     # Claude Code agents don't support patch via OpenClaw mechanisms
     if _load_claude_agent(aid) is not None:

@@ -37,12 +37,12 @@ class OpenclawAdapter(BaseAgentAdapter):
             OPENCLAW_GATEWAY_TOKEN,
             OPENCLAW_MODEL,
         )
-        from services.cowork_agent.agent_registry import get_default_agent
+        from services.cowork_agent.agent_registry import get_active_agent
         from services.cowork_agent.sessions_io import find_session_key
 
         if not session_id:
             from services.cowork_agent.streaming import create_new_session
-            agent = get_default_agent()
+            agent = get_active_agent()
             oc_agent = "main"
             session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
             _key, native_id, response_text = await create_new_session(question, session_key=session_key)
@@ -54,7 +54,7 @@ class OpenclawAdapter(BaseAgentAdapter):
 
         import json
         import httpx
-        agent = get_default_agent()
+        agent = get_active_agent()
         header = agent.session_header
         response_text = ""
 

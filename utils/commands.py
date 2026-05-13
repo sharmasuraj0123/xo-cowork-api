@@ -18,9 +18,9 @@ Examples
 --------
     # Async (inside a route handler or background task):
     from utils.commands import run
-    from services.cowork_agent.agent_registry import get_default_agent
+    from services.cowork_agent.agent_registry import get_active_agent
 
-    agent = get_default_agent()
+    agent = get_active_agent()
     argv = agent.command("models_set", model="anthropic/claude-opus-4.6")
     result = await run(argv, cwd=agent.cwd, timeout=agent.cli_timeout_seconds)
     if not result.ok:

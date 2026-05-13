@@ -4,10 +4,12 @@ from typing import TYPE_CHECKING
 from services.cowork_agent.adapters.base import BaseAgentAdapter
 from services.cowork_agent.adapters.openclaw.adapter import OpenclawAdapter
 from services.cowork_agent.adapters.claude_code.adapter import ClaudeCodeAdapter
+from services.cowork_agent.adapters.hermes.adapter import HermesAdapter
 
 _REGISTRY: dict[str, type[BaseAgentAdapter]] = {
     "openclaw":    OpenclawAdapter,
     "claude_code": ClaudeCodeAdapter,
+    "hermes":      HermesAdapter,
 }
 
 

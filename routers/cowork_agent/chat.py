@@ -124,6 +124,14 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
             elif event.get("type") == "token":
                 yield f"id: {event_id}\nevent: text-delta\ndata: {json.dumps({'text': event.get('token', '')})}\n\n"
                 event_id += 1
+            elif event.get("type") == "model-loading":
+                # Hermes runs tool calls (RAG recall, web search, etc.) before
+                # streaming text — emits ``hermes.tool.progress`` events with a
+                # human-readable label. Forward them as model-loading so the UI
+                # shows live activity during the 10-30 s tool-call phase
+                # instead of looking frozen.
+                yield f"id: {event_id}\nevent: model-loading\ndata: {json.dumps({'label': event.get('label', '')})}\n\n"
+                event_id += 1
             elif event.get("type") == "error":
                 yield f"id: {event_id}\nevent: agent-error\ndata: {json.dumps({'error_message': event.get('error', 'Stream error')})}\n\n"
                 event_id += 1
@@ -152,10 +160,37 @@ async def chat_prompt(request: Request):
         if detected:
             agent_name = detected
 
+    # The frontend may send the sidebar agent's name (e.g. a hermes profile
+    # name like "default") in agent_name instead of the backend name. If
+    # agent_name isn't a registered adapter but matches a hermes profile,
+    # rewrite to ``agent_name="hermes"`` and carry the profile in agent_id.
+    # Without this, the dispatcher gets an unknown adapter and the chat
+    # silently drops.
+    if agent_name:
+        from services.cowork_agent.adapter_registry import list_adapters
+        if agent_name not in list_adapters():
+            from services.cowork_agent.hermes_state_db import _profile_state_dbs
+            hermes_profiles = {p for p, _ in _profile_state_dbs()}
+            if agent_name in hermes_profiles:
+                resolved_id = body.get("agent_id") or agent_name
+                print(f"[chat] resolved hermes profile {agent_name!r} → agent_name='hermes' agent_id={resolved_id!r}")
+                body["agent_id"] = resolved_id
+                agent_name = "hermes"
+
+    # Agent switched mid-session (e.g., user picked a different agent from the
+    # sidebar dropdown while a chat was open): the incoming session_id belongs
+    # to a different backend than the one the user just selected. Treat as a
+    # fresh session under the new agent.
+    if session_id and agent_name:
+        detected = _resolve_backend_for_session(session_id)
+        if detected and detected != agent_name:
+            print(f"[chat] agent switch detected (session backend={detected!r} new agent={agent_name!r}); starting fresh session")
+            session_id = None
+
     if not agent_name:
         agent_name = _AGENT_NAME
 
-    print(f"[chat] routing → agent_name={agent_name!r} session_id={session_id!r} workspace={body.get('workspace')!r}")
+    print(f"[chat] routing → agent_name={agent_name!r} agent_id={body.get('agent_id')!r} session_id={session_id!r} workspace={body.get('workspace')!r}")
 
     is_new_session = not bool(session_id)
 

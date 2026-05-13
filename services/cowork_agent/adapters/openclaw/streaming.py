@@ -18,11 +18,11 @@ from services.cowork_agent.settings import (
     OPENCLAW_GATEWAY_TOKEN,
     OPENCLAW_MODEL,
 )
-from services.cowork_agent.agent_registry import get_default_agent
+from services.cowork_agent.agent_registry import get_active_agent
 
 
 def _session_header() -> str:
-    return get_default_agent().session_header
+    return get_active_agent().session_header
 
 
 async def stream_to_normalized(
@@ -104,7 +104,7 @@ async def create_session(question: str) -> tuple[str, str, str]:
     """
     from services.cowork_agent.streaming import create_new_session
 
-    agent = get_default_agent()
+    agent = get_active_agent()
     oc_agent = "main"
     session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
     return await create_new_session(question, session_key=session_key)

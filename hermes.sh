@@ -169,6 +169,44 @@ kill_orphan_gateways() {
     return 0
 }
 
+# Find hermes dashboard processes not pointed at by $DASH_PID_FILE.
+# We adopt these instead of fighting them: when the FE asks for a
+# restart and the PID file went stale, the running dashboard is the
+# real one and we just need to take ownership of it before stop/start.
+find_orphan_dashboards() {
+    local managed_pid=""
+    if [ -f "$DASH_PID_FILE" ]; then
+        managed_pid=$(cat "$DASH_PID_FILE" 2>/dev/null || true)
+    fi
+
+    local dash_pids
+    dash_pids=$(pgrep -f "hermes dashboard" 2>/dev/null || true)
+    [ -z "$dash_pids" ] && return
+
+    for pid in $dash_pids; do
+        [ "$pid" = "$managed_pid" ] && continue
+        echo "$pid"
+    done
+}
+
+kill_orphan_dashboards() {
+    local orphans
+    orphans=$(find_orphan_dashboards)
+    [ -z "$orphans" ] && return 0
+
+    for opid in $orphans; do
+        log_warn "Found orphan dashboard process (PID: $opid) — killing it"
+        kill "$opid" 2>/dev/null || true
+    done
+    sleep 1
+    for opid in $orphans; do
+        if kill -0 "$opid" 2>/dev/null; then
+            kill -9 "$opid" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
 # Wait for a port to be released
 wait_for_port_release() {
     local port="$1"
@@ -697,6 +735,7 @@ start_all() {
     if is_dashboard_running; then
         echo -e "${YELLOW}Dashboard is already running (PID: $(cat "$DASH_PID_FILE"))${NC}"
     else
+        kill_orphan_dashboards
         _launch_dashboard
     fi
 }
@@ -749,8 +788,13 @@ stop_all() {
     _stop_process "Hermes Gateway" "$GW_PID_FILE" "$HERMES_API_PORT"
     _stop_process "Hermes Dashboard" "$DASH_PID_FILE" "$HERMES_DASH_PORT"
 
-    # Kill any orphan gateway processes
+    # Catch processes whose PID files went stale (a previous status check
+    # may have removed the PID file even though the underlying process is
+    # still alive — without this, `restart` would leave a zombie holding
+    # $HERMES_DASH_PORT and the next `_launch_dashboard` would silently
+    # fail to bind.
     kill_orphan_gateways
+    kill_orphan_dashboards
 }
 
 # ==============================================================
