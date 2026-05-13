@@ -250,3 +250,74 @@ def _str_or_none(value: object) -> Optional[str]:
     if isinstance(value, str):
         return value if value else None
     return str(value)
+
+
+# ── OpenClaw normaliser ──────────────────────────────────────────────────────
+
+
+def normalize_event_openclaw(raw: dict, *, current_sid: str) -> Iterator[Event]:
+    """Yield zero or more normalised events from one raw OpenClaw
+    jsonl line.
+
+    Unlike Claude, OpenClaw doesn't repeat the session id on every
+    message — the caller (``sources.openclaw.OpenClawSource``) caches
+    it from the header row and passes it in via ``current_sid``.
+
+    Header rows (``type:"session"``) are handled in the source layer,
+    not here. This function is only called for message rows.
+    """
+    if not isinstance(raw, dict):
+        return
+    if raw.get("type") != "message":
+        return
+
+    ts = raw.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return
+    sid = current_sid
+    if not sid:
+        return
+
+    msg = raw.get("message")
+    if not isinstance(msg, dict):
+        return
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+        return
+
+    model: Optional[str] = None
+    if role == "assistant":
+        m = msg.get("model")
+        if isinstance(m, str) and m:
+            model = m
+
+    yield MessageObserved(
+        ts=ts, native_session_id=sid, runtime="openclaw",
+        role=role, model=model,
+    )
+
+    usage = msg.get("usage")
+    if isinstance(usage, dict):
+        # OpenClaw token field names → Claude-shaped fields.
+        yield UsageObserved(
+            ts=ts, native_session_id=sid, runtime="openclaw",
+            input_tokens=int(usage.get("input", 0) or 0),
+            output_tokens=int(usage.get("output", 0) or 0),
+            cache_read_input_tokens=int(usage.get("cacheRead", 0) or 0),
+            cache_creation_input_tokens=int(usage.get("cacheWrite", 0) or 0),
+            model=model,
+        )
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "toolCall":
+                continue
+            name = block.get("name")
+            if isinstance(name, str) and name:
+                yield ToolUseObserved(
+                    ts=ts, native_session_id=sid, runtime="openclaw",
+                    tool=name,
+                )
