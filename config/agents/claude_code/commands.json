@@ -1,9 +1,31 @@
 {
+  "name": "claude_code",
+  "binary": "claude",
+  "home_dir": "~/.claude",
+  "env_file": "~/.claude/.env",
+  "config_file": "~/.claude/settings.json",
+  "agents_dir": "~/.claude/projects",
+  "workspace_dir": "~/xo-projects",
+  "provisioning_log": "~/.claude/provisioning.log",
+  "cwd": "~",
+  "cli_timeout_seconds": 300,
+  "api": {
+    "session_header": ""
+  },
+  "model_prefix": "claude_code",
+  "model_capabilities": {
+    "function_calling": true,
+    "vision": true,
+    "reasoning": true,
+    "json_output": true,
+    "max_context": 200000,
+    "max_output": 16384
+  },
   "skills": {
-    "default":              null,
-    "code-writer":          "/code-writer",
-    "reviewer":             "/reviewer",
-    "debugger":             "/debugger",
+    "default": null,
+    "code-writer": "/code-writer",
+    "reviewer": "/reviewer",
+    "debugger": "/debugger",
     "agno-agentic-backend": "/agno-agentic-backend"
   },
   "flags": {
