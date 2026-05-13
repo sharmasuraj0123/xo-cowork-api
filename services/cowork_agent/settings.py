@@ -3,17 +3,17 @@ Environment, paths, and constants for the cowork_agent subsystem.
 
 The ``OPENCLAW_*`` module-level constants are anchored to the **openclaw
 manifest specifically** (``get_agent("openclaw")``), NOT to the active
-default agent. Every consumer of these constants is openclaw-specific
+agent. Every consumer of these constants is openclaw-specific
 (the openclaw adapter, openclaw_store, the ``/api/config/openclaw``
 endpoint, ...) and must always see openclaw paths regardless of
-``DEFAULT_AGENT``. Same for ``HERMES_*``.
+``AGENT_NAME`` / ``DEFAULT_AGENT``. Same for ``HERMES_*``.
 
 Code that needs the *active* agent's manifest must call
-``get_default_agent()`` explicitly. Code that targets a specific backend
+``get_active_agent()`` explicitly. Code that targets a specific backend
 must call ``get_agent("<name>")``.
 
 Background: previously these constants resolved against
-``get_default_agent()``. With ``DEFAULT_AGENT=hermes`` that made
+``get_active_agent()``. With ``AGENT_NAME=hermes`` that made
 ``OPENCLAW_JSON = ~/.hermes/config.yaml`` and ``AGENTS_DIR =
 ~/.hermes/profiles``, so an openclaw-shaped write (e.g.
 ``write_openclaw_config`` from the agent-create flow) silently

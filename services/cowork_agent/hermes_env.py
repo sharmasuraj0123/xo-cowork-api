@@ -3,11 +3,11 @@ Single-key upsert against ``~/.hermes/.env``.
 
 Mirrors the line-level edit logic of ``openclaw_env.upsert_env_entry`` but
 anchored explicitly to the **hermes** manifest (``get_agent("hermes")``),
-not the active default agent. This is deliberate: a route named
+not the active agent. This is deliberate: a route named
 ``/api/config/hermes/...`` must always target ``~/.hermes/.env`` regardless
 of which backend is currently active. Re-anchoring the env file by the
-active default would mean an openclaw-named route could overwrite hermes
-secrets when ``DEFAULT_AGENT=hermes`` (and vice versa) — the same foot-gun
+active agent would mean an openclaw-named route could overwrite hermes
+secrets when ``AGENT_NAME=hermes`` (and vice versa) — the same foot-gun
 the settings-module re-anchoring closed for the OPENCLAW_* constants.
 """
 from __future__ import annotations

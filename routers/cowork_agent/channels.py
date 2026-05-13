@@ -28,13 +28,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.agent_registry import get_agent, get_default_agent
+from services.cowork_agent.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.openclaw_env import upsert_env_entry
 from services.cowork_agent.hermes_env import upsert_hermes_env_entry
 
 router = APIRouter()
 
-_AGENT = get_default_agent()
+_AGENT = get_active_agent()
 _HERMES = get_agent("hermes")
 
 
@@ -267,7 +267,7 @@ async def add_hermes_channel(request: Request):
     every token lands in ``~/.hermes/.env`` (never ``~/.openclaw/.env``),
     and the CLI follow-up uses hermes's own ``cli_timeout_seconds`` and
     provisioning log. A hermes-named route must always target hermes
-    regardless of ``DEFAULT_AGENT``.
+    regardless of ``AGENT_NAME``.
 
     Body: ``{platform: "slack"|"telegram", <field>: <value>, ...}``.
     Field names per platform come from the manifest's
