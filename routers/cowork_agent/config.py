@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_MODEL_CAPABILITIES, load_agent_config
-from services.cowork_agent.agent_registry import get_agent, get_default_agent
+from services.cowork_agent.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
 from services.cowork_agent.openclaw_env import upsert_env_entry
 from services.cowork_agent.hermes_env import upsert_hermes_env_entry
@@ -29,7 +29,7 @@ from services.cowork_agent.project_layout import xo_projects_root
 
 router = APIRouter()
 
-_AGENT = get_default_agent()
+_AGENT = get_active_agent()
 _HERMES = get_agent("hermes")
 
 
@@ -159,8 +159,8 @@ async def save_hermes_provider_key(provider_id: str, request: Request):
 
     Mirrors ``/api/config/providers/{provider_id}/key`` but anchored to the
     hermes manifest specifically (``get_agent("hermes")``) — never to the
-    active default agent. A hermes-named route must always write to
-    ``~/.hermes/.env`` regardless of ``DEFAULT_AGENT``, same rule we
+    active agent. A hermes-named route must always write to
+    ``~/.hermes/.env`` regardless of ``AGENT_NAME``, same rule we
     applied to the OPENCLAW_* constants. Provider list lives in
     ``config/agents/hermes/commands.json`` → ``providers.*``.
 

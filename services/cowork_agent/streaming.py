@@ -23,11 +23,11 @@ from services.cowork_agent.settings import (
     OPENCLAW_API_URL,
     OPENCLAW_MODEL,
 )
-from services.cowork_agent.agent_registry import get_default_agent
+from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.chat_state import active_streams
 from services.cowork_agent.helpers import normalize_agent_id
 
-_AGENT = get_default_agent()
+_AGENT = get_active_agent()
 _SESSION_HEADER = _AGENT.session_header
 _MODEL_PREFIX = _AGENT.model_prefix.lower()
 
