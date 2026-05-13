@@ -36,6 +36,8 @@ from routers.auth import (
 from routers.claude_setup_token import router as claude_setup_token_router
 from routers.codex_setup import router as codex_setup_router
 from routers.openclaw_usage import router as openclaw_usage_router
+from routers.models import router as models_router
+from routers.channels import router as channels_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
@@ -415,6 +417,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ Skill install failed (non-fatal): {exc}")
 
+    # Write ~/xo-projects/.xo/xo.json (static defaults) and seed live status
+    # in the background. The dispatcher inside seed_agent_status() picks the
+    # right adapter for the current AGENT_NAME (no-op for agents without a
+    # status source). Non-fatal on every failure path.
+    _xo_status_task = None
+    try:
+        from services.xo_manifest import write_static_manifest, seed_agent_status
+        await write_static_manifest()
+        _xo_status_task = asyncio.create_task(seed_agent_status())
+        print("   xo.json: status seed scheduled (background)")
+    except Exception as exc:
+        print(f"⚠️ xo.json: setup failed (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
@@ -461,6 +476,13 @@ async def lifespan(app: FastAPI):
             await _watcher_task
         except asyncio.CancelledError:
             pass
+
+    if _xo_status_task and not _xo_status_task.done():
+        _xo_status_task.cancel()
+        try:
+            await _xo_status_task
+        except asyncio.CancelledError:
+            pass
     print("👋 Shutting down XO Cowork API Server...")
 
 
@@ -488,6 +510,8 @@ app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)
 app.include_router(openclaw_usage_router)
+app.include_router(models_router)
+app.include_router(channels_router)
 
 # Cowork Agent API (migrated from bridge/) — serves the xo-cowork frontend.
 from routers.cowork_agent import all_routers as cowork_agent_routers
