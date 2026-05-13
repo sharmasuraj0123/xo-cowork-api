@@ -232,7 +232,14 @@ def usage(days: int = 30):
                 }
                 first_user_ts: str | None = None
                 last_user_time: datetime | None = None
-                last_usage_sig: tuple | None = None  # dedup same-API-call records
+                # Dedup by Anthropic message id — every streaming record of
+                # the same API call shares the same ``msg.id``. Robust to
+                # interleaved user records (tool_results, etc.) — the prior
+                # ``(in,out,cr,cw)`` tuple + reset-on-user-record approach
+                # over-counted by ~75% in real sessions because tool_result
+                # records between streaming chunks reset the dedup and the
+                # next chunk of the same turn was counted as new.
+                seen_message_ids: set[str] = set()
 
                 for record in records:
                     rtype = record.get("type")
@@ -245,7 +252,6 @@ def usage(days: int = 30):
                         continue
 
                     if rtype == "user":
-                        last_usage_sig = None  # reset on every user record (incl. tool results)
                         content = msg.get("content", "")
                         has_text = (
                             (isinstance(content, str) and content.strip()) or
@@ -271,19 +277,18 @@ def usage(days: int = 30):
                     if not usage_data:
                         continue
 
+                    # Dedup by Anthropic message id (unique per API call,
+                    # shared across all streaming chunks of the same turn).
+                    msg_id = msg.get("id")
+                    if isinstance(msg_id, str) and msg_id:
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+
                     inp = int(usage_data.get("input_tokens", 0) or 0)
                     out = int(usage_data.get("output_tokens", 0) or 0)
                     cache_r = int(usage_data.get("cache_read_input_tokens", 0) or 0)
                     cache_w = int(usage_data.get("cache_creation_input_tokens", 0) or 0)
-
-                    # Records from the same API call (thinking + text + tool_use blocks)
-                    # all carry identical usage totals. Skip duplicates so each API call
-                    # is counted exactly once — keeps total_messages and per-model
-                    # message_count consistent.
-                    usage_sig = (inp, out, cache_r, cache_w)
-                    if usage_sig == last_usage_sig:
-                        continue
-                    last_usage_sig = usage_sig
 
                     cost_val = 0.0  # Claude Code JSONL doesn't include billing cost
 

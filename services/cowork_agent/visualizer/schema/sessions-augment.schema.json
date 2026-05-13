@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/sessions-augment.schema.json",
+  "title": "xo sessions-augment — watcher-owned per-session enrichments",
+  "description": "Sibling file to `sessionslist.json`. Holds the fields the runtime adapters do not compute: message/tool/task counters, first/last activity timestamps, ended_at, and episode_refs. Single writer: the watcher (services/cowork_agent/visualizer/sinks/sessions_augment.py). BFF readers stitch rows here onto the corresponding `sessionslist.json` row at read time (see docs/watcher-design.md §3.7). Keys are the same composite session ids used by `sessionslist.json` so the merge is a simple dict overlay.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sessions"],
+  "properties": {
+    "$schema":    { "type": "string" },
+    "schema":     { "type": "integer", "const": 1 },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "sessions": {
+      "type": "object",
+      "description": "Map of composite session id (same key as sessionslist.json) → augmenting fields.",
+      "additionalProperties": { "$ref": "#/definitions/augment_row" }
+    }
+  },
+  "definitions": {
+    "augment_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "messageCount":   { "type": "integer", "minimum": 0, "description": "Count of user+assistant message events observed in the runtime's session log." },
+        "toolCallCount":  { "type": "integer", "minimum": 0, "description": "Count of tool_use events (all tools combined)." },
+        "taskCount":      { "$ref": "#/definitions/task_count" },
+        "firstActivity":  { "type": ["integer", "null"], "minimum": 0, "description": "Epoch ms of the first event the watcher observed for this session." },
+        "lastActivity":   { "type": ["integer", "null"], "minimum": 0, "description": "Epoch ms of the most recent event." },
+        "ended_at":       { "type": ["string", "null"], "format": "date-time", "description": "Set when the watcher detects the session has closed (PID gone, no events for 10+ minutes). Null while live." },
+        "episode_refs":   {
+          "type": "array",
+          "description": "Filenames (basename only) under <project>/memory/episodic/ that the watcher has paired with this session. Append-only; preserved verbatim across merges.",
+          "items": { "type": "string", "pattern": "^[^/\\\\]+\\.md$" }
+        }
+      }
+    },
+    "task_count": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total":       { "type": "integer", "minimum": 0 },
+        "completed":   { "type": "integer", "minimum": 0 },
+        "in_progress": { "type": "integer", "minimum": 0 },
+        "pending":     { "type": "integer", "minimum": 0 },
+        "cancelled":   { "type": "integer", "minimum": 0 },
+        "blocked":     { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

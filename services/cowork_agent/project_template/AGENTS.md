@@ -19,7 +19,7 @@ A working folder shared between a human and any number of AI agents. It contains
 |----------------------------------------------------------|:-:|---|
 | `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md` | yes | Co-edited with the human. |
 | `memory/{semantic,episodic,procedural,working}/`        | yes | The agent's externalized cognition. |
-| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, sessions, timeline, todos, stats, activity, sync, peers, schemas. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
+| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, sessions, timeline, todos, stats, activity, sync, peers. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
 
 If the agent needs something not listed as agent-writable, it almost certainly needs a different tool (a tool call that mutates state) — not a direct edit.
 
@@ -52,17 +52,8 @@ Every agent that works here is expected to leave the folder in a **better state 
 │   ├── peers.json           who this folder is shared with
 │   ├── sync.json            last-sync state per peer
 │   ├── activity.json        live: which sessions are open right now
-│   ├── sessions/
-│   │   └── sessionslist.json    index of past sessions — read this for history
-│   └── schema/
-│       ├── activity.schema.json
-│       ├── peers.schema.json
-│       ├── project.schema.json
-│       ├── sessionslist.schema.json
-│       ├── stats.schema.json
-│       ├── sync.schema.json
-│       ├── timeline.schema.json
-│       └── todos.schema.json
+│   └── sessions/
+│       └── sessionslist.json    index of past sessions — read this for history
 │
 └── ... (the actual project work files)
 ```
@@ -234,15 +225,7 @@ If the question is open-ended ("what have we been working on lately?"), read the
 
 ---
 
-## 11. Schemas
-
-Every JSON file in `.xo/` has a JSON Schema in `.xo/schema/`, and each data file's `$schema` field points at its schema. The schemas are pure reference material — agents never write `.xo/` files (see §1), so schemas just describe what to expect when *reading*.
-
-If you find a `.xo/` file with a shape you don't recognise, read its schema first instead of guessing.
-
----
-
-## 12. If you're a new agent and lost
+## 11. If you're a new agent and lost
 
 Run §3 (if there are `[TEMPLATE]` markers anywhere) or §4 (otherwise). By the time you finish you'll know:
 

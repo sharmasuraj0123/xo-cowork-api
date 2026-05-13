@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/todos.schema.json",
+  "title": "xo todos — aggregated across active sessions",
+  "description": "Mirrors each runtime's native todo file shape, keyed per session. One project can have multiple concurrent sessions across runtimes (Claude Code, OpenClaw, etc.).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sessions"],
+  "properties": {
+    "$schema":    { "type": "string" },
+    "schema":     { "type": "integer", "const": 1 },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "sessions": {
+      "type": "object",
+      "description": "Map of session_id → session-scoped todo state. Session_id format depends on runtime (e.g. `ses_abc123` for Claude Code).",
+      "additionalProperties": { "$ref": "#/definitions/session_todos" }
+    }
+  },
+  "definitions": {
+    "session_todos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "todos"],
+      "properties": {
+        "runtime":             { "type": "string", "description": "e.g. `claude_code`, `openclaw`, `cursor`, `aider`." },
+        "source_file":         { "type": ["string", "null"], "description": "Absolute path to the runtime's native todo file. Used by the watcher to re-derive on change." },
+        "session_started_at":  { "type": ["string", "null"], "format": "date-time" },
+        "todos": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/todo" }
+        }
+      }
+    },
+    "todo": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "content", "status"],
+      "properties": {
+        "id":      { "type": "string" },
+        "content": { "type": "string" },
+        "status":  { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled", "blocked"] }
+      }
+    }
+  }
+}
