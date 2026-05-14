@@ -258,12 +258,14 @@ async def seed_agent_status() -> None:
         return
 
     async def _seed(section: str, fetch) -> None:
+        print(f"   xo.json: {section} status seed → fetching…")
         try:
             result = await fetch()
         except Exception as exc:
             print(f"⚠️ xo.json: {section} status seed failed: {exc}")
             return
         await patch_status(section, result)
+        print(f"✅ xo.json: {section} status seeded")
 
     await asyncio.gather(
         _seed("models", fetch_models),
