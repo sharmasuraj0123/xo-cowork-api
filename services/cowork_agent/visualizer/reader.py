@@ -59,7 +59,10 @@ def read_json(path: Path) -> Optional[dict]:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            return None
+        return json.loads(text)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("visualizer.read_json failed for %s: %s", path, exc)
         return None
