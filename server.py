@@ -38,6 +38,7 @@ from routers.codex_setup import router as codex_setup_router
 from routers.openclaw_usage import router as openclaw_usage_router
 from routers.models import router as models_router
 from routers.channels import router as channels_router
+from routers.providers import router as providers_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
@@ -512,6 +513,7 @@ app.include_router(codex_setup_router)
 app.include_router(openclaw_usage_router)
 app.include_router(models_router)
 app.include_router(channels_router)
+app.include_router(providers_router)
 
 # Cowork Agent API (migrated from bridge/) — serves the xo-cowork frontend.
 from routers.cowork_agent import all_routers as cowork_agent_routers
