@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # XO Cowork API process manager
-# Usage: ./cowork-api.sh {start|stop|restart|status|logs}
+# Usage: ./cowork-api.sh {install|start|stop|restart|status|logs}
 
 set -uo pipefail
 
@@ -292,14 +292,49 @@ show_logs() {
     fi
 }
 
+install_deps() {
+    local venv_dir="$SCRIPT_DIR/venv"
+    local req="$SCRIPT_DIR/requirements.txt"
+
+    if [ ! -f "$req" ]; then
+        log_error "requirements.txt not found at $req"
+        return 1
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 not found; install Python 3 first"
+        return 1
+    fi
+
+    if [ ! -x "$venv_dir/bin/python" ]; then
+        log "Creating virtualenv at $venv_dir..."
+        if ! python3 -m venv "$venv_dir"; then
+            log_error "Failed to create venv. On Debian/Ubuntu try: sudo apt-get install -y python3-venv"
+            return 1
+        fi
+    fi
+
+    log "Installing dependencies from requirements.txt..."
+    if ! "$venv_dir/bin/python" -m pip install -U pip; then
+        log_error "pip upgrade failed"
+        return 1
+    fi
+    if ! "$venv_dir/bin/python" -m pip install -r "$req"; then
+        log_error "pip install -r requirements.txt failed"
+        return 1
+    fi
+    log_success "Dependencies installed (venv: $venv_dir)"
+}
+
 case "${1:-restart}" in
+    install) install_deps ;;
     start)   start_api ;;
     stop)    stop_api ;;
     restart) restart_api ;;
     status)  status_api ;;
     logs)    show_logs ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|logs}"
+        echo "Usage: $0 {install|start|stop|restart|status|logs}"
         exit 1
         ;;
 esac
