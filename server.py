@@ -412,8 +412,8 @@ async def lifespan(app: FastAPI):
 
     # Install bundled skills into Claude Code and OpenClaw skill dirs (non-fatal)
     try:
-        from services.cowork_agent.skill_installer import install_xo_projects_skill
-        install_xo_projects_skill()
+        from services.cowork_agent.skill_installer import install_xo_skills
+        install_xo_skills()
     except Exception as exc:
         print(f"⚠️ Skill install failed (non-fatal): {exc}")
 
