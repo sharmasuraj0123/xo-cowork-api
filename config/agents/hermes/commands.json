@@ -1,0 +1,90 @@
+{
+  "name": "hermes",
+  "binary": "hermes",
+  "home_dir": "~/.hermes",
+  "env_file": "~/.hermes/.env",
+  "config_file": "~/.hermes/config.yaml",
+  "agents_dir": "~/.hermes/profiles",
+  "provisioning_log": "~/.hermes/provisioning.log",
+  "cwd": "/home/coder",
+  "cli_timeout_seconds": 30,
+  "api": {
+    "url_env": "HERMES_API_URL",
+    "url_default": "http://127.0.0.1:8642/v1/chat/completions",
+    "token_env": "API_SERVER_KEY",
+    "token_default": "",
+    "model_env": "HERMES_MODEL",
+    "model_default": "hermes-agent",
+    "session_header": "X-Hermes-Session-Id"
+  },
+  "model_prefix": "hermes",
+  "model_capabilities": {
+    "function_calling": true,
+    "vision": false,
+    "reasoning": true,
+    "json_output": true,
+    "max_context": 200000,
+    "max_output": 16384
+  },
+  "commands": {
+    "config_set": ["{binary}", "config", "set", "{path}", "{value}"]
+  },
+  "providers": {
+    "anthropic": {
+      "env_key": "ANTHROPIC_API_KEY",
+      "commands": [
+        {"template": "config_set", "params": {"path": "model.provider", "value": "anthropic"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "claude-opus-4-6"}},
+        {"template": "config_set", "params": {"path": "model.base_url", "value": "https://api.anthropic.com"}}
+      ]
+    },
+    "openai": {
+      "env_key": "OPENAI_API_KEY",
+      "commands": [
+        {"template": "config_set", "params": {"path": "model.provider", "value": "custom"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "gpt-5.4"}},
+        {"template": "config_set", "params": {"path": "model.base_url", "value": "https://api.openai.com/v1"}}
+      ]
+    },
+    "openrouter": {
+      "env_key": "OPENROUTER_API_KEY",
+      "commands": [
+        {"template": "config_set", "params": {"path": "model.provider", "value": "openrouter"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "anthropic/claude-sonnet-4"}}
+      ]
+    },
+    "kimi": {
+      "env_key": "KIMI_API_KEY",
+      "commands": [
+        {"template": "config_set", "params": {"path": "model.provider", "value": "kimi-coding"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "kimi-k2.5"}},
+        {"template": "config_set", "params": {"path": "model.base_url", "value": "https://api.kimi.com/coding/v1"}}
+      ]
+    }
+  },
+  "channels": {
+    "telegram": {
+      "fields": {
+        "token":         "TELEGRAM_BOT_TOKEN",
+        "allowed_users": "TELEGRAM_ALLOWED_USERS"
+      },
+      "defaults": {
+        "allowed_users": "*"
+      },
+      "commands": [
+        {"template": "config_set", "params": {"path": "GATEWAY_ALLOW_ALL_USERS", "value": "true"}}
+      ]
+    },
+    "slack": {
+      "fields": {
+        "bot_token":     "SLACK_BOT_TOKEN",
+        "app_token":     "SLACK_APP_TOKEN",
+        "allowed_users": "SLACK_ALLOWED_USERS"
+      },
+      "defaults": {
+        "allowed_users": "*"
+      },
+      "commands": []
+    }
+  }
+}

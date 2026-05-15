@@ -36,6 +36,9 @@ from routers.auth import (
 from routers.claude_setup_token import router as claude_setup_token_router
 from routers.codex_setup import router as codex_setup_router
 from routers.openclaw_usage import router as openclaw_usage_router
+from routers.models import router as models_router
+from routers.channels import router as channels_router
+from routers.providers import router as providers_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
@@ -117,6 +120,16 @@ if IS_LOCAL_STAGE and not os.path.isdir(AI_WORKSPACE_ROOT):
 
 # HTTP client timeout settings
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+STARTUP_WARMUP_ENABLED = os.getenv("STARTUP_WARMUP_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STARTUP_WARMUP_URL = (
+    os.getenv("STARTUP_WARMUP_URL", "http://localhost:5002").strip().rstrip("/") + "/"
+)
+STARTUP_WARMUP_DELAY_SECONDS = float(os.getenv("STARTUP_WARMUP_DELAY_SECONDS", "10"))
 
 # Claude Code timeout (in seconds) - allow longer for complex queries
 CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "300"))  # 5 minutes default
@@ -323,6 +336,21 @@ async def save_chat_messages(
     )
 
 
+async def startup_warmup_request() -> None:
+    """Trigger a local warmup request after app startup (non-fatal)."""
+    if not STARTUP_WARMUP_ENABLED:
+        print("   Startup warmup: disabled")
+        return
+
+    await asyncio.sleep(max(0.0, STARTUP_WARMUP_DELAY_SECONDS))
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            response = await client.get(STARTUP_WARMUP_URL)
+        print(f"✅ Startup warmup request succeeded: {STARTUP_WARMUP_URL} ({response.status_code})")
+    except Exception as e:
+        print(f"⚠️ Startup warmup request failed (non-fatal): {STARTUP_WARMUP_URL} - {e}")
+
+
 # =============================================================================
 # FastAPI Application
 # =============================================================================
@@ -341,6 +369,7 @@ async def lifespan(app: FastAPI):
     print(f"   Claude Permission Mode: {CLAUDE_PERMISSION_MODE}")
     print(f"   AI Workspace Root: {AI_WORKSPACE_ROOT}")
     print(f"   Codex CLI: {CODEX_CLI_PATH} (timeout={CODEX_TIMEOUT}s)")
+    print(f"   Startup warmup: {'enabled' if STARTUP_WARMUP_ENABLED else 'disabled'} ({STARTUP_WARMUP_URL})")
     print("   Skills: .claude/skills (Claude-native)")
     print("   Skills: .agents/skills + AGENTS.md (Codex-native)")
     startup_auth_session_id = os.getenv("XO_AUTH_SESSION_ID", "").strip()
@@ -364,8 +393,48 @@ async def lifespan(app: FastAPI):
             "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
         )
 
+    # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
+    try:
+        from services.cowork_agent.gdrive_rclone import ensure_rclone_running
+        await ensure_rclone_running()
+        print("   rclone daemon: started for gdrive/onedrive connectors")
+    except Exception as exc:
+        print(f"⚠️ rclone startup skipped (non-fatal): {exc}")
+
+    # Check gnupg availability (required by xo-projects-sync; non-fatal — does NOT install).
+    # Mirrors the rclone pattern: surface missing system deps at boot so they don't
+    # only appear as confused 500s on the first /setup attempt.
+    try:
+        from services.cowork_agent.xo_projects_sync.crypto import check_gpg_available
+        check_gpg_available()
+        print("   gnupg: available (xo-projects-sync ready)")
+    except Exception as exc:
+        print(f"⚠️ gnupg not available — xo-projects-sync /setup will return 500 until installed: {exc}")
+
+    # Install bundled skills into Claude Code and OpenClaw skill dirs (non-fatal)
+    try:
+        from services.cowork_agent.skill_installer import install_xo_skills
+        install_xo_skills()
+    except Exception as exc:
+        print(f"⚠️ Skill install failed (non-fatal): {exc}")
+
+    # Write ~/xo-projects/.xo/xo.json (static defaults) and seed live status
+    # in the background. The dispatcher inside seed_agent_status() picks the
+    # right adapter for the current AGENT_NAME (no-op for agents without a
+    # status source). Non-fatal on every failure path.
+    _xo_status_task = None
+    try:
+        from services.xo_manifest import write_static_manifest, seed_agent_status
+        await write_static_manifest()
+        _xo_status_task = asyncio.create_task(seed_agent_status())
+        print("   xo.json: status seed scheduled (background)")
+    except Exception as exc:
+        print(f"⚠️ xo.json: setup failed (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
+    _warmup_task = None
+    _watcher_task = None
     if start_usage_sync_scheduler:
         try:
             _sync_task = asyncio.create_task(start_usage_sync_scheduler())
@@ -373,13 +442,46 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️ Usage sync failed to start (non-fatal): {e}")
 
+    # Visualizer watcher — materialises <project>/.xo/* from the
+    # runtime logs Claude Code writes under ~/.claude/projects/.
+    # Non-fatal: BFF endpoints keep serving whatever is on disk.
+    try:
+        from services.cowork_agent.visualizer.watcher import start_watcher
+        _watcher_task = asyncio.create_task(start_watcher())
+        print("   Watcher: background task started")
+    except Exception as e:
+        print(f"⚠️ Watcher failed to start (non-fatal): {e}")
+
+    _warmup_task = asyncio.create_task(startup_warmup_request())
+
     yield
 
     # Cleanup background task
+    if _warmup_task and not _warmup_task.done():
+        _warmup_task.cancel()
+        try:
+            await _warmup_task
+        except asyncio.CancelledError:
+            pass
+
     if _sync_task:
         _sync_task.cancel()
         try:
             await _sync_task
+        except asyncio.CancelledError:
+            pass
+
+    if _watcher_task:
+        _watcher_task.cancel()
+        try:
+            await _watcher_task
+        except asyncio.CancelledError:
+            pass
+
+    if _xo_status_task and not _xo_status_task.done():
+        _xo_status_task.cancel()
+        try:
+            await _xo_status_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")
@@ -392,9 +494,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -403,6 +511,9 @@ app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)
 app.include_router(openclaw_usage_router)
+app.include_router(models_router)
+app.include_router(channels_router)
+app.include_router(providers_router)
 
 # Cowork Agent API (migrated from bridge/) — serves the xo-cowork frontend.
 from routers.cowork_agent import all_routers as cowork_agent_routers
@@ -475,10 +586,12 @@ async def delete_session(project_id: str):
 async def gateway_restart():
     """Restart the OpenClaw gateway."""
     import subprocess
-    script = os.path.expanduser("~/xo-cowork-api/openclaw.sh")
+    script = Path(os.path.expanduser("~/xo-cowork-api/openclaw.sh")).resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="Gateway script not found")
     try:
         result = subprocess.run(
-            [script, "restart"],
+            [str(script), "restart"],
             capture_output=True, text=True, timeout=30
         )
         return {
@@ -488,6 +601,52 @@ async def gateway_restart():
         }
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": "Restart timed out after 30s"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/app/restart")
+async def app_restart():
+    """Restart the XO Cowork API app process via cowork-api.sh."""
+    import subprocess
+    script = (Path(__file__).resolve().parent / "cowork-api.sh").resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="App restart script not found")
+    try:
+        subprocess.Popen(
+            [str(script), "restart"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(script.parent),
+            start_new_session=True,
+        )
+        return {
+            "status": "accepted",
+            "message": "Restart triggered in background"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/app/update")
+async def app_update():
+    """Pull latest code safely via cowork-update.sh in background."""
+    import subprocess
+    script = (Path(__file__).resolve().parent / "cowork-update.sh").resolve()
+    if not script.exists() or not script.is_file():
+        raise HTTPException(status_code=404, detail="App update script not found")
+    try:
+        subprocess.Popen(
+            [str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(script.parent),
+            start_new_session=True,
+        )
+        return {
+            "status": "accepted",
+            "message": "Update triggered in background"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
@@ -659,10 +818,15 @@ async def ask_question_streaming(data: AskQuestionRequest):
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "5002"))
+    reload = os.getenv("UVICORN_RELOAD", "").strip().lower() in ("1", "true", "yes")
 
-    uvicorn.run(
-        "server:app",
-        host=host,
-        port=port,
-        reload=True
-    )
+    if reload:
+        uvicorn.run(
+            "server:app",
+            host=host,
+            port=port,
+            reload=True,
+            reload_dirs=[str(Path(__file__).resolve().parent)],
+        )
+    else:
+        uvicorn.run("server:app", host=host, port=port, reload=False)

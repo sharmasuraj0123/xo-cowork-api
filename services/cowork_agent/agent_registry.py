@@ -5,17 +5,21 @@ Loads JSON manifests from `config/agents/<agent>/commands.json` — one
 subdirectory per supported agent tool (openclaw today, room for others
 later). Each manifest declares the binary name, filesystem layout, API
 env-var names, command templates, and provider/channel recipes. Call
-sites go through `get_default_agent()` so the binary, paths, and argv
+sites go through `get_active_agent()` so the binary, paths, and argv
 shapes are never hardcoded.
 
 The file is named `commands.json` (not `<agent>.json`) so it cannot be
 confused with the agent's own config file (e.g. `~/.openclaw/openclaw.json`).
 
-Which manifest is the "default" is driven by env var `DEFAULT_AGENT`
-(matched against the `name` field inside each manifest). If the env var
-is unset and only one manifest exists, that one is used. If multiple
-manifests exist and the env var is unset, loading raises — we do not
-guess.
+Which manifest is active is resolved in this order:
+
+1. `AGENT_NAME` env var — runtime override (takes precedence when set).
+2. `DEFAULT_AGENT` env var — baseline default (what ships in `.env.example`).
+3. If neither is set and only one manifest exists, that one is used.
+4. If neither is set and multiple manifests exist, loading raises — we
+   do not guess.
+
+Both env vars are matched against the `name` field inside each manifest.
 """
 
 import json
@@ -141,9 +145,16 @@ def _discover_manifests() -> dict[str, AgentManifest]:
         )
     manifests: dict[str, AgentManifest] = {}
     # One subdir per agent, each containing a `commands.json` file.
+    # Files that lack the `binary` field are adapter configs, not agent manifests — skip them.
     for subdir in sorted(p for p in _MANIFEST_DIR.iterdir() if p.is_dir()):
         manifest_path = subdir / "commands.json"
         if not manifest_path.exists():
+            continue
+        try:
+            raw_check = json.loads(manifest_path.read_text())
+        except Exception:
+            continue
+        if "binary" not in raw_check:
             continue
         manifest = _build_manifest(manifest_path)
         if manifest.name in manifests:
@@ -166,12 +177,18 @@ def _ensure_loaded() -> None:
     if _MANIFESTS is not None:
         return
     _MANIFESTS = _discover_manifests()
-    requested = (os.getenv("DEFAULT_AGENT") or "").strip()
+    # AGENT_NAME wins; DEFAULT_AGENT is the baseline fallback that ships in
+    # .env.example. The var-name in the error message reflects which one the
+    # user set (or AGENT_NAME if both are empty) so it's obvious where to fix.
+    agent_name = (os.getenv("AGENT_NAME") or "").strip()
+    default_agent = (os.getenv("DEFAULT_AGENT") or "").strip()
+    requested = agent_name or default_agent
     if requested:
         if requested not in _MANIFESTS:
             available = ", ".join(sorted(_MANIFESTS))
+            src = "AGENT_NAME" if agent_name else "DEFAULT_AGENT"
             raise ValueError(
-                f"DEFAULT_AGENT='{requested}' does not match any manifest. Available: {available}"
+                f"{src}='{requested}' does not match any manifest. Available: {available}"
             )
         _DEFAULT = _MANIFESTS[requested]
     elif len(_MANIFESTS) == 1:
@@ -179,12 +196,16 @@ def _ensure_loaded() -> None:
     else:
         available = ", ".join(sorted(_MANIFESTS))
         raise ValueError(
-            f"multiple agent manifests found ({available}) but DEFAULT_AGENT env var is unset."
+            f"multiple agent manifests found ({available}) but neither AGENT_NAME nor DEFAULT_AGENT is set."
         )
 
 
-def get_default_agent() -> AgentManifest:
-    """Return the manifest for the active agent (driven by `DEFAULT_AGENT` env)."""
+def get_active_agent() -> AgentManifest:
+    """Return the manifest for the active agent.
+
+    Resolved from `AGENT_NAME` (override) → `DEFAULT_AGENT` (baseline) →
+    single-manifest auto-pick. See module docstring for the full chain.
+    """
     _ensure_loaded()
     assert _DEFAULT is not None
     return _DEFAULT

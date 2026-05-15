@@ -181,8 +181,195 @@ def _attach_tool_result(messages, tool_result_msg):
 def _map_stop_reason(reason):
     mapping = {
         "stop": "stop",
+        "end_turn": "stop",
         "toolUse": "tool_use",
+        "tool_use": "tool_use",
         "length": "length",
+        "max_tokens": "length",
         "error": "error",
     }
     return mapping.get(reason or "", None)
+
+
+def convert_native_claude_messages(session_id: str, records: list[dict]) -> list[dict]:
+    """Convert native Claude Code JSONL records (type=user/assistant) to MessageResponse."""
+    messages = []
+    last_user_content: str | None = None
+    saw_user_since_last_assistant = False  # reset merge chain on any user record
+
+    for record in records:
+        rtype = record.get("type")
+        if rtype not in ("user", "assistant"):
+            continue
+
+        msg = record.get("message", {})
+        if not msg:
+            continue
+
+        role = msg.get("role", rtype)
+        record_id = record.get("uuid") or record.get("id") or short_id()
+        timestamp = record.get("timestamp") or iso_now()
+
+        if role == "user":
+            saw_user_since_last_assistant = True
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                text = content.strip()
+                tool_results = []
+            elif isinstance(content, list):
+                text = "".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+            else:
+                text = ""
+                tool_results = []
+
+            # Attach tool results to the preceding assistant message's tool calls.
+            for tr in tool_results:
+                call_id = tr.get("tool_use_id", "")
+                result_content = tr.get("content", [])
+                if isinstance(result_content, str):
+                    output_text = result_content
+                elif isinstance(result_content, list):
+                    output_text = "".join(
+                        b.get("text", "") for b in result_content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                else:
+                    output_text = ""
+                is_error = tr.get("is_error", False)
+                for prev_msg in reversed(messages):
+                    if prev_msg["data"].get("role") != "assistant":
+                        continue
+                    for part in prev_msg["parts"]:
+                        if part["data"].get("type") == "tool" and part["data"].get("call_id") == call_id:
+                            part["data"]["state"]["output"] = output_text
+                            if is_error:
+                                part["data"]["state"]["status"] = "error"
+                            break
+
+            if text and text == last_user_content:
+                continue
+            last_user_content = text or None
+
+            if not text:
+                # No visible text — skip; tool results already attached above.
+                continue
+
+            parts = [{
+                "id": f"{record_id}_p0",
+                "message_id": record_id,
+                "session_id": session_id,
+                "time_created": timestamp,
+                "data": {"type": "text", "text": text},
+            }]
+            messages.append({
+                "id": record_id,
+                "session_id": session_id,
+                "time_created": timestamp,
+                "data": {"role": "user"},
+                "parts": parts,
+            })
+
+        elif role == "assistant":
+            usage = msg.get("usage", {})
+            new_parts = []
+            for block in msg.get("content", []):
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text.startswith("[["):
+                        closing = text.find("]]")
+                        if closing != -1:
+                            text = text[closing + 2:].strip()
+                    if text:
+                        new_parts.append({
+                            "id": f"{record_id}_p{len(new_parts)}",
+                            "message_id": record_id,
+                            "session_id": session_id,
+                            "time_created": timestamp,
+                            "data": {"type": "text", "text": text},
+                        })
+                elif btype == "thinking":
+                    thinking_text = block.get("thinking", "")
+                    if thinking_text:
+                        new_parts.append({
+                            "id": f"{record_id}_p{len(new_parts)}",
+                            "message_id": record_id,
+                            "session_id": session_id,
+                            "time_created": timestamp,
+                            "data": {"type": "reasoning", "text": thinking_text},
+                        })
+                elif btype == "tool_use":
+                    new_parts.append({
+                        "id": f"{record_id}_p{len(new_parts)}",
+                        "message_id": record_id,
+                        "session_id": session_id,
+                        "time_created": timestamp,
+                        "data": {
+                            "type": "tool",
+                            "tool": block.get("name", "unknown"),
+                            "call_id": block.get("id", ""),
+                            "state": {
+                                "status": "completed",
+                                "input": block.get("input", {}),
+                                "output": None,
+                                "metadata": None,
+                                "title": block.get("name", "tool"),
+                                "time_start": timestamp,
+                                "time_end": timestamp,
+                                "time_compacted": None,
+                            },
+                        },
+                    })
+
+            # Merge into the previous assistant message when consecutive records
+            # belong to the same turn (thinking block followed by text/tool block).
+            # Only merge when no user record (even tool-result-only) has appeared
+            # since the last assistant message was created.
+            prev = messages[-1] if messages else None
+            if prev and prev["data"].get("role") == "assistant" and new_parts and not saw_user_since_last_assistant:
+                prev["parts"].extend(new_parts)
+                # Update usage/finish to the latest (more complete) record.
+                if usage:
+                    prev["data"]["tokens"] = {
+                        "input": usage.get("input_tokens", 0),
+                        "output": usage.get("output_tokens", 0),
+                        "reasoning": 0,
+                        "cache_read": usage.get("cache_read_input_tokens", 0),
+                        "cache_write": usage.get("cache_creation_input_tokens", 0),
+                    }
+                if msg.get("stop_reason"):
+                    prev["data"]["finish"] = _map_stop_reason(msg.get("stop_reason"))
+                continue
+
+            if not new_parts:
+                # Empty assistant record (e.g. thinking block with no content) — skip.
+                continue
+
+            saw_user_since_last_assistant = False
+            messages.append({
+                "id": record_id,
+                "session_id": session_id,
+                "time_created": timestamp,
+                "data": {
+                    "role": "assistant",
+                    "model_id": msg.get("model"),
+                    "provider_id": None,
+                    "cost": None,
+                    "tokens": {
+                        "input": usage.get("input_tokens", 0),
+                        "output": usage.get("output_tokens", 0),
+                        "reasoning": 0,
+                        "cache_read": usage.get("cache_read_input_tokens", 0),
+                        "cache_write": usage.get("cache_creation_input_tokens", 0),
+                    } if usage else None,
+                    "finish": _map_stop_reason(msg.get("stop_reason")),
+                    "error": None,
+                },
+                "parts": new_parts,
+            })
+
+    return messages

@@ -169,6 +169,44 @@ kill_orphan_gateways() {
     return 0
 }
 
+# Find hermes dashboard processes not pointed at by $DASH_PID_FILE.
+# We adopt these instead of fighting them: when the FE asks for a
+# restart and the PID file went stale, the running dashboard is the
+# real one and we just need to take ownership of it before stop/start.
+find_orphan_dashboards() {
+    local managed_pid=""
+    if [ -f "$DASH_PID_FILE" ]; then
+        managed_pid=$(cat "$DASH_PID_FILE" 2>/dev/null || true)
+    fi
+
+    local dash_pids
+    dash_pids=$(pgrep -f "hermes dashboard" 2>/dev/null || true)
+    [ -z "$dash_pids" ] && return
+
+    for pid in $dash_pids; do
+        [ "$pid" = "$managed_pid" ] && continue
+        echo "$pid"
+    done
+}
+
+kill_orphan_dashboards() {
+    local orphans
+    orphans=$(find_orphan_dashboards)
+    [ -z "$orphans" ] && return 0
+
+    for opid in $orphans; do
+        log_warn "Found orphan dashboard process (PID: $opid) — killing it"
+        kill "$opid" 2>/dev/null || true
+    done
+    sleep 1
+    for opid in $orphans; do
+        if kill -0 "$opid" 2>/dev/null; then
+            kill -9 "$opid" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
 # Wait for a port to be released
 wait_for_port_release() {
     local port="$1"
@@ -187,12 +225,9 @@ wait_for_port_release() {
 # Setup: Validate required env vars
 # ==============================================================
 validate_env() {
-    local missing=0
-
-    # At least one model provider key required
+    # At least one model provider key recommended (warning only, non-fatal)
     if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
-        log_error "No model provider key set. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
-        missing=1
+        log_warn "No model provider key set. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
     fi
 
     # Channel-specific validation
@@ -206,11 +241,7 @@ validate_env() {
         fi
     fi
 
-    if [ "$missing" -eq 1 ]; then
-        log_error "Set required vars in .env. Exiting."
-        exit 1
-    fi
-    log_success "Required environment variables are set"
+    log_success "Environment validation complete"
 }
 
 # ==============================================================
@@ -266,6 +297,32 @@ install_cli() {
     # Set up Python venv and install
     cd "$HERMES_REPO"
 
+    # ─────────────────────────────────────────────
+    # Fix Baileys version (critical for WhatsApp)
+    # ─────────────────────────────────────────────
+    log "Fixing Baileys version..."
+
+    WA_DIR="$HERMES_REPO/scripts/whatsapp-bridge"
+
+    if [ -d "$WA_DIR" ]; then
+        cd "$WA_DIR"
+
+        # Clean install to avoid cached broken versions
+        rm -rf node_modules package-lock.json
+
+        # Force exact version
+        npm install @whiskeysockets/baileys@6.6.0 --save-exact
+
+        # Install remaining deps
+        npm install
+
+        log_success "Baileys locked to 6.6.0"
+    else
+        log_warn "WhatsApp bridge directory not found, skipping Baileys fix"
+    fi
+
+    cd "$HERMES_REPO"
+
     if command -v uv &>/dev/null; then
         log "Installing with uv..."
         if [ ! -d "venv" ]; then
@@ -314,42 +371,29 @@ configure_hermes() {
              "$HERMES_DIR/cron" "$HERMES_DIR/logs" "$HERMES_DIR/hooks"
 
     # ── Model ──────────────────────────────────────────────────────────────────
-    # HERMES_PROVIDER (from Coder form) selects which key to use when multiple are set.
-    # Normalise: "openai" → "custom" (Hermes has no standalone openai provider).
-    local _provider="${HERMES_PROVIDER:-}"
-    [ "$_provider" = "openai" ] && _provider="custom"
-
+    # Provider is determined by whichever API key is present.
+    # Anthropic wins if multiple are set.
     _configure_model() {
         local provider="$1" key_var="$2" default_model="$3" base_url="$4"
         local api_key="${!key_var:-}"
-        [ -z "$api_key" ] && { log_warn "Provider $provider selected but $key_var is not set — skipping"; return 1; }
-        local model="${HERMES_MODEL:-$default_model}"
-        log "Configuring model: $provider / $model"
+        [ -z "$api_key" ] && return 1
+        log "Configuring model: $provider / $default_model"
         hermes config set "$key_var" "$api_key"
         hermes config set model.provider "$provider"
-        hermes config set model.default "$model"
+        hermes config set model.default "$default_model"
         [ -n "$base_url" ] && hermes config set model.base_url "$base_url"
-        log_success "Model: $provider / $model"
+        log_success "Model: $provider / $default_model"
     }
 
-    case "$_provider" in
-        anthropic)
-            _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com ;;
-        custom)
-            _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1 ;;
-        openrouter)
-            _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 "" ;;
-        *)
-            # Auto-detect from whichever key is set (anthropic wins if multiple)
-            if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-                _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
-            elif [ -n "${OPENAI_API_KEY:-}" ]; then
-                _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
-            elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
-                _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
-            fi
-            ;;
-    esac
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+    elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
+    else
+        log_warn "No model provider key — model not configured"
+    fi
 
     # ── Channels ───────────────────────────────────────────────────────────────
     # Parse ENABLED_CHANNELS JSON array if set (from Coder multi-select)
@@ -382,12 +426,18 @@ configure_hermes() {
         log_success "Slack configured"
     fi
 
-    # WhatsApp
+    # WhatsApp — these must live in env (not config.yaml), so persist them to $ENV_FILE
     if [ "$whatsapp_enabled" = "true" ] || [ -n "${WHATSAPP_CREDS:-}" ]; then
         log "Configuring WhatsApp..."
-        hermes config set WHATSAPP_ENABLED true
-        hermes config set WHATSAPP_MODE "${WHATSAPP_MODE:-bot}"
-        hermes config set WHATSAPP_ALLOWED_USERS "${WHATSAPP_ALLOWED_USERS:-*}"
+        _ensure_env() {
+            local key="$1" val="$2"
+            if ! grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+                printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+            fi
+        }
+        _ensure_env WHATSAPP_ENABLED       "true"
+        _ensure_env WHATSAPP_MODE          "${WHATSAPP_MODE:-bot}"
+        _ensure_env WHATSAPP_ALLOWED_USERS "${WHATSAPP_ALLOWED_USERS:-*}"
         if [ -n "${WHATSAPP_CREDS:-}" ]; then
             local wa_dir="$HERMES_DIR/whatsapp/session"
             mkdir -p "$wa_dir"
@@ -685,6 +735,7 @@ start_all() {
     if is_dashboard_running; then
         echo -e "${YELLOW}Dashboard is already running (PID: $(cat "$DASH_PID_FILE"))${NC}"
     else
+        kill_orphan_dashboards
         _launch_dashboard
     fi
 }
@@ -737,8 +788,13 @@ stop_all() {
     _stop_process "Hermes Gateway" "$GW_PID_FILE" "$HERMES_API_PORT"
     _stop_process "Hermes Dashboard" "$DASH_PID_FILE" "$HERMES_DASH_PORT"
 
-    # Kill any orphan gateway processes
+    # Catch processes whose PID files went stale (a previous status check
+    # may have removed the PID file even though the underlying process is
+    # still alive — without this, `restart` would leave a zombie holding
+    # $HERMES_DASH_PORT and the next `_launch_dashboard` would silently
+    # fail to bind.
     kill_orphan_gateways
+    kill_orphan_dashboards
 }
 
 # ==============================================================

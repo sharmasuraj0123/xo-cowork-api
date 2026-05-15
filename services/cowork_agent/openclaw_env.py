@@ -1,3 +1,10 @@
+import warnings
+warnings.warn(
+    "openclaw_env.py is deprecated. Use AgentDispatcher from dispatcher.py.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 """
 Helpers for `~/.openclaw/.env`.
 
@@ -15,9 +22,9 @@ Two access patterns live on top of this file:
 import re
 from pathlib import Path
 
-from services.cowork_agent.agent_registry import get_default_agent
+from services.cowork_agent.agent_registry import get_active_agent
 
-ENV_FILE: Path = get_default_agent().env_file
+ENV_FILE: Path = get_active_agent().env_file
 
 
 def parse_env_file(text: str) -> list[dict]:

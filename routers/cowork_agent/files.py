@@ -2,11 +2,10 @@
 Workspace / filesystem endpoints under `/api/files/*`.
 
 Covers uploads, directory listing, text & binary content reads, and
-directory creation with optional xo-cowork scaffolding (WORKSPACE.md /
-AGENTS.md / OBJECTIVES.md / sessions.json). All paths are clamped to the
+directory creation. When `scaffold:true` is passed to mkdir, the project is
+built using the canonical xo-projects layout (see
+``services.cowork_agent.project_layout``). All paths are clamped to the
 user's home dir for safety.
-
-#TODO --- need safect related change (dir)
 """
 
 import hashlib
@@ -14,137 +13,18 @@ import mimetypes
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+
+from services.cowork_agent.project_layout import (
+    project_dir,
+    scaffold_project,
+    xo_projects_root,
+)
 
 router = APIRouter()
 
-
-# ── Scaffold templates used by mkdir ─────────────────────────────────────────
-
-_PROJECT_SCAFFOLD: dict[str, str] = {
-    "WORKSPACE.md": """\
-# WORKSPACE.md
-
-## Workspace Summary
-- **Name:** <project-name>
-- **Owner:** <owner-or-team>
-- **Last updated:** <YYYY-MM-DD>
-- **Primary repository/folder:** <absolute-or-repo-relative-path>
-
-## Mission
-<!-- 1-3 lines on why this workspace exists and what success looks like. -->
-
-## Product/Project Context
-<!-- Problem statement, users, constraints, and non-goals. -->
-
-## Architecture Snapshot
-- **Frontend:** <framework/runtime>
-- **Backend:** <framework/runtime>
-- **Data layer:** <db/cache/queue>
-- **Integrations:** <external APIs/services>
-
-## Working Boundaries
-- In-scope:
-  - <what can be changed>
-- Out-of-scope:
-  - <what should not be changed without approval>
-
-## Sources of Truth
-- Requirements: <path or link>
-- Design docs: <path or link>
-- API contracts: <path or link>
-- Runbooks: <path or link>
-
-## Current Focus
-- Sprint/iteration theme: <theme>
-- Active objective IDs: <OBJ-1, OBJ-2>
-- Risks/blockers:
-  - <risk 1>
-  - <risk 2>
-
-## Handover Notes
-<!-- Short operational notes future agents should know before they start. -->
-
----
-""",
-    "AGENTS.md": """\
-# AGENTS.md
-
-## Agent Operating Contract
-All agents working in this workspace must:
-1. Read `WORKSPACE.md` and `OBJECTIVES.md` before making edits.
-2. Align every task to at least one objective ID from `OBJECTIVES.md`.
-3. Keep changes inside agreed workspace boundaries.
-4. Document findings, decisions, and progress in the logs below.
-
-## Execution Rules
-- Prefer small, reversible changes.
-- Do not use destructive commands without explicit approval.
-- Validate critical changes with available tests/checks.
-- Surface assumptions and blockers early.
-- Keep documentation in sync with behavior changes.
-
-## Required Logs
-### Objective Progress Log
-| Date | Agent | Objective ID | Progress | Evidence/PR/Commit | Next Step |
-| --- | --- | --- | --- | --- | --- |
-| <YYYY-MM-DD> | <agent-name> | <OBJ-1> | <what moved> | <link-or-path> | <next action> |
-
-### Findings Log
-| Date | Agent | Area | Finding | Impact | Recommendation |
-| --- | --- | --- | --- | --- | --- |
-| <YYYY-MM-DD> | <agent-name> | <component> | <observation> | <high/med/low> | <proposal> |
-
-### Decision Log
-| Date | Decision | Rationale | Owner | Review Date |
-| --- | --- | --- | --- | --- |
-| <YYYY-MM-DD> | <decision summary> | <why> | <owner> | <date> |
-
-## Reporting Format (end of task)
-- Objective alignment: `<OBJ-ids>`
-- What changed: `<files and behavior>`
-- Validation: `<tests/checks run>`
-- Risks/unknowns: `<open items>`
-- Follow-up: `<next suggested step>`
-
----
-""",
-    "OBJECTIVES.md": """\
-# OBJECTIVES.md
-
-## Objective Framework (OKR)
-Use this format for all planning. Every active task should map to one KR.
-
-## Objective Table
-| Objective ID | Objective (Outcome) | Owner | Horizon | Status | Confidence |
-| --- | --- | --- | --- | --- | --- |
-| OBJ-1 | <clear outcome statement> | <owner> | <Qx YYYY> | <on-track/at-risk/off-track> | <high/med/low> |
-
-## Key Results Table
-| KR ID | Objective ID | Key Result (Measurable) | Baseline | Target | Current | Due Date | Status |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| KR-1.1 | OBJ-1 | <metric target> | <value> | <value> | <value> | <YYYY-MM-DD> | <on-track/at-risk/off-track> |
-
-## Weekly Execution Plan
-| Week | KR ID | Planned Actions | Owner | Evidence |
-| --- | --- | --- | --- | --- |
-| <YYYY-Www> | KR-1.1 | <planned work> | <owner> | <ticket/PR/doc path> |
-
-## Result Log
-| Date | KR ID | Result Update | Delta | Evidence | Notes |
-| --- | --- | --- | --- | --- | --- |
-| <YYYY-MM-DD> | KR-1.1 | <what changed> | <+/- value> | <link-or-path> | <context> |
-
-## Agent Alignment Notes
-- Agents must cite objective and KR IDs when proposing or executing work.
-- If work does not map to an objective, classify it as maintenance and justify it.
-- Escalate any KR with off-track status in the next progress update.
-
----
-""",
-    "sessions.json": "[]\n",
-}
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -156,7 +36,9 @@ async def upload_file(
     workspace: str = Form(""),
 ):
     """Save an uploaded file into the workspace (or ~/uploads fallback)."""
-    content = await file.read()
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
     content_hash = hashlib.sha256(content).hexdigest()
 
     if workspace:
@@ -320,16 +202,25 @@ async def make_directory(request: Request):
 
     Body fields:
     - ``path`` (str, required): absolute path of the directory to create.
-    - ``scaffold`` (bool, optional): when true, writes WORKSPACE.md, AGENTS.md,
-      OBJECTIVES.md, and sessions.json inside the new directory.
-    - ``files`` (list[str], optional): additional local file paths to copy into
-      the new directory. Each entry must be an absolute path that already exists
-      under the user's home directory. The file is copied using its original
-      filename; existing scaffold files with the same name are not overwritten.
+    - ``scaffold`` (bool, optional): when true, treats the target as a new
+      project under ``xo-projects/`` and builds the canonical layout (see
+      ``services.cowork_agent.project_layout``). The target's parent must
+      resolve to ``xo_projects_root()``; otherwise the call is rejected.
+    - ``display_name`` (str, optional): when scaffolding, sets the
+      project's display name in ``.xo/project.json``. Falls back to the
+      folder name.
+    - ``description`` (str, optional): when scaffolding, sets the
+      project's description in ``.xo/project.json``.
+    - ``files`` (list[str], optional): additional local file paths to copy
+      into the new directory. Each entry must be an absolute path that
+      already exists under the user's home directory. Existing files with
+      the same name are not overwritten.
     """
     body = await request.json()
     raw_path = body.get("path")
     scaffold = bool(body.get("scaffold", False))
+    display_name = body.get("display_name")
+    description = body.get("description")
     extra_files: list[str] = body.get("files") or []
 
     if not raw_path:
@@ -343,6 +234,20 @@ async def make_directory(request: Request):
 
     if target.exists():
         return JSONResponse(status_code=409, content={"detail": "Already exists"})
+
+    # Scaffold paths must land directly under xo-projects root.
+    if scaffold:
+        projects_root = xo_projects_root()
+        if target.parent.resolve() != projects_root:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": (
+                        f"scaffold:true requires path to be a direct child of "
+                        f"{projects_root}; got {target}"
+                    )
+                },
+            )
 
     # Validate extra file paths before creating anything
     resolved_extras: list[Path] = []
@@ -361,11 +266,15 @@ async def make_directory(request: Request):
         resolved_extras.append(fp)
 
     try:
-        target.mkdir(parents=True, exist_ok=False)
-
         if scaffold:
-            for filename, content in _PROJECT_SCAFFOLD.items():
-                (target / filename).write_text(content)
+            scaffold_project(
+                target.name,
+                display_name=(display_name.strip() if isinstance(display_name, str) else None),
+                description=(description.strip() if isinstance(description, str) else None),
+            )
+            target = project_dir(target.name)
+        else:
+            target.mkdir(parents=True, exist_ok=False)
 
         copied = []
         for src in resolved_extras:

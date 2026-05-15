@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+.env.backup
+main.tf
 
 .claude/
 
@@ -56,3 +58,9 @@ htmlcov/
 # Runtime data (usage sync watermark, etc.)
 data/
 docs/
+
+ARCHITECTURE.md
+
+# Connector secrets (created at runtime by gdrive/onedrive/vercel/github/manus)
+mcp-tokens.json
+rclone.conf

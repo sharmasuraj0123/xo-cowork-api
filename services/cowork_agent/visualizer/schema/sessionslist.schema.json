@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "xo/sessionslist.schema.json",
+  "title": "xo sessionslist — adapter-owned per-session index",
+  "description": "One row per cowork session. Written by the runtime adapters (services/cowork_agent/adapters/claude_code/adapter.py, services/cowork_agent/adapters/openclaw/transcript.py) at session start AND on every subsequent usage update. NEVER written by agents (AGENTS.md §1) and NEVER written by the watcher — the watcher keeps its augmenting fields in the sibling `sessions-augment.json` file (see docs/watcher-design.md §3.7). The top-level object is keyed by the composite session id `<backend>:<agent_id>:<surface>:<8hex>` produced by the adapter (e.g. `claude:blackhole:web:67a1ac06`).",
+  "type": "object",
+  "additionalProperties": { "$ref": "#/definitions/session_row" },
+  "definitions": {
+    "session_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "nativeSessionId", "directory", "backend", "updatedAt"],
+      "properties": {
+        "sessionId":       { "type": "string", "description": "Cowork session UUID written by the adapter at session start (`adapters/claude_code/adapter.py:121`). DIFFERENT from the composite top-level key, which is `<backend>:<agent_id>:<surface>:<8hex>`. The composite key is the row's true identity; this inner UUID is used by some legacy lookups." },
+        "nativeSessionId": { "type": "string", "description": "The runtime's own session id (e.g. Claude Code's per-jsonl UUID). May be empty string before the runtime has emitted its first event." },
+        "directory":       { "type": "string", "description": "Absolute path to the project the session is running in. Stored for adapter use; STRIPPED before any BFF response (see docs/watcher-design.md §7.3)." },
+        "backend":         { "type": "string", "enum": ["claude_code", "openclaw", "codex"], "description": "Runtime that owns this session." },
+        "updatedAt":       { "type": "integer", "minimum": 0, "description": "Epoch milliseconds of the most recent adapter write to this row." },
+        "usage":           { "$ref": "#/definitions/usage" }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens":                { "type": "integer", "minimum": 0 },
+        "output_tokens":               { "type": "integer", "minimum": 0 },
+        "cache_creation_input_tokens": { "type": "integer", "minimum": 0 },
+        "cache_read_input_tokens":     { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

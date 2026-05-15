@@ -78,7 +78,7 @@ def parse_jsonl(path: Path) -> list[dict]:
 
 
 def derive_title(records: list[dict]) -> str:
-    """Extract a title from the first user message text."""
+    """Extract a title from the first user message text (OpenClaw/simplified format)."""
     for r in records:
         if r.get("type") == "message" and r.get("message", {}).get("role") == "user":
             content = r["message"].get("content", [])
@@ -88,6 +88,27 @@ def derive_title(records: list[dict]) -> str:
                     if text.startswith("Read HEARTBEAT.md"):
                         continue
                     return text[:80] + ("..." if len(text) > 80 else "")
+    return "Untitled Session"
+
+
+def derive_title_native_claude(records: list[dict]) -> str:
+    """Extract a title from native Claude Code JSONL records (type=user/assistant)."""
+    for r in records:
+        if r.get("type") != "user":
+            continue
+        msg = r.get("message", {})
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+        else:
+            continue
+        if text and not text.startswith("Read HEARTBEAT.md"):
+            return text[:80] + ("..." if len(text) > 80 else "")
     return "Untitled Session"
 
 
