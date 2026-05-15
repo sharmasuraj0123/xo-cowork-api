@@ -1,9 +1,17 @@
 <div align="center">
 
+<a href="https://xo.builders">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/xo-logo.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/xo-logo-light.svg">
+    <img src="brand/xo-logo-light.svg" alt="XO" width="96" height="96">
+  </picture>
+</a>
+
 # xo-cowork-api
 
 **The local control plane for AI coding agents.**
-One workspace, many runtimes — Claude Code, OpenClaw, Codex, and whatever comes next.
+One workspace, many runtimes — Claude Code, OpenClaw, Codex, Hermes, and whatever comes next.
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -36,15 +44,16 @@ It does **not** train models, run inference, or compete with the agents — it s
        │   │  Runtime adapters   │    │  Connector services         │   │
        │   │   • Claude Code     │    │   • Google Drive (rclone)   │   │
        │   │   • OpenClaw        │    │   • OneDrive (rclone)       │   │
-       │   │   • Codex (partial) │    │   • GitHub (PAT + gh CLI)   │   │
-       │   │   • + plug your own │    │   • Vercel (OAuth + DCR)    │   │
-       │   └─────────────────────┘    │   • Manus (API key)         │   │
-       │                              └─────────────────────────────┘   │
+       │   │   • Hermes          │    │   • GitHub (PAT + gh CLI)   │   │
+       │   │   • Codex (partial) │    │   • Vercel (OAuth + DCR)    │   │
+       │   │   • + plug your own │    │   • Manus (API key)         │   │
+       │   └─────────────────────┘    └─────────────────────────────┘   │
        └─────┬─────────────────────────────────────────────┬───────────┘
              │                                             │
              ▼                                             ▼
        runtimes on disk                              xo-swarm-api (cloud)
-       ~/.claude/  ~/.openclaw/  ~/.codex/           Clerk auth + usage sync
+       ~/.claude/  ~/.openclaw/                     Clerk auth + usage sync
+       ~/.hermes/  ~/.codex/
 ```
 
 ---
@@ -55,7 +64,7 @@ Every coding agent ships with its own session store, its own auth, its own todo 
 
 `xo-cowork-api` is the part of the [XO Cowork](https://xo.builders) stack that puts a uniform API in front of all of them, keeps the project folder portable and sharing-safe by construction, and gives you back something you can build a product on.
 
-- 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code and OpenClaw are first-class; Codex is partial; new runtimes plug in without router changes.
+- 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code, OpenClaw, and Hermes are first-class; Codex is partial; new runtimes plug in without router changes.
 - 🗂️ **Sharing-safe project model** — chat content stays in the runtime's own storage (`~/.claude/`, `~/.openclaw/`). The project folder at `~/xo-projects/<id>/` is pure metadata + work files, structurally safe to share, fork, or rebase.
 - 📡 **SSE streaming with sane reconnects** — `event: text-delta` / `done` / `heartbeat` / `agent-error`, React-Strict-Mode-safe via a 600 s reconnect window, server-side single-flight on conflicts.
 - 🔌 **Connector hub** — Google Drive, OneDrive, GitHub (PAT + `gh` device flow), Vercel (OAuth 2.1 PKCE + Dynamic Client Registration), Manus. Each is dropped into `mcp-tokens.json` or `rclone.conf` and survives restarts.
@@ -155,6 +164,7 @@ Adapters live under `services/cowork_agent/adapters/`. Each one implements [`Bas
 |---|---|---|---|
 | **Claude Code** | ✅ first-class | `~/.claude/projects/<encoded>/<sid>.jsonl` | `claude` CLI subprocess + `--output-format stream-json` |
 | **OpenClaw** | ✅ first-class | `~/.openclaw/agents/<a>/sessions/<sid>.jsonl` | HTTP gateway on `:18789` (OpenAI-compatible SSE) |
+| **Hermes** | ✅ first-class | `~/.hermes/profiles/<name>/` (or `~/.hermes/` for `default`) | `hermes` CLI subprocess + profile-based provider routing |
 | **Codex** | 🟡 partial — auth + legacy chat | `~/.codex/...` | `codex` CLI subprocess (via `/ask_question*` legacy path) |
 | **Your runtime** | 🔧 fork friendly | wherever you like | implement `BaseAgentAdapter`, register in `_REGISTRY`, drop a `commands.json` |
 
@@ -277,7 +287,7 @@ Maturity, honestly assessed (full breakdown in the [Architecture scorecard](http
 
 | Capability | Status |
 |---|---|
-| Multi-runtime adapter layer (Claude Code + OpenClaw) | ✅ ~85% — Codex still legacy-only |
+| Multi-runtime adapter layer (Claude Code + OpenClaw + Hermes) | ✅ ~90% — Codex still legacy-only |
 | Project ↔ agent decoupling + scaffold | ✅ ~90% |
 | Sharing-safe project folder | ✅ ~95% |
 | Memory subsystem (semantic / episodic / procedural / working) | ✅ ~90% |
@@ -313,7 +323,8 @@ xo-cowork-api/
 │   │   ├── adapters/                pluggable runtime plug-ins
 │   │   │   ├── base.py              BaseAgentAdapter (abstract)
 │   │   │   ├── openclaw/{adapter,streaming,usage}.py
-│   │   │   └── claude_code/{adapter,streaming}.py
+│   │   │   ├── claude_code/{adapter,streaming,models_status,providers_status}.py
+│   │   │   └── hermes/{adapter,models_status,dump,…}.py
 │   │   ├── project_layout.py        ~/xo-projects/ layout + scaffold_project
 │   │   ├── project_template/        bundled scaffold tree (AGENTS.md, .xo/, memory/, …)
 │   │   ├── sessions_io.py           cross-runtime session lookup
