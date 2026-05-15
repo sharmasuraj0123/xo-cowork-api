@@ -193,6 +193,15 @@ def _ensure_loaded() -> None:
         _DEFAULT = _MANIFESTS[requested]
     elif len(_MANIFESTS) == 1:
         _DEFAULT = next(iter(_MANIFESTS.values()))
+    elif "openclaw" in _MANIFESTS:
+        import warnings
+        available = ", ".join(sorted(_MANIFESTS))
+        warnings.warn(
+            f"Neither AGENT_NAME nor DEFAULT_AGENT is set. Defaulting to 'openclaw'. "
+            f"Add AGENT_NAME={'/'.join(sorted(_MANIFESTS))} (any among the supported) to your .env to silence this warning.",
+            stacklevel=2,
+        )
+        _DEFAULT = _MANIFESTS["openclaw"]
     else:
         available = ", ".join(sorted(_MANIFESTS))
         raise ValueError(
