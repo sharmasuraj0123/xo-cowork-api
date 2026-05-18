@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from services.cowork_agent.settings import CLAUDE_COWORK_DIR, _WORKSPACE_DOC_FILES
 from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR
 from services.cowork_agent.helpers import (
-    _path_must_be_under_home,
     _read_json_file_safe,
     _read_text_limited,
     _redact_secrets_nested,
@@ -27,13 +26,10 @@ from services.cowork_agent.helpers import (
 )
 from services.cowork_agent.adapters.openclaw.store import (
     _agent_model_to_display,
-    apply_agent_list_entry,
-    ensure_openclaw_agent_disk,
     find_agent_entry_index,
     list_agent_entries,
     load_openclaw_config,
     resolve_agent_workspace_dir,
-    write_openclaw_config,
 )
 from services.cowork_agent.project_layout import (
     project_dir,
@@ -133,26 +129,6 @@ def _agent_info_claude(agent_id: str, meta: dict) -> dict:
 
 
 # ── Internal helpers (module-private) ────────────────────────────────────────
-
-
-def _agent_info_for_id(cfg: dict, agent_id: str, display_name: str | None, description: str) -> dict:
-    """xo-cowork AgentInfo shape; `name` is the OpenClaw agent id so session.directory grouping matches."""
-    aid = normalize_agent_id(agent_id)
-    return {
-        "name": aid,
-        "description": description or display_name or aid,
-        "mode": "primary",
-        "tools": [],
-        "permissions": {"rules": []},
-        "system_prompt": None,
-        "temperature": None,
-        "metadata": {
-            "backend": "openclaw",
-            "openclaw_id": aid,
-            "display_name": display_name or aid,
-            "workspace": str(resolve_agent_workspace_dir(cfg, aid)),
-        },
-    }
 
 
 def _agent_info_hermes(profile_name: str) -> dict:
@@ -442,67 +418,6 @@ def get_agent_detail(agent_id: str) -> dict | None:
         "openclaw_global_auth": global_auth_summary,
         "backend": "openclaw",
     }
-
-
-def patch_agent_into_config(cfg: dict, agent_id: str, body: UpdateAgentBody) -> dict:
-    aid = normalize_agent_id(agent_id)
-    if find_agent_entry_index(list_agent_entries(cfg), aid) < 0:
-        ws_dir = resolve_agent_workspace_dir(cfg, aid)
-        cfg = apply_agent_list_entry(cfg, aid, aid, ws_dir)
-    entries = list_agent_entries(cfg)
-    idx = find_agent_entry_index(entries, aid)
-    if idx < 0:
-        raise RuntimeError("could not resolve agent in openclaw.json")
-    next_list = [dict(e) for e in entries]
-    entry = dict(next_list[idx])
-    if body.name is not None:
-        stripped = body.name.strip()
-        entry["name"] = stripped or aid
-    if body.workspace is not None:
-        ws = Path(body.workspace.strip()).expanduser().resolve()
-        if not _path_must_be_under_home(ws):
-            raise ValueError("workspace must resolve to a path under your home directory")
-        entry["workspace"] = str(ws)
-    if body.description is not None:
-        desc = body.description.strip()
-        ident = dict(entry.get("identity") or {})
-        if desc:
-            ident["bio"] = desc
-            entry["identity"] = ident
-        else:
-            ident.pop("bio", None)
-            if ident:
-                entry["identity"] = ident
-            else:
-                entry.pop("identity", None)
-    if body.model is not None:
-        m = body.model.strip()
-        if m:
-            entry["model"] = m
-        else:
-            entry.pop("model", None)
-    if body.identity_name is not None or body.identity_emoji is not None:
-        ident = dict(entry.get("identity") or {})
-        if body.identity_name is not None:
-            nv = body.identity_name.strip()
-            if nv:
-                ident["name"] = nv
-            else:
-                ident.pop("name", None)
-        if body.identity_emoji is not None:
-            ev = body.identity_emoji.strip()
-            if ev:
-                ident["emoji"] = ev
-            else:
-                ident.pop("emoji", None)
-        if ident:
-            entry["identity"] = ident
-        else:
-            entry.pop("identity", None)
-    next_list[idx] = entry
-    agents_block = dict(cfg.get("agents") or {})
-    agents_block["list"] = next_list
-    return {**cfg, "agents": agents_block}
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
