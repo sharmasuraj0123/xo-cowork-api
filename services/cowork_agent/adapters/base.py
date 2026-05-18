@@ -72,6 +72,14 @@ class BaseAgentAdapter(ABC):
         """
         return []
 
+    async def get_agent_detail(self, agent_id: str) -> dict[str, Any] | None:
+        """Return the full agent snapshot for GET /api/agents/{agent_id}.
+
+        Default returns None (i.e. "this backend doesn't own that id").
+        Override to expose this backend's per-agent detail.
+        """
+        return None
+
     async def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
         """Create a backend-specific agent. Returns the created AgentInfo.
 

@@ -208,6 +208,11 @@ class OpenclawAdapter(BaseAgentAdapter):
         from .agents_api import list_openclaw_agents
         return list_openclaw_agents()
 
+    async def get_agent_detail(self, agent_id: str) -> dict[str, Any] | None:
+        """Return the full OpenClaw agent snapshot, or None if not OpenClaw's."""
+        from .agents_api import get_openclaw_agent_detail
+        return get_openclaw_agent_detail(agent_id)
+
     async def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
         """Create an OpenClaw agent. Returns the AgentInfo dict.
 

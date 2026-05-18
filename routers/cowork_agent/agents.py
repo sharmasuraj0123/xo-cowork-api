@@ -15,22 +15,9 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.cowork_agent.settings import CLAUDE_COWORK_DIR, _WORKSPACE_DOC_FILES
+from services.cowork_agent.settings import CLAUDE_COWORK_DIR
 from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR
-from services.cowork_agent.helpers import (
-    _read_json_file_safe,
-    _read_text_limited,
-    _redact_secrets_nested,
-    _summarize_auth_profiles,
-    normalize_agent_id,
-)
-from services.cowork_agent.adapters.openclaw.store import (
-    _agent_model_to_display,
-    find_agent_entry_index,
-    list_agent_entries,
-    load_openclaw_config,
-    resolve_agent_workspace_dir,
-)
+from services.cowork_agent.helpers import normalize_agent_id
 from services.cowork_agent.project_layout import (
     project_dir,
     scaffold_project,
@@ -281,15 +268,17 @@ def _agent_detail_hermes(profile_name: str) -> dict:
     }
 
 
-def get_agent_detail(agent_id: str) -> dict | None:
+async def get_agent_detail(agent_id: str) -> dict | None:
     """
-    Full agent snapshot for the UI: OpenClaw config, workspace docs, on-disk models,
-    redacted auth, sessions index, and global auth summary.
+    Full agent snapshot for the UI: OpenClaw config, workspace docs, on-disk
+    models, redacted auth, sessions index, and global auth summary.
 
     Dispatch by backend (in order):
     - Claude Code: matches when ``.xo/agent.json`` exists for ``agent_id``.
     - Hermes: matches when ``agent_id`` is a profile under ``~/.hermes/profiles/``.
-    - OpenClaw: fallback when the openclaw agents dir contains ``agent_id``.
+    - OpenClaw: dispatched through ``AgentDispatcher("openclaw").get_agent_detail``,
+      which returns the full snapshot or ``None`` if the id isn't an OpenClaw agent.
+
     Returns ``None`` if no backend recognizes the id.
     """
     aid = normalize_agent_id(agent_id)
@@ -332,92 +321,9 @@ def get_agent_detail(agent_id: str) -> dict | None:
     if aid in list_all_profile_names():
         return _agent_detail_hermes(aid)
 
-    agent_root = AGENTS_DIR / aid
-    if not agent_root.is_dir():
-        return None
-
-    cfg = load_openclaw_config()
-    entries = list_agent_entries(cfg)
-    idx = find_agent_entry_index(entries, aid)
-    entry = dict(entries[idx]) if idx >= 0 else {}
-
-    display = entry.get("name") if isinstance(entry.get("name"), str) else None
-    desc = ""
-    identity_cfg: dict = {}
-    if isinstance(entry.get("identity"), dict):
-        identity_cfg = dict(entry["identity"])
-        bio = identity_cfg.get("bio")
-        if isinstance(bio, str):
-            desc = bio
-
-    ws_path = resolve_agent_workspace_dir(cfg, aid)
-    workspace_path_str = str(ws_path)
-    workspace_files: dict[str, str | None] = {}
-    for fname in _WORKSPACE_DOC_FILES:
-        content = _read_text_limited(ws_path / fname)
-        if content is not None:
-            workspace_files[fname] = content
-        elif (ws_path / fname).is_file():
-            workspace_files[fname] = ""
-
-    agent_disk = agent_root / "agent"
-    models_catalog = _read_json_file_safe(agent_disk / "models.json")
-    auth_state = _read_json_file_safe(agent_disk / "auth-state.json")
-    auth_profiles_raw = _read_json_file_safe(agent_disk / "auth-profiles.json")
-    auth_profiles_safe = None
-    if isinstance(auth_profiles_raw, dict):
-        auth_profiles_safe = _redact_secrets_nested(auth_profiles_raw)
-
-    sessions_index_path = agent_root / "sessions" / "sessions.json"
-    session_ids: list[str] = []
-    session_count = 0
-    idx_data = _read_json_file_safe(sessions_index_path)
-    if isinstance(idx_data, dict):
-        seen_ids: set[str] = set()
-        for _key, meta in idx_data.items():
-            if isinstance(meta, dict):
-                sid = meta.get("sessionId")
-                if isinstance(sid, str) and sid.strip():
-                    seen_ids.add(sid.strip())
-        session_count = len(seen_ids)
-        session_ids = sorted(seen_ids)[:80]
-
-    global_auth = (cfg.get("auth") or {}).get("profiles")
-    global_auth_summary = _summarize_auth_profiles(global_auth) if isinstance(global_auth, dict) else {}
-
-    agents_defaults = cfg.get("agents", {}).get("defaults")
-    if not isinstance(agents_defaults, dict):
-        agents_defaults = {}
-
-    return {
-        "id": aid,
-        "display_name": ((display or "").strip() or aid),
-        "description": desc,
-        "workspace": workspace_path_str,
-        "model": _agent_model_to_display(entry.get("model")),
-        "model_raw": entry.get("model"),
-        "identity": {
-            "name": identity_cfg.get("name") if isinstance(identity_cfg.get("name"), str) else None,
-            "emoji": identity_cfg.get("emoji") if isinstance(identity_cfg.get("emoji"), str) else None,
-            "bio": desc or None,
-        },
-        "config_entry": entry,
-        "agents_defaults": agents_defaults,
-        "workspace_files": workspace_files,
-        "on_disk": {
-            "agent_dir": str(agent_disk.resolve()),
-            "models_catalog": models_catalog,
-            "auth_state": auth_state,
-            "auth_profiles": auth_profiles_safe,
-        },
-        "sessions": {
-            "index_path": str(sessions_index_path.resolve()),
-            "count": session_count,
-            "session_ids": session_ids,
-        },
-        "openclaw_global_auth": global_auth_summary,
-        "backend": "openclaw",
-    }
+    # OpenClaw — dispatch through the adapter (Phase 6).
+    from services.cowork_agent.dispatcher import AgentDispatcher
+    return await AgentDispatcher("openclaw").get_agent_detail(aid)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -566,8 +472,8 @@ async def create_agent(body: CreateAgentBody):
 
 
 @router.get("/api/agents/{agent_id}")
-def get_agent(agent_id: str):
-    detail = get_agent_detail(agent_id)
+async def get_agent(agent_id: str):
+    detail = await get_agent_detail(agent_id)
     if not detail:
         return JSONResponse(status_code=404, content={"detail": f'Agent "{agent_id}" not found'})
     return detail
@@ -708,7 +614,7 @@ async def patch_agent(agent_id: str, body: UpdateAgentBody):
     # Claude Code agents don't support patch via OpenClaw mechanisms
     if _load_claude_agent(aid) is not None:
         if not body.model_fields_set:
-            detail = get_agent_detail(aid)
+            detail = await get_agent_detail(aid)
             return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
         # Update name/description in .agent.json
         meta = _load_claude_agent(aid) or {}
@@ -717,16 +623,15 @@ async def patch_agent(agent_id: str, body: UpdateAgentBody):
         if body.description is not None:
             meta["description"] = body.description.strip()
         _write_claude_agent(aid, meta)
-        detail = get_agent_detail(aid)
+        detail = await get_agent_detail(aid)
         return detail if detail else JSONResponse(status_code=500, content={"detail": "Failed to read agent after update"})
 
     # OpenClaw agent — dispatch through the adapter (Phase 5).
     if not (AGENTS_DIR / aid).is_dir():
         return JSONResponse(status_code=404, content={"detail": f'Agent "{aid}" not found'})
     if not body.model_fields_set:
-        # No-op patch: return current detail. get_agent_detail handles the
-        # OpenClaw branch directly today; Phase 6 may swap it to dispatcher.
-        detail = get_agent_detail(aid)
+        # No-op patch: return current detail.
+        detail = await get_agent_detail(aid)
         return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
 
     from services.cowork_agent.dispatcher import AgentDispatcher
@@ -742,5 +647,5 @@ async def patch_agent(agent_id: str, body: UpdateAgentBody):
         return JSONResponse(status_code=500, content={"detail": str(e)})
 
     # Return the full detail snapshot (richer than what update_agent returns).
-    detail = get_agent_detail(aid)
+    detail = await get_agent_detail(aid)
     return detail if detail else JSONResponse(status_code=500, content={"detail": "Failed to read agent after update"})

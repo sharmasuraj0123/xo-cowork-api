@@ -41,6 +41,9 @@ class AgentDispatcher:
     async def list_agents(self) -> list[dict[str, Any]]:
         return await self.adapter.list_agents()
 
+    async def get_agent_detail(self, agent_id: str) -> dict[str, Any] | None:
+        return await self.adapter.get_agent_detail(agent_id)
+
     async def list_sessions(self) -> list[dict[str, Any]]:
         return await self.adapter.list_sessions()
 
