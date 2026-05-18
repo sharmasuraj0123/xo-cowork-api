@@ -509,7 +509,7 @@ def patch_agent_into_config(cfg: dict, agent_id: str, body: UpdateAgentBody) -> 
 
 
 @router.get("/api/agents")
-def list_agents():
+async def list_agents():
     """Return the sidebar agents for the active backend (``AGENT_NAME`` env).
 
     With ``AGENT_NAME=hermes`` we surface only hermes profiles; openclaw and
@@ -541,27 +541,15 @@ def list_agents():
         for profile_name in list_all_profile_names():
             agents.append(_agent_info_hermes(profile_name))
     else:
-        cfg = load_openclaw_config()
-        entries = {normalize_agent_id(str(e.get("id", ""))): e for e in list_agent_entries(cfg)}
-        if AGENTS_DIR.exists():
-            for d in sorted(AGENTS_DIR.iterdir()):
-                if not d.is_dir():
-                    continue
-                aid = d.name
-                meta = entries.get(normalize_agent_id(aid), {})
-                display = meta.get("name") if isinstance(meta.get("name"), str) else None
-                desc = ""
-                if isinstance(meta.get("identity"), dict):
-                    ident = meta["identity"]
-                    if isinstance(ident.get("bio"), str):
-                        desc = ident["bio"]
-                agents.append(_agent_info_for_id(cfg, aid, display, desc))
+        # OpenClaw path now dispatches through the adapter (Phase 5).
+        from services.cowork_agent.dispatcher import AgentDispatcher
+        agents = await AgentDispatcher("openclaw").list_agents()
 
     return agents
 
 
 @router.post("/api/agents")
-def create_agent(body: CreateAgentBody):
+async def create_agent(body: CreateAgentBody):
     display_name = body.name.strip()
     agent_id = normalize_agent_id((body.id or body.name).strip())
     if agent_id == "main":
@@ -650,42 +638,16 @@ def create_agent(body: CreateAgentBody):
 
         return _agent_info_hermes(agent_id)
 
-    # OpenClaw agent (default)
-    cfg = load_openclaw_config()
-    existing_entries = list_agent_entries(cfg)
-    if find_agent_entry_index(existing_entries, agent_id) >= 0:
-        return JSONResponse(status_code=409, content={"detail": f'Agent "{agent_id}" already exists in openclaw.json.'})
-    if (AGENTS_DIR / agent_id).exists():
-        return JSONResponse(status_code=409, content={"detail": f'Agent directory "{agent_id}" already exists under ~/.openclaw/agents.'})
-
-    if body.workspace and body.workspace.strip():
-        ws = Path(body.workspace.strip()).expanduser().resolve()
-        if not _path_must_be_under_home(ws):
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "workspace must resolve to a path under your home directory."},
-            )
-        workspace_dir = ws
-    else:
-        # OpenClaw agents are not projects: default the workspace to the
-        # agent's openclaw home so the gateway has a real path to use, and
-        # nothing materializes a folder under xo-projects/ (which would
-        # pollute the project dropdown). Users pick a real project per chat.
-        workspace_dir = AGENTS_DIR / agent_id
-
+    # OpenClaw agent (default) — dispatches through the adapter (Phase 5).
+    from services.cowork_agent.dispatcher import AgentDispatcher
     try:
-        # OpenClaw agents live under ~/.openclaw/agents/<id>/ and are listed in
-        # ~/.openclaw/openclaw.json. They are NOT projects — do not scaffold a
-        # folder under xo-projects/. The project the user chats against is a
-        # separate workspace selection per chat.
-        next_cfg = apply_agent_list_entry(cfg, agent_id, display_name, workspace_dir)
-        write_openclaw_config(next_cfg)
-        ensure_openclaw_agent_disk(agent_id, workspace_dir)
+        return await AgentDispatcher("openclaw").create_agent(body.model_dump())
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except FileExistsError as e:
+        return JSONResponse(status_code=409, content={"detail": str(e)})
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": str(e)})
-
-    desc = description or display_name
-    return _agent_info_for_id(next_cfg, agent_id, display_name, desc)
 
 
 @router.get("/api/agents/{agent_id}")
@@ -771,7 +733,7 @@ def delete_agent(agent_id: str):
 
 
 @router.patch("/api/agents/{agent_id}")
-def patch_agent(agent_id: str, body: UpdateAgentBody):
+async def patch_agent(agent_id: str, body: UpdateAgentBody):
     aid = normalize_agent_id(agent_id)
 
     # Hermes profiles: only ``name`` is meaningful — it's the rename target.
@@ -843,18 +805,27 @@ def patch_agent(agent_id: str, body: UpdateAgentBody):
         detail = get_agent_detail(aid)
         return detail if detail else JSONResponse(status_code=500, content={"detail": "Failed to read agent after update"})
 
+    # OpenClaw agent — dispatch through the adapter (Phase 5).
     if not (AGENTS_DIR / aid).is_dir():
         return JSONResponse(status_code=404, content={"detail": f'Agent "{aid}" not found'})
     if not body.model_fields_set:
+        # No-op patch: return current detail. get_agent_detail handles the
+        # OpenClaw branch directly today; Phase 6 may swap it to dispatcher.
         detail = get_agent_detail(aid)
         return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    from services.cowork_agent.dispatcher import AgentDispatcher
     try:
-        cfg = load_openclaw_config()
-        next_cfg = patch_agent_into_config(cfg, aid, body)
-        write_openclaw_config(next_cfg)
+        await AgentDispatcher("openclaw").update_agent(
+            aid, body.model_dump(exclude_unset=True)
+        )
+    except KeyError as e:
+        return JSONResponse(status_code=404, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": str(e)})
+
+    # Return the full detail snapshot (richer than what update_agent returns).
     detail = get_agent_detail(aid)
     return detail if detail else JSONResponse(status_code=500, content={"detail": "Failed to read agent after update"})

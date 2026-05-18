@@ -35,3 +35,36 @@ class AgentDispatcher:
 
     async def health(self) -> dict[str, Any]:
         return await self.adapter.health()
+
+    # ── Read-side proxies (Phase 5) ───────────────────────────────────────────
+
+    async def list_agents(self) -> list[dict[str, Any]]:
+        return await self.adapter.list_agents()
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        return await self.adapter.list_sessions()
+
+    async def list_messages(self, session_id: str) -> list[dict[str, Any]]:
+        return await self.adapter.list_messages(session_id)
+
+    async def aggregate_usage(self, days: int = 30) -> dict[str, Any]:
+        return await self.adapter.aggregate_usage(days)
+
+    # ── Write-side proxies ────────────────────────────────────────────────────
+
+    async def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self.adapter.create_agent(body)
+
+    async def update_agent(self, agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        return await self.adapter.update_agent(agent_id, patch)
+
+    async def delete_agent(self, agent_id: str) -> bool:
+        return await self.adapter.delete_agent(agent_id)
+
+    # ── Configuration-time hooks ──────────────────────────────────────────────
+
+    def extra_routers(self) -> list[Any]:
+        return self.adapter.extra_routers()
+
+    def secrets_scope(self) -> Any | None:
+        return self.adapter.secrets_scope()

@@ -208,6 +208,28 @@ class OpenclawAdapter(BaseAgentAdapter):
         from .agents_api import list_openclaw_agents
         return list_openclaw_agents()
 
+    async def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Create an OpenClaw agent. Returns the AgentInfo dict.
+
+        Errors map to HTTP at the route layer:
+          - ``ValueError``      → 400
+          - ``FileExistsError`` → 409
+          - ``RuntimeError``    → 500
+        """
+        from .agents_api import create_openclaw_agent
+        return create_openclaw_agent(body)
+
+    async def update_agent(self, agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Patch an OpenClaw agent. Returns the updated AgentInfo.
+
+        Errors map to HTTP at the route layer:
+          - ``KeyError``     → 404
+          - ``ValueError``   → 400
+          - ``RuntimeError`` → 500
+        """
+        from .agents_api import update_openclaw_agent
+        return update_openclaw_agent(agent_id, patch)
+
     async def list_sessions(self) -> list[dict[str, Any]]:
         """Return SessionResponse dicts for every OpenClaw session.
 
