@@ -41,7 +41,7 @@ class OpenclawAdapter(BaseAgentAdapter):
         from services.cowork_agent.sessions_io import find_session_key
 
         if not session_id:
-            from services.cowork_agent.streaming import create_new_session
+            from services.cowork_agent.adapters.openclaw.sse_bridge import create_new_session
             agent = get_active_agent()
             oc_agent = "main"
             session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
@@ -110,7 +110,7 @@ class OpenclawAdapter(BaseAgentAdapter):
         from services.cowork_agent.adapters.openclaw.streaming import stream_to_normalized
         from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
         from services.cowork_agent.sessions_io import find_session_key
-        from services.cowork_agent.streaming import find_session_id_by_key
+        from services.cowork_agent.adapters.openclaw.sse_bridge import find_session_id_by_key
         from services.cowork_agent.settings import OPENCLAW_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id

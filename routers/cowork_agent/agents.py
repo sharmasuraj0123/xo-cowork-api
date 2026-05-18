@@ -24,7 +24,7 @@ from services.cowork_agent.helpers import (
     _summarize_auth_profiles,
     normalize_agent_id,
 )
-from services.cowork_agent.openclaw_store import (
+from services.cowork_agent.adapters.openclaw.store import (
     _agent_model_to_display,
     apply_agent_list_entry,
     ensure_openclaw_agent_disk,

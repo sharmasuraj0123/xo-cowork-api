@@ -28,6 +28,7 @@ from .usage import router as usage_router
 from .vercel import router as vercel_router
 from .workspace_memory import router as workspace_memory_router
 from .bff import bff_routers
+from .openclaw import openclaw_routers
 from .xo_projects_sync import router as xo_projects_sync_router
 
 all_routers: list[APIRouter] = [
@@ -50,5 +51,6 @@ all_routers: list[APIRouter] = [
     vercel_router,
     manus_router,
     *bff_routers,
+    *openclaw_routers,
     xo_projects_sync_router,
 ]

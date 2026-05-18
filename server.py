@@ -35,7 +35,6 @@ from routers.auth import (
 )
 from routers.claude_setup_token import router as claude_setup_token_router
 from routers.codex_setup import router as codex_setup_router
-from routers.openclaw_usage import router as openclaw_usage_router
 from routers.models import router as models_router
 from routers.channels import router as channels_router
 from routers.providers import router as providers_router
@@ -510,7 +509,6 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)
-app.include_router(openclaw_usage_router)
 app.include_router(models_router)
 app.include_router(channels_router)
 app.include_router(providers_router)

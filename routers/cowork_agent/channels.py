@@ -29,7 +29,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from services.cowork_agent.agent_registry import get_agent, get_active_agent
-from services.cowork_agent.openclaw_env import upsert_env_entry
+from services.cowork_agent.adapters.openclaw.env import upsert_env_entry
 from services.cowork_agent.hermes_env import upsert_hermes_env_entry
 
 router = APIRouter()

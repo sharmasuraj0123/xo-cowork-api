@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from services.cowork_agent.helpers import parse_jsonl
 from services.cowork_agent.hermes_state_db import load_hermes_session_records
-from services.cowork_agent.messages import convert_messages, convert_native_claude_messages
+from services.cowork_agent.adapters.openclaw.messages import convert_messages, convert_native_claude_messages
 from services.cowork_agent.sessions_io import (
     find_session_backend,
     find_session_file,

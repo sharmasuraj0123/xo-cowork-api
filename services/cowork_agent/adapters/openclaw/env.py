@@ -1,21 +1,14 @@
-import warnings
-warnings.warn(
-    "openclaw_env.py is deprecated. Use AgentDispatcher from dispatcher.py.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 """
-Helpers for `~/.openclaw/.env`.
+Helpers for `~/.openclaw/.env` — the OpenClaw adapter's env-file store.
 
 Two access patterns live on top of this file:
 
-* `routes/secrets.py` — whole-file read/write (the Settings → Env Vars UI).
-  Uses `load_env_entries` / `save_env_entries`, which operate on a
-  `[{key, value}, ...]` view and do NOT preserve comments or blank lines
-  (the UI has no representation for them).
-* `routes/config_routes.py` — single-key upsert (the onboarding "Save Key"
-  flow). Uses `upsert_env_entry`, a line-level edit that preserves
+* `routers/cowork_agent/secrets.py` — whole-file read/write (the Settings →
+  Env Vars UI). Uses `load_env_entries` / `save_env_entries`, which operate
+  on a `[{key, value}, ...]` view and do NOT preserve comments or blank
+  lines (the UI has no representation for them).
+* `routers/cowork_agent/config.py` — single-key upsert (the onboarding "Save
+  Key" flow). Uses `upsert_env_entry`, a line-level edit that preserves
   comments, blank lines, and every other entry untouched.
 """
 

@@ -205,7 +205,7 @@ def find_hermes_profile(session_id: str) -> str | None:
 def load_hermes_session_records(session_id: str) -> list[dict[str, Any]]:
     """Return the session's messages as openclaw-shaped JSONL records.
 
-    The records are consumable by ``services.cowork_agent.messages.convert_messages``
+    The records are consumable by ``services.cowork_agent.adapters.openclaw.messages.convert_messages``
     unchanged — the unified messaging layer stays the single source of truth
     for the frontend ``MessageResponse`` shape.
 

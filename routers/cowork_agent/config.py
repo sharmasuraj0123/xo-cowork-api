@@ -22,9 +22,9 @@ from fastapi.responses import JSONResponse
 from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_MODEL_CAPABILITIES, load_agent_config
 from services.cowork_agent.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
-from services.cowork_agent.openclaw_env import upsert_env_entry
+from services.cowork_agent.adapters.openclaw.env import upsert_env_entry
 from services.cowork_agent.hermes_env import upsert_hermes_env_entry
-from services.cowork_agent.openclaw_store import list_agent_entries, load_openclaw_config
+from services.cowork_agent.adapters.openclaw.store import list_agent_entries, load_openclaw_config
 from services.cowork_agent.project_layout import xo_projects_root
 
 router = APIRouter()

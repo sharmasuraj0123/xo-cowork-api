@@ -9,7 +9,7 @@ of entries. The parser/serializer lives in `openclaw_env` so other route files
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.openclaw_env import load_env_entries, save_env_entries
+from services.cowork_agent.adapters.openclaw.env import load_env_entries, save_env_entries
 
 router = APIRouter()
 
