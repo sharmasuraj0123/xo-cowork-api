@@ -128,6 +128,41 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
     _write_index(index_path, index)
 
 
+def _patch_native_session_id(session_key: str, native_sid: str) -> bool:
+    """Write ``nativeSessionId`` into the agent's ``sessionslist.json`` entry.
+
+    Idempotent: if the entry already has a non-empty ``nativeSessionId``,
+    leave it alone. Returns True if a write happened (or if the entry already
+    matches), False if the entry doesn't exist.
+
+    Called from inside the streaming loop the moment the native session id is
+    first observed, so the mapping survives an SSE disconnect that would
+    otherwise cancel the stream before the post-loop persistence code ran
+    (and orphan the on-disk JSONL — see
+    ``docs/claude-code-message-disappearance-investigation-2026-05-18.md``).
+    """
+    if not session_key or not native_sid:
+        return False
+    agent_id = _agent_id_from_key(session_key)
+    index, index_path = _load_agent_index(agent_id)
+    meta = index.get(session_key)
+    if not isinstance(meta, dict):
+        return False
+    existing = meta.get("nativeSessionId") or ""
+    if existing == native_sid:
+        _native_map[session_key] = native_sid
+        return True
+    if existing:
+        # A different native id is already mapped — don't clobber. The caller
+        # likely resumed an existing session and a new turn produced a new id.
+        return False
+    meta["nativeSessionId"] = native_sid
+    meta["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    _write_index(index_path, index)
+    _native_map[session_key] = native_sid
+    return True
+
+
 def find_session_key_for_session_id(session_id: str) -> str | None:
     """Search xo-projects sessions for a matching session_id."""
     root = xo_projects_root()
@@ -366,8 +401,24 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 if event is None:
                     continue
 
+                if event.get("type") == "session_id":
+                    # Early ``system``/``init`` event — claude emits this on the
+                    # very first stdout line, before any tokens. Persist the
+                    # mapping immediately so an SSE disconnect mid-stream
+                    # doesn't orphan the on-disk JSONL.
+                    sid = event.get("session_id")
+                    if sid:
+                        native_session_id = sid
+                        _patch_native_session_id(sk or "", sid)
+                    continue  # internal bookkeeping, don't forward to SSE
+
                 if event.get("type") == "result":
-                    native_session_id = _extract_native_session_id(event)
+                    sid = _extract_native_session_id(event) or native_session_id
+                    if sid and sid != native_session_id:
+                        native_session_id = sid
+                    # Defensive re-persist in case system/init was missed.
+                    if sid:
+                        _patch_native_session_id(sk or "", sid)
                     usage = event.get("usage") or {}
                     model_id = event.get("model", "")
                     result_text = (event.get("result") or "").strip()
@@ -386,23 +437,29 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 yield {"type": "token", "token": result_text}
         finally:
             cleanup_session_mcp_config(mcp_config_path)
-
-        if sk and native_session_id:
-            # Persist nativeSessionId so resume works; messages live in ~/.claude/projects/.
-            agent_id_for_key = _agent_id_from_key(sk)
-            index, index_path = _load_agent_index(agent_id_for_key)
-            if sk in index:
-                existing_usage = index[sk].get("usage") or {}
-                index[sk]["nativeSessionId"] = native_session_id
-                index[sk]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-                index[sk]["usage"] = {
-                    "input_tokens": existing_usage.get("input_tokens", 0) + usage.get("input_tokens", 0),
-                    "output_tokens": existing_usage.get("output_tokens", 0) + usage.get("output_tokens", 0),
-                    "cache_creation_input_tokens": existing_usage.get("cache_creation_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
-                    "cache_read_input_tokens": existing_usage.get("cache_read_input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
-                }
-                _write_index(index_path, index)
-            _native_map[sk] = native_session_id
+            # Always roll up usage onto the sessions index, even on cancellation.
+            # ``nativeSessionId`` itself was already written from inside the loop
+            # via ``_patch_native_session_id``; this finally block just updates
+            # usage tokens and the timestamp so the sidebar reflects the latest
+            # turn. If we never observed a native session id (e.g. claude
+            # crashed before emitting any event), there is nothing to roll up.
+            if sk and native_session_id:
+                agent_id_for_key = _agent_id_from_key(sk)
+                index, index_path = _load_agent_index(agent_id_for_key)
+                meta = index.get(sk)
+                if isinstance(meta, dict):
+                    existing_usage = meta.get("usage") or {}
+                    if not meta.get("nativeSessionId"):
+                        meta["nativeSessionId"] = native_session_id
+                    meta["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    meta["usage"] = {
+                        "input_tokens": existing_usage.get("input_tokens", 0) + usage.get("input_tokens", 0),
+                        "output_tokens": existing_usage.get("output_tokens", 0) + usage.get("output_tokens", 0),
+                        "cache_creation_input_tokens": existing_usage.get("cache_creation_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
+                        "cache_read_input_tokens": existing_usage.get("cache_read_input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
+                    }
+                    _write_index(index_path, index)
+                _native_map[sk] = native_session_id
 
         yield {"done": True, "native_session_id": native_session_id}
 

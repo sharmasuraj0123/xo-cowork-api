@@ -23,6 +23,16 @@ def parse_stream_line(raw: bytes) -> dict | None:
 
     etype = event.get("type", "")
 
+    if etype == "system" and event.get("subtype") == "init":
+        # First event Claude CLI emits in stream-json mode — carries the
+        # native session_id BEFORE any tokens. Surface it as an internal
+        # event so the adapter can persist the nativeSessionId mapping
+        # before any chance of SSE cancellation.
+        sid = event.get("session_id") or event.get("sessionId")
+        if sid:
+            return {"type": "session_id", "session_id": sid}
+        return None
+
     if etype == "content_block_delta":
         delta = event.get("delta", {})
         if delta.get("type") == "text_delta":
