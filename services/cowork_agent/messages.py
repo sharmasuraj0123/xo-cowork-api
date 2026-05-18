@@ -7,7 +7,7 @@ a helper that emits the text/reasoning/tool-call/tool-result `parts` array the
 UI expects.
 """
 
-from services.cowork_agent.helpers import iso_now, short_id
+from services.cowork_agent.helpers import iso_now, short_id, strip_workspace_preamble
 
 
 def _normalize_content(msg: dict) -> str:
@@ -90,12 +90,18 @@ def _convert_user_parts(msg_id, session_id, timestamp, msg):
     parts = []
     for block in msg.get("content", []):
         if block.get("type") == "text":
+            # Strip the workspace-context preamble appended by the frontend
+            # in project-scoped chats; the model reads it from the JSONL but
+            # the UI shouldn't render it as part of the user bubble.
+            text = strip_workspace_preamble(block.get("text", ""))
+            if not text:
+                continue
             parts.append({
                 "id": f"{msg_id}_p{len(parts)}",
                 "message_id": msg_id,
                 "session_id": session_id,
                 "time_created": timestamp,
-                "data": {"type": "text", "text": block["text"]},
+                "data": {"type": "text", "text": text},
             })
     return parts
 
@@ -249,6 +255,11 @@ def convert_native_claude_messages(session_id: str, records: list[dict]) -> list
                             if is_error:
                                 part["data"]["state"]["status"] = "error"
                             break
+
+            # Strip the workspace-context preamble appended by the frontend
+            # in project-scoped chats. The model still reads the full prompt
+            # from the JSONL; this only affects what the UI shows.
+            text = strip_workspace_preamble(text)
 
             if text and text == last_user_content:
                 continue
