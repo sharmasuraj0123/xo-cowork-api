@@ -7,6 +7,10 @@ main.tf
 
 .claude/
 
+# Runtime state — composio_action_prefs.json holds per-action toggles,
+# install-specific; not committed.
+data/
+
 # Python
 __pycache__/
 *.py[cod]
