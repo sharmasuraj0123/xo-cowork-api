@@ -403,7 +403,7 @@ def _run_agent_setup() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _xo_cowork_lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
     # Done synchronously so the API doesn't accept requests until the
@@ -539,6 +539,19 @@ async def lifespan(app: FastAPI):
     print("👋 Shutting down XO Cowork API Server...")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Composed lifespan: run the local MCP session manager alongside the
+    existing startup/shutdown body. The StreamableHTTPSessionManager has to
+    be active for /mcp/cowork to serve requests.
+    """
+    from services.cowork_mcp import mcp_server as _cowork_mcp_server
+
+    async with _cowork_mcp_server.session_manager.run():
+        async with _xo_cowork_lifespan(app):
+            yield
+
+
 app = FastAPI(
     title="XO Cowork API",
     description="XO Cowork API - Claude Code Interface",
@@ -571,6 +584,12 @@ app.include_router(providers_router)
 from routers.cowork_agent import all_routers as cowork_agent_routers
 for _r in cowork_agent_routers:
     app.include_router(_r)
+
+# Local MCP server — composio_list_tools + composio_execute meta-tools so
+# gateways (OpenClaw / Hermes / Claude Code) carry 2 tools instead of every
+# action of every connected toolkit. See services/cowork_mcp.py.
+from services.cowork_mcp import mcp_app as _cowork_mcp_app
+app.mount("/mcp/cowork", _cowork_mcp_app)
 
 # =============================================================================
 # Endpoints
