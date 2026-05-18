@@ -32,7 +32,7 @@ class OpenclawAdapter(BaseAgentAdapter):
           an OpenClaw session and returns accumulated response text.
         - Existing session: streams to OpenClaw and accumulates the response.
         """
-        from services.cowork_agent.settings import (
+        from .settings import (
             OPENCLAW_API_URL,
             OPENCLAW_GATEWAY_TOKEN,
             OPENCLAW_MODEL,
@@ -111,7 +111,7 @@ class OpenclawAdapter(BaseAgentAdapter):
         from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
         from services.cowork_agent.sessions_io import find_session_key
         from services.cowork_agent.adapters.openclaw.sse_bridge import find_session_id_by_key
-        from services.cowork_agent.settings import OPENCLAW_MODEL
+        from .settings import OPENCLAW_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
         if not session_id:
@@ -184,7 +184,7 @@ class OpenclawAdapter(BaseAgentAdapter):
     async def health(self) -> dict[str, Any]:
         """Ping the OpenClaw API URL to determine liveness."""
         import httpx
-        from services.cowork_agent.settings import OPENCLAW_API_URL, OPENCLAW_GATEWAY_TOKEN
+        from .settings import OPENCLAW_API_URL, OPENCLAW_GATEWAY_TOKEN
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:

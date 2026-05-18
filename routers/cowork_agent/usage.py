@@ -14,7 +14,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from services.cowork_agent.settings import AGENTS_DIR
+from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR
 from services.cowork_agent.helpers import iso_now, parse_jsonl, derive_title_native_claude
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.sessions_io import _find_native_claude_file, _resolve_index_path

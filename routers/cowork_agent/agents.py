@@ -15,7 +15,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, _WORKSPACE_DOC_FILES
+from services.cowork_agent.settings import CLAUDE_COWORK_DIR, _WORKSPACE_DOC_FILES
+from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR
 from services.cowork_agent.helpers import (
     _path_must_be_under_home,
     _read_json_file_safe,

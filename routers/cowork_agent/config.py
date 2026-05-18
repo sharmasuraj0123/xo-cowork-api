@@ -19,7 +19,8 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_MODEL_CAPABILITIES, load_agent_config
+from services.cowork_agent.settings import CLAUDE_COWORK_DIR, load_agent_config
+from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR, OPENCLAW_MODEL_CAPABILITIES
 from services.cowork_agent.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
 from services.cowork_agent.adapters.openclaw.env import upsert_env_entry

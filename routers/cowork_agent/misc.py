@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter
 
-from services.cowork_agent.settings import OPENCLAW_API_URL, OPENCLAW_JSON
+from services.cowork_agent.adapters.openclaw.settings import OPENCLAW_API_URL, OPENCLAW_JSON
 
 router = APIRouter()
 

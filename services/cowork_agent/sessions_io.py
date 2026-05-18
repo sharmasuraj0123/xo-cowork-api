@@ -22,7 +22,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.settings import AGENTS_DIR, OPENCLAW_DIR
+from services.cowork_agent.adapters.openclaw.settings import AGENTS_DIR, OPENCLAW_DIR
 from services.cowork_agent.helpers import (
     derive_title,
     derive_title_native_claude,

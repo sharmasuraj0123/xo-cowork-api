@@ -13,7 +13,7 @@ from typing import AsyncIterator
 
 import httpx
 
-from services.cowork_agent.settings import (
+from .settings import (
     OPENCLAW_API_URL,
     OPENCLAW_GATEWAY_TOKEN,
     OPENCLAW_MODEL,

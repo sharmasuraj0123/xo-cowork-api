@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.cowork_agent.project_layout import xo_projects_root
-from services.cowork_agent.settings import AGENTS_DIR
+from .settings import AGENTS_DIR
 
 
 def _sum_usage(session_id: str, agent_name: str) -> dict | None:
