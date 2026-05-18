@@ -5,19 +5,18 @@ Houses the grab-bag of small endpoints the frontend pings to check for
 optional integrations (Ollama, Codex, plugins, MCP, connectors, channels)
 and to populate empty UI lists (tools, skills, automations, active chats).
 
-Most of these are stubs returning empty / disabled states. A few
-(`/api/channels/openclaw/status`, `/api/codex/status`) do real work: probing
-the OpenClaw gateway or scanning auth profiles.
+Most of these are stubs returning empty / disabled states.
+``/api/codex/status`` does real work — scanning auth profiles inside
+openclaw.json. The OpenClaw gateway probe (``/api/channels/openclaw/status``)
+was moved into the openclaw subpackage during Phase 6c.
 """
 
 import json
 from pathlib import Path
-from urllib.parse import urlparse
 
-import httpx
 from fastapi import APIRouter
 
-from services.cowork_agent.adapters.openclaw.settings import OPENCLAW_API_URL, OPENCLAW_JSON
+from services.cowork_agent.adapters.openclaw.settings import OPENCLAW_JSON
 
 router = APIRouter()
 
@@ -113,24 +112,6 @@ def ollama_status():
 
 
 # ── Active integration probes ────────────────────────────────────────────────
-
-
-@router.get("/api/channels/openclaw/status")
-def openclaw_status():
-    """Check if OpenClaw gateway is reachable."""
-    parsed = urlparse(OPENCLAW_API_URL)
-    port = parsed.port or 18789
-    try:
-        resp = httpx.get(OPENCLAW_API_URL, timeout=3.0)
-        running = resp.status_code in (200, 405)
-    except Exception:
-        running = False
-    return {
-        "installed": True,
-        "running": running,
-        "port": port if running else None,
-        "ws_url": None,
-    }
 
 
 @router.get("/api/codex/status")

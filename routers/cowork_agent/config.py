@@ -1,14 +1,17 @@
 """
 Configuration / provider / model-list endpoints.
 
-Groups `/api/config/*` (api-key, providers, openclaw, openyak-account,
-ollama, local, openai-subscription) and the per-agent model listing
-(`/api/models`). Responses here shape what the UI sees in provider menus
-and the settings screen.
+Groups ``/api/config/*`` (api-key, providers, openyak-account, ollama,
+local, openai-subscription, ``agents/{name}``, ``workspace``) and the
+per-agent model listing (``/api/models``). Responses here shape what the
+UI sees in provider menus and the settings screen.
+
+The OpenClaw-specific ``/api/config/openclaw`` endpoint was moved into
+the openclaw subpackage during Phase 6c.
 
 Provider onboarding recipes now come from the active agent's manifest
-(`config/agents/<agent>.json` → `providers.*`) instead of an inline dict,
-so adding a provider (or swapping agents) is a config change.
+(``config/agents/<agent>.json`` → ``providers.*``) instead of an inline
+dict, so adding a provider (or swapping agents) is a config change.
 """
 
 import asyncio
@@ -338,15 +341,6 @@ def ollama_config():
 @router.get("/api/config/local")
 def local_provider():
     return {"available": False}
-
-
-@router.get("/api/config/openclaw")
-def get_openclaw_config():
-    """Return the full agent config file (e.g. openclaw.json) with sensitive fields masked."""
-    cfg = load_openclaw_config()
-    if not cfg:
-        return JSONResponse(status_code=404, content={"detail": f"{_AGENT.config_file.name} not found"})
-    return _mask_sensitive(cfg)
 
 
 @router.get("/api/config/agents/{name}")
