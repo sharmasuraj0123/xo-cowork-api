@@ -196,3 +196,65 @@ class OpenclawAdapter(BaseAgentAdapter):
                 return {"ok": ok, "gateway": "up" if ok else f"http_{resp.status_code}"}
         except Exception as exc:
             return {"ok": False, "gateway": str(exc)}
+
+    # ── Read-side BaseAgentAdapter contract (Phase 4) ──────────────────────────
+    #
+    # These are the parallel-path entries the shared routers will switch to
+    # in Phase 5. They delegate to dedicated helper modules under
+    # adapters/openclaw/ so the route handlers stay untouched for now.
+
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """Return AgentInfo dicts for every OpenClaw agent on disk."""
+        from .agents_api import list_openclaw_agents
+        return list_openclaw_agents()
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """Return SessionResponse dicts for every OpenClaw session.
+
+        Scans both project-tied (``~/xo-projects/<id>/.xo/sessions/``) and
+        native (``~/.openclaw/agents/<id>/sessions/``) source paths, with
+        sessionId-based de-duplication.
+        """
+        from .sessions_api import list_openclaw_sessions
+        return list_openclaw_sessions()
+
+    async def list_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """Return MessageResponse dicts for an OpenClaw session.
+
+        Locates the native JSONL transcript and runs it through the
+        OpenClaw message converter. Returns [] if the session id isn't
+        known to OpenClaw.
+        """
+        from .sessions_api import find_openclaw_session_jsonl
+        from .messages import convert_messages
+        from services.cowork_agent.helpers import parse_jsonl
+
+        path = find_openclaw_session_jsonl(session_id)
+        if not path:
+            return []
+        try:
+            records = parse_jsonl(path)
+        except Exception:
+            return []
+        return convert_messages(session_id, records)
+
+    async def aggregate_usage(self, days: int = 30) -> dict[str, Any]:
+        """Return the OpenClaw portion of the usage rollup.
+
+        Same response shape as ``GET /api/usage`` — totals, by_day,
+        by_model, by_session, response_time — populated from OpenClaw
+        sessions only. Phase 5/6's shared route will merge per-adapter
+        contributions.
+        """
+        from .usage_api import aggregate_openclaw_usage
+        return aggregate_openclaw_usage(days)
+
+    def extra_routers(self) -> list[Any]:
+        """Return the OpenClaw-specific APIRouters registered with the
+        ``routers/cowork_agent/openclaw/`` subpackage.
+
+        Today: just ``usage_dashboard``. Phase 6 will land 3 more
+        (agents, config, channels) extracted from the shared routers.
+        """
+        from routers.cowork_agent.openclaw import openclaw_routers
+        return list(openclaw_routers)
