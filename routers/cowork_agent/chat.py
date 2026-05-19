@@ -224,10 +224,11 @@ async def chat_prompt(request: Request):
         return JSONResponse(status_code=404, content={"detail": "Session not found"})
 
     if prep is not None:
-        # The adapter handled setup. ``session_id`` inside prep is the
-        # response value (e.g. the freshly-minted native id from the
-        # prefetch poll); the rest stays as the stashed stream_info.
-        response_session_id = prep.pop("session_id", session_id)
+        # The adapter handled setup. ``session_id`` inside prep doubles as
+        # the response value AND state the fast-path generator reads back
+        # (stream_openclaw_to_sse needs it for resume) — so keep it in
+        # active_streams, don't pop.
+        response_session_id = prep.get("session_id", session_id)
         prep["agent_name"] = agent_name  # so chat_stream can pick the right adapter
         stream_id = str(uuid.uuid4())
         active_streams[stream_id] = prep
