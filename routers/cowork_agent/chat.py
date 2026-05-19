@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.cowork_agent.chat_state import active_streams
-from services.cowork_agent.sessions_io import find_session_key
+from services.cowork_agent.adapters.openclaw.sessions_api import find_openclaw_session_key
 from services.cowork_agent.adapters.openclaw.sse_bridge import (
     create_new_session,
     emit_prefetched_sse,
@@ -238,7 +238,7 @@ async def chat_prompt(request: Request):
             return {"stream_id": stream_id, "session_id": new_session_id}
 
         # Existing openclaw session: look up the session key and stream directly
-        session_key = find_session_key(session_id)
+        session_key = find_openclaw_session_key(session_id)
         if not session_key:
             return JSONResponse(status_code=404, content={"detail": "Session not found"})
 

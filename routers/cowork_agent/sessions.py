@@ -19,8 +19,10 @@ from services.cowork_agent.sessions_io import (
     find_session_backend,
     find_session_file,
     load_all_sessions,
-    update_session_directory,
     update_claude_session_directory,
+)
+from services.cowork_agent.adapters.openclaw.sessions_api import (
+    update_openclaw_session_directory,
 )
 
 router = APIRouter()
@@ -113,7 +115,7 @@ async def update_session(session_id: str, request: Request):
     if not directory:
         return JSONResponse(status_code=400, content={"detail": "directory must be a non-empty string"})
 
-    updated = update_session_directory(session_id, directory)
+    updated = update_openclaw_session_directory(session_id, directory)
     if not updated:
         updated = update_claude_session_directory(session_id, directory)
     if not updated:

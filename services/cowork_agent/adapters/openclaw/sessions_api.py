@@ -11,6 +11,7 @@ shared routers call through the dispatcher.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .settings import AGENTS_DIR
@@ -196,3 +197,99 @@ def find_openclaw_session_jsonl(session_id: str) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def find_openclaw_session_key(session_id: str) -> str | None:
+    """Return the OpenClaw session key for a given session id, or None.
+
+    Walks two locations:
+    - ``~/.openclaw/agents/<a>/sessions/sessions.json`` (native sessions)
+    - ``~/xo-projects/<id>/.xo/sessions/sessionslist.json`` (tee'd sessions,
+      both ``claude_code`` and ``openclaw`` rows — only openclaw rows carry
+      a session_key that the gateway understands).
+
+    Used by the OpenClaw adapter + chat fast-path; the session_key is the
+    header value OpenClaw's gateway requires for resume.
+    """
+    if AGENTS_DIR.exists():
+        for agent_dir in AGENTS_DIR.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            index_path = agent_dir / "sessions" / "sessions.json"
+            if not index_path.exists():
+                continue
+            try:
+                with open(index_path, encoding="utf-8") as f:
+                    index_data = json.load(f)
+            except Exception:
+                continue
+            for key, meta in index_data.items():
+                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
+                    return key
+
+    projects_root = xo_projects_root()
+    if projects_root.exists():
+        for agent_dir in projects_root.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                continue
+            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            if not idx_path:
+                continue
+            try:
+                with open(idx_path, encoding="utf-8") as f:
+                    index_data = json.load(f)
+            except Exception:
+                continue
+            for key, meta in index_data.items():
+                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
+                    return key
+
+    return None
+
+
+def update_openclaw_session_directory(session_id: str, directory: str) -> bool:
+    """Persist a selected workspace directory on the matching OpenClaw
+    ``sessions.json`` entry. Returns True on a successful write, False if
+    the session id wasn't found under any agent.
+
+    Records the change in the entry's ``directoryHistory`` (capped at 200
+    rows) plus the current ``directory`` and ``updatedAt`` fields.
+    """
+    if not AGENTS_DIR.exists():
+        return False
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    for agent_dir in AGENTS_DIR.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        index_path = agent_dir / "sessions" / "sessions.json"
+        if not index_path.exists():
+            continue
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                index_data = json.load(f)
+        except Exception:
+            continue
+
+        changed = False
+        for meta in index_data.values():
+            if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
+                continue
+            history = meta.get("directoryHistory")
+            if not isinstance(history, list):
+                history = []
+            history.append({"directory": directory, "selectedAt": now_ms})
+            meta["directoryHistory"] = history[-200:]
+            meta["directory"] = directory
+            meta["updatedAt"] = now_ms
+            changed = True
+            break
+
+        if changed:
+            index_path.write_text(
+                json.dumps(index_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+
+    return False

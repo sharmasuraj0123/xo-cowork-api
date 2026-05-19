@@ -38,17 +38,17 @@ class OpenclawAdapter(BaseAgentAdapter):
             OPENCLAW_MODEL,
         )
         from services.cowork_agent.agent_registry import get_active_agent
-        from services.cowork_agent.sessions_io import find_session_key
+        from .sessions_api import find_openclaw_session_key
 
         if not session_id:
-            from services.cowork_agent.adapters.openclaw.sse_bridge import create_new_session
+            from .sse_bridge import create_new_session
             agent = get_active_agent()
             oc_agent = "main"
             session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
             _key, native_id, response_text = await create_new_session(question, session_key=session_key)
             return {"message": response_text, "native_session_id": native_id}
 
-        session_key = find_session_key(session_id)
+        session_key = find_openclaw_session_key(session_id)
         if not session_key:
             raise ValueError(f"OpenClaw session key not found for session_id={session_id!r}")
 
@@ -107,10 +107,10 @@ class OpenclawAdapter(BaseAgentAdapter):
         Streaming via OpenClaw HTTP API, yielding normalized events.
         Wraps adapters.openclaw.streaming.stream_to_normalized.
         """
-        from services.cowork_agent.adapters.openclaw.streaming import stream_to_normalized
-        from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
-        from services.cowork_agent.sessions_io import find_session_key
-        from services.cowork_agent.adapters.openclaw.sse_bridge import find_session_id_by_key
+        from .streaming import stream_to_normalized
+        from .transcript import tee_exchange
+        from .sessions_api import find_openclaw_session_key
+        from .sse_bridge import find_session_id_by_key
         from .settings import OPENCLAW_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
@@ -140,7 +140,7 @@ class OpenclawAdapter(BaseAgentAdapter):
             return
 
         if session_id:
-            session_key = find_session_key(session_id)
+            session_key = find_openclaw_session_key(session_id)
             if not session_key:
                 yield {"type": "error", "error": f"Session key not found for {session_id!r}"}
                 yield {"done": True, "native_session_id": None}
