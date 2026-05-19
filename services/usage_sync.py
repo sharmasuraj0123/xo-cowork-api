@@ -191,15 +191,92 @@ def _aggregate_by_date(all_entries: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _empty_record(
+    workspace_id: str,
+    workspace_name,
+    project_id,
+    note: str,
+    report_date: str | None = None,
+) -> dict:
+    """Build a zero-valued daily record carrying a `note` for why data is missing."""
+    if not report_date:
+        report_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    return {
+        "report_date": report_date,
+        "workspace_id": workspace_id,
+        "workspace_name": workspace_name,
+        "project_id": project_id,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_cache_write_tokens": 0,
+        "total_tokens": 0,
+        "total_cost": 0.0,
+        "input_cost": 0.0,
+        "output_cost": 0.0,
+        "cache_read_cost": 0.0,
+        "cache_write_cost": 0.0,
+        "total_messages": 0,
+        "total_sessions": 0,
+        "total_tool_calls": 0,
+        "model_usage": [],
+        "tool_usage": [],
+        "note": note,
+    }
+
+
+async def _post_records(records: list, daily: dict | None, state: dict) -> None:
+    """
+    POST records to xo-swarm-api. If `daily` is provided (real data path),
+    advance the watermark on success; otherwise (placeholder path) leave it
+    alone so the next cycle retries.
+    """
+    from routers.auth import get_auth_token
+
+    token = get_auth_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"{CHAT_API_BASE_URL.rstrip('/')}{USAGE_REPORT_PATH}"
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            response = await client.post(url, json={"records": records}, headers=headers)
+
+        if response.status_code == 200:
+            result = response.json()
+            upserted = result.get("upserted", 0)
+            if daily is None:
+                print(f"{_timestamp_prefix()} usage_sync: posted placeholder record (note carried; watermark not advanced)")
+            else:
+                print(f"{_timestamp_prefix()} usage_sync: successfully synced {upserted} day(s) to swarm")
+                # Advance watermark to yesterday (not today) so today's partial
+                # data gets re-sent and updated on the next cycle.
+                yesterday = (
+                    datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+                ).strftime("%Y-%m-%d")
+                latest_date = max(daily.keys())
+                # Use the earlier of yesterday and the latest date we actually sent,
+                # so we never skip unsent dates.
+                watermark = min(yesterday, latest_date)
+                state["last_synced_date"] = watermark
+                state["last_sync_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                _save_sync_state(state)
+        else:
+            print(f"{_timestamp_prefix()} usage_sync: POST failed with {response.status_code}: {response.text[:200]}")
+    except Exception as e:
+        print(f"{_timestamp_prefix()} usage_sync: error posting to swarm (will retry next cycle): {e}")
+
+
 async def _run_sync(is_backfill: bool = False) -> None:
     """
     Read all JSONL files, aggregate by date, POST to xo-swarm-api.
 
+    Always sends at least one record to swarm: when discovery/parsing yields
+    no usable data, posts a zero-valued placeholder whose `note` column
+    explains why so the analytics surface still shows the sync ran.
+
     Args:
         is_backfill: If True, ignore watermark and process all historical data.
     """
-    from routers.auth import get_auth_token
-
     workspace_id = os.getenv("CODER_WORKSPACE_ID") or "unknown"
     workspace_name = os.getenv("CODER_WORKSPACE_NAME") or None
     project_id = os.getenv("XO_PROJECT_ID") or None
@@ -207,17 +284,39 @@ async def _run_sync(is_backfill: bool = False) -> None:
     state = _load_sync_state()
     last_synced_date = None if is_backfill else state.get("last_synced_date")
 
-    session_files = _discover_session_files(OPENCLAW_AGENT_ID)
+    try:
+        session_files = _discover_session_files(OPENCLAW_AGENT_ID)
+        discovery_error = None
+    except Exception as e:
+        session_files = []
+        discovery_error = str(e)
+
     if not session_files:
-        print(f"{_timestamp_prefix()} usage_sync: no session files found, skipping")
+        note = (
+            f"failed to discover openclaw session files: {discovery_error}"
+            if discovery_error
+            else "no openclaw session files found (agent has not produced any usage data yet)"
+        )
+        print(f"{_timestamp_prefix()} usage_sync: {note} — posting placeholder")
+        await _post_records(
+            [_empty_record(workspace_id, workspace_name, project_id, note)],
+            daily=None,
+            state=state,
+        )
         return
 
-    # Parse all session files and collect entries + per-date session counts
+    # Parse all session files and collect entries + per-date session counts.
+    # Per-file parse errors are tolerated so one corrupt file doesn't poison the batch.
     all_entries = []
     session_dates = defaultdict(set)  # date -> set of session file indices
+    parse_errors: list[str] = []
 
     for sf_idx, sf in enumerate(session_files):
-        _, entries = _parse_session_file(sf)
+        try:
+            _, entries = _parse_session_file(sf)
+        except Exception as e:
+            parse_errors.append(f"{os.path.basename(sf)}: {e}")
+            continue
 
         if last_synced_date:
             entries = [
@@ -232,11 +331,32 @@ async def _run_sync(is_backfill: bool = False) -> None:
         all_entries.extend(entries)
 
     if not all_entries:
-        print(f"{_timestamp_prefix()} usage_sync: no new entries since {last_synced_date}, skipping")
+        if parse_errors:
+            joined = "; ".join(parse_errors[:3])
+            extra = f" (+{len(parse_errors) - 3} more)" if len(parse_errors) > 3 else ""
+            note = f"failed to parse all {len(session_files)} session file(s): {joined}{extra}"
+        elif last_synced_date:
+            note = f"no new entries since watermark {last_synced_date}"
+        else:
+            note = "session files present but contained no assistant usage entries"
+        print(f"{_timestamp_prefix()} usage_sync: {note} — posting placeholder")
+        await _post_records(
+            [_empty_record(workspace_id, workspace_name, project_id, note)],
+            daily=None,
+            state=state,
+        )
         return
 
     # Aggregate by date
     daily = _aggregate_by_date(all_entries)
+
+    # If some files couldn't be parsed but others succeeded, annotate each day
+    # so the dashboard can flag the partial sync.
+    partial_note: str | None = None
+    if parse_errors:
+        joined = "; ".join(parse_errors[:3])
+        extra = f" (+{len(parse_errors) - 3} more)" if len(parse_errors) > 3 else ""
+        partial_note = f"partial: skipped {len(parse_errors)} unparseable file(s): {joined}{extra}"
 
     # Fill in session counts and workspace identifiers
     for date_str, day in daily.items():
@@ -244,41 +364,13 @@ async def _run_sync(is_backfill: bool = False) -> None:
         day["workspace_id"] = workspace_id
         day["workspace_name"] = workspace_name
         day["project_id"] = project_id
+        day["note"] = partial_note
 
     records = list(daily.values())
     if not records:
         return
 
-    # POST to xo-swarm-api
-    token = get_auth_token()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    url = f"{CHAT_API_BASE_URL.rstrip('/')}{USAGE_REPORT_PATH}"
-
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            response = await client.post(url, json={"records": records}, headers=headers)
-
-        if response.status_code == 200:
-            result = response.json()
-            upserted = result.get("upserted", 0)
-            print(f"{_timestamp_prefix()} usage_sync: successfully synced {upserted} day(s) to swarm")
-
-            # Advance watermark to yesterday (not today) so today's partial
-            # data gets re-sent and updated on the next cycle.
-            yesterday = (
-                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            latest_date = max(daily.keys())
-            # Use the earlier of yesterday and the latest date we actually sent,
-            # so we never skip unsent dates.
-            watermark = min(yesterday, latest_date)
-            state["last_synced_date"] = watermark
-            state["last_sync_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            _save_sync_state(state)
-        else:
-            print(f"{_timestamp_prefix()} usage_sync: POST failed with {response.status_code}: {response.text[:200]}")
-    except Exception as e:
-        print(f"{_timestamp_prefix()} usage_sync: error posting to swarm (will retry next cycle): {e}")
+    await _post_records(records, daily=daily, state=state)
 
 
 # ---------------------------------------------------------------------------
