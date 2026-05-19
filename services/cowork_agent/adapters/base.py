@@ -153,6 +153,48 @@ class BaseAgentAdapter(ABC):
         """
         return []
 
+    # ── Chat fast-path hooks (Phase 6d.3) ──────────────────────────────────────
+    #
+    # Adapters that natively produce SSE (e.g. OpenClaw) can opt into a
+    # fast-path that bypasses the dispatcher's normalized event-queue +
+    # keepalive loop. Default implementations make every backend use the
+    # generic dispatcher path; opt in by overriding both.
+
+    async def prepare_stream(
+        self,
+        text: str,
+        session_id: str | None,
+        body: dict[str, Any],
+        is_new_session: bool,
+        agent_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Set up a fast-path stream and return the ``stream_info`` dict the
+        route will stash in ``active_streams``. Return ``None`` to fall
+        through to the generic dispatcher path.
+
+        For new sessions the returned dict may include a ``session_id`` key
+        carrying the freshly-minted native session id — the route consumes
+        it for the response body and removes it from the stashed dict.
+
+        Raise ``KeyError`` when an existing ``session_id`` doesn't resolve
+        to a session this adapter owns. The route maps it to 404.
+        """
+        return None
+
+    def fast_path_stream(
+        self,
+        stream_info: dict[str, Any],
+        stream_id: str,
+    ) -> Any | None:
+        """Return an ``AsyncIterator[str]`` yielding raw SSE chunks for a
+        ``stream_info`` produced by this adapter's ``prepare_stream``.
+
+        Default returns ``None`` — the route uses the generic dispatcher
+        path. Typed as ``Any | None`` so this module stays
+        ``AsyncIterator``-import-free.
+        """
+        return None
+
     def secrets_scope(self) -> Any | None:
         """BFF secrets handle for /api/secrets/* — wraps the backend's
         env-file store.

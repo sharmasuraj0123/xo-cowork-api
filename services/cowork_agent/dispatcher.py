@@ -71,3 +71,24 @@ class AgentDispatcher:
 
     def secrets_scope(self) -> Any | None:
         return self.adapter.secrets_scope()
+
+    # ── Chat fast-path proxies (Phase 6d.3) ───────────────────────────────────
+
+    async def prepare_stream(
+        self,
+        text: str,
+        session_id: str | None,
+        body: dict[str, Any],
+        is_new_session: bool,
+        agent_id: str | None,
+    ) -> dict[str, Any] | None:
+        return await self.adapter.prepare_stream(
+            text, session_id, body, is_new_session, agent_id
+        )
+
+    def fast_path_stream(
+        self,
+        stream_info: dict[str, Any],
+        stream_id: str,
+    ) -> Any | None:
+        return self.adapter.fast_path_stream(stream_info, stream_id)

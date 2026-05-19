@@ -278,10 +278,84 @@ class OpenclawAdapter(BaseAgentAdapter):
 
     def extra_routers(self) -> list[Any]:
         """Return the OpenClaw-specific APIRouters registered with the
-        ``routers/cowork_agent/openclaw/`` subpackage.
-
-        Today: just ``usage_dashboard``. Phase 6 will land 3 more
-        (agents, config, channels) extracted from the shared routers.
-        """
+        ``routers/cowork_agent/openclaw/`` subpackage."""
         from routers.cowork_agent.openclaw import openclaw_routers
         return list(openclaw_routers)
+
+    # ── Chat fast-path: prefetch new sessions, passthrough OpenClaw SSE ────────
+
+    async def prepare_stream(
+        self,
+        text: str,
+        session_id: str | None,
+        body: dict[str, Any],
+        is_new_session: bool,
+        agent_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Set up an OpenClaw fast-path stream.
+
+        For new sessions: starts ``create_new_session`` in the background
+        and polls briefly for the native session id, returning a stream_info
+        dict the route stashes. Existing sessions: resolves the session_key
+        the gateway needs for resume.
+
+        Raises ``KeyError`` if the existing session_id isn't known to
+        OpenClaw — the route maps to 404.
+        """
+        import asyncio
+        from .sse_bridge import (
+            create_new_session,
+            find_session_id_by_key,
+            openclaw_agent_id_from_prompt_body,
+        )
+        from .sessions_api import find_openclaw_session_key
+
+        if is_new_session:
+            oc_agent = openclaw_agent_id_from_prompt_body(body)
+            session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
+            task = asyncio.create_task(
+                create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
+            )
+
+            new_session_id = None
+            for _ in range(20):
+                await asyncio.sleep(1.0)
+                new_session_id = find_session_id_by_key(session_key)
+                if new_session_id:
+                    break
+
+            return {
+                "task": task,
+                "prefetched": True,
+                "agent_id": agent_id,
+                "session_id": new_session_id,  # consumed by the route for the response
+            }
+
+        session_key = find_openclaw_session_key(session_id)
+        if not session_key:
+            raise KeyError(f"Session {session_id!r} not found")
+
+        return {
+            "session_id": session_id,
+            "text": text,
+            "session_key": session_key,
+            "agent_id": agent_id,
+        }
+
+    def fast_path_stream(
+        self,
+        stream_info: dict[str, Any],
+        stream_id: str,
+    ) -> Any | None:
+        """Return the SSE generator for a stream_info this adapter produced.
+
+        - ``prefetched`` → replay the bootstrap response as fake SSE
+        - ``session_key`` → live OpenClaw streaming via the gateway
+        """
+        if stream_info.get("prefetched"):
+            from .sse_bridge import emit_prefetched_sse
+            return emit_prefetched_sse(stream_id)
+        if stream_info.get("session_key"):
+            from .sse_bridge import stream_openclaw_to_sse
+            return stream_openclaw_to_sse(stream_id)
+        return None

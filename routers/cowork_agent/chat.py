@@ -1,10 +1,12 @@
 """
 Chat prompt / streaming / abort routes.
 
-OpenClaw: direct streaming path (chat_prompt prefetches new-session bootstrap,
-chat_stream dispatches to emit_prefetched_sse for new sessions or
-stream_openclaw_to_sse for existing ones). All other agents go through
-AgentDispatcher → adapter.stream() via _dispatcher_sse.
+Dispatch model: every chat goes through ``AgentDispatcher``. Adapters that
+natively produce SSE (e.g. OpenClaw) opt into a fast path via
+``adapter.prepare_stream`` + ``adapter.fast_path_stream``; adapters that
+don't fall through to the generic ``_dispatcher_sse`` loop.
+
+The router itself has no per-backend knowledge.
 """
 
 import asyncio
@@ -17,14 +19,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.cowork_agent.chat_state import active_streams
-from services.cowork_agent.adapters.openclaw.sessions_api import find_openclaw_session_key
-from services.cowork_agent.adapters.openclaw.sse_bridge import (
-    create_new_session,
-    emit_prefetched_sse,
-    find_session_id_by_key,
-    openclaw_agent_id_from_prompt_body,
-    stream_openclaw_to_sse,
-)
 
 # Tracks recently-started streams so a fast reconnect (e.g. navigation-caused
 # double-mount) gets a graceful done event rather than "Stream not found".
@@ -213,45 +207,33 @@ async def chat_prompt(request: Request):
             except Exception:
                 pass
 
-    # OpenClaw: direct streaming path (dev-branch behavior).
-    if agent_name == "openclaw":
-        if is_new_session:
-            oc_agent = openclaw_agent_id_from_prompt_body(body)
-            session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
-            task = asyncio.create_task(
-                create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
-            )
+    # Adapter fast-path opt-in (e.g. OpenClaw's prefetch). Default impl on
+    # BaseAgentAdapter returns None → we fall through to the generic
+    # dispatcher path below.
+    from services.cowork_agent.dispatcher import AgentDispatcher
+    try:
+        dispatcher = AgentDispatcher(agent_name)
+    except (KeyError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-            new_session_id = None
-            for _ in range(20):
-                await asyncio.sleep(1.0)
-                new_session_id = find_session_id_by_key(session_key)
-                if new_session_id:
-                    break
+    try:
+        prep = await dispatcher.prepare_stream(
+            text, session_id, body, is_new_session, agent_id
+        )
+    except KeyError:
+        return JSONResponse(status_code=404, content={"detail": "Session not found"})
 
-            stream_id = str(uuid.uuid4())
-            active_streams[stream_id] = {
-                "task": task,
-                "prefetched": True,
-                "agent_id": agent_id,
-            }
-            return {"stream_id": stream_id, "session_id": new_session_id}
-
-        # Existing openclaw session: look up the session key and stream directly
-        session_key = find_openclaw_session_key(session_id)
-        if not session_key:
-            return JSONResponse(status_code=404, content={"detail": "Session not found"})
-
+    if prep is not None:
+        # The adapter handled setup. ``session_id`` inside prep is the
+        # response value (e.g. the freshly-minted native id from the
+        # prefetch poll); the rest stays as the stashed stream_info.
+        response_session_id = prep.pop("session_id", session_id)
+        prep["agent_name"] = agent_name  # so chat_stream can pick the right adapter
         stream_id = str(uuid.uuid4())
-        active_streams[stream_id] = {
-            "session_id": session_id,
-            "text": text,
-            "session_key": session_key,
-            "agent_id": agent_id,
-        }
-        return {"stream_id": stream_id, "session_id": session_id}
+        active_streams[stream_id] = prep
+        return {"stream_id": stream_id, "session_id": response_session_id}
 
-    # Non-openclaw agents: route through AgentDispatcher.
+    # Generic dispatcher path — adapter declined the fast path.
     our_session_id = str(uuid.uuid4()) if is_new_session else session_id
     stream_id = str(uuid.uuid4())
     active_streams[stream_id] = {
@@ -296,35 +278,44 @@ async def chat_stream(stream_id: str):
             async def not_found():
                 yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': 'Stream not found'})}\n\n"
             generator = not_found()
-    elif stream_info.get("prefetched"):
-        # OpenClaw new session — replay the bootstrap response as fake SSE.
-        generator = emit_prefetched_sse(stream_id)
-    elif stream_info.get("session_key"):
-        # OpenClaw existing session — live stream from the gateway.
-        generator = stream_openclaw_to_sse(stream_id)
-    elif stream_info.get("agent_name"):
-        # Non-openclaw agents — dispatcher path with reconnect signal.
-        active_streams.pop(stream_id, None)
-        done_event = asyncio.Event()
-        _recently_started[stream_id] = {
-            "session_id": stream_info.get("our_session_id"),
-            "started_at": now,
-            "done_event": done_event,
-        }
-        session_id_out: list = []
-        async def _dispatcher_with_signal():
-            try:
-                async for chunk in _dispatcher_sse(stream_info, session_id_out):
-                    yield chunk
-            finally:
-                if session_id_out:
-                    _recently_started[stream_id]["session_id"] = session_id_out[0]
-                done_event.set()
-        generator = _dispatcher_with_signal()
     else:
-        async def unknown_stream():
-            yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': 'Unknown stream type'})}\n\n"
-        generator = unknown_stream()
+        agent_name = stream_info.get("agent_name")
+        if not agent_name:
+            async def unknown_stream():
+                yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': 'Unknown stream type'})}\n\n"
+            generator = unknown_stream()
+        else:
+            from services.cowork_agent.dispatcher import AgentDispatcher
+            try:
+                dispatcher = AgentDispatcher(agent_name)
+            except (KeyError, ValueError) as exc:
+                async def unknown_agent():
+                    yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': str(exc)})}\n\n"
+                generator = unknown_agent()
+            else:
+                # Adapter fast path? (OpenClaw: emit_prefetched_sse / stream_openclaw_to_sse.)
+                fast_gen = dispatcher.fast_path_stream(stream_info, stream_id)
+                if fast_gen is not None:
+                    generator = fast_gen
+                else:
+                    # Generic dispatcher path with reconnect signal.
+                    active_streams.pop(stream_id, None)
+                    done_event = asyncio.Event()
+                    _recently_started[stream_id] = {
+                        "session_id": stream_info.get("our_session_id"),
+                        "started_at": now,
+                        "done_event": done_event,
+                    }
+                    session_id_out: list = []
+                    async def _dispatcher_with_signal():
+                        try:
+                            async for chunk in _dispatcher_sse(stream_info, session_id_out):
+                                yield chunk
+                        finally:
+                            if session_id_out:
+                                _recently_started[stream_id]["session_id"] = session_id_out[0]
+                            done_event.set()
+                    generator = _dispatcher_with_signal()
 
     return StreamingResponse(
         generator,
