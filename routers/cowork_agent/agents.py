@@ -321,9 +321,14 @@ async def get_agent_detail(agent_id: str) -> dict | None:
     if aid in list_all_profile_names():
         return _agent_detail_hermes(aid)
 
-    # OpenClaw — dispatch through the adapter (Phase 6).
+    # OpenClaw — dispatch through the adapter (Phase 6). If OpenClaw isn't
+    # registered (downstream fork without it), return None — the caller treats
+    # that as "no backend recognised this id" and surfaces 404.
     from services.cowork_agent.dispatcher import AgentDispatcher
-    return await AgentDispatcher("openclaw").get_agent_detail(aid)
+    try:
+        return await AgentDispatcher("openclaw").get_agent_detail(aid)
+    except (KeyError, ValueError):
+        return None
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────

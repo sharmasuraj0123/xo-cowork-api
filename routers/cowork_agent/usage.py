@@ -40,8 +40,28 @@ async def usage(days: int = 30):
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # ── OpenClaw contribution: dispatched through the adapter (Phase 6b) ──────
+    # Falls back to an empty rollup if the OpenClaw adapter isn't registered
+    # (downstream fork running with only claude_code / hermes).
     from services.cowork_agent.dispatcher import AgentDispatcher
-    oc = await AgentDispatcher("openclaw").aggregate_usage(days)
+    try:
+        oc = await AgentDispatcher("openclaw").aggregate_usage(days)
+    except (KeyError, ValueError):
+        today = datetime.now(timezone.utc).date()
+        oc = {
+            "total_cost": 0.0,
+            "total_tokens": _empty_tokens(),
+            "total_sessions": 0,
+            "total_messages": 0,
+            "avg_tokens_per_session": 0,
+            "avg_response_time": 0,
+            "by_model": [],
+            "by_session": [],
+            "daily": [
+                {"date": (today - timedelta(days=i)).isoformat(), "cost": 0.0, "tokens": 0, "messages": 0}
+                for i in range(days - 1, -1, -1)
+            ],
+            "response_time": {"avg": 0, "median": 0, "p95": 0, "min": 0, "max": 0, "count": 0},
+        }
 
     # Seed accumulators from the OpenClaw aggregate so the Claude Code scan
     # below can merge directly into them. (Deep-copy lists/dicts so mutating
