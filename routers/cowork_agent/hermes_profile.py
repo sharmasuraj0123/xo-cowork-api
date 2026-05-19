@@ -37,7 +37,7 @@ from typing import Any
 import httpx
 import yaml
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from services.cowork_agent.agent_registry import get_agent
@@ -635,13 +635,19 @@ async def _run_channel_chain_bg(profile: str, profile_dir: Path, platform: str, 
 @router.delete("/api/agents/hermes/{profile}/channels/{platform}")
 async def hermes_profile_channels_remove(profile: str, platform: str):
     """Clear all env entries this channel writes (e.g. SLACK_BOT_TOKEN,
-    SLACK_APP_TOKEN, SLACK_ALLOWED_USERS for ``slack``). The gateway needs
-    a restart for the disconnect to take effect; we don't reach into
-    state.db. Returns the keys that were actually present and cleared."""
+    SLACK_APP_TOKEN, SLACK_ALLOWED_USERS for ``slack``), and strip the
+    platform's entry from ``gateway_state.json`` so the FE channels tab
+    stops showing the now-disconnected platform.
+
+    The gateway still needs a restart for any in-process subscriber to
+    actually shut down — we just remove the disk-level record so the next
+    refetch + restart produces a clean state.
+    """
     resolved = _resolve_profile(profile)
     if isinstance(resolved, JSONResponse):
         return resolved
-    recipe = _hermes_channel_recipe(platform.lower())
+    platform_lc = platform.lower()
+    recipe = _hermes_channel_recipe(platform_lc)
     if recipe is None:
         return JSONResponse(
             status_code=400,
@@ -659,6 +665,23 @@ async def hermes_profile_channels_remove(profile: str, platform: str):
                 status_code=500,
                 content={"detail": f"failed to update {env_file}: {e}"},
             )
+
+    # Strip the platform from gateway_state.json. The gateway will rewrite
+    # this file on next health check, but until then the FE Channels tab
+    # would still surface the stale record (a yesterday-stale "slack:
+    # retrying" entry is what made this bug obvious).
+    state_file = resolved / "gateway_state.json"
+    if state_file.is_file():
+        try:
+            state = json.loads(state_file.read_text())
+            platforms = state.get("platforms")
+            if isinstance(platforms, dict) and platform_lc in platforms:
+                platforms.pop(platform_lc, None)
+                state_file.write_text(json.dumps(state, indent=2))
+        except (OSError, ValueError):
+            # Non-fatal — the env-level disconnect already succeeded.
+            pass
+
     return {
         "ok": True,
         "profile": profile,
@@ -1314,3 +1337,155 @@ async def hermes_pool_snapshot():
     cowork-api). Default profile is not included — it's owned by
     hermes.sh and surfaced via ``/api/channels/hermes/status``."""
     return {"pool": gateway_pool.list_pool()}
+
+
+# ── Insights (per-profile, pure SQL) ─────────────────────────────────────────
+#
+# `/api/usage` aggregates openclaw + claude_code + ALL hermes profiles into
+# one global UsageStats — too coarse for the per-agent Overview tab. This
+# endpoint reads ONE profile's state.db directly and returns the slice the
+# FE Overview tab renders: overview totals + platform breakdown (sessions
+# grouped by source) + top tools (from tool_calls JSON on assistant rows,
+# UNION'd with the explicit tool_name column on tool-role rows for CLI flow).
+#
+# Pure SQL (no subprocess, no hermes Python import). Trade-off: no
+# `agent.usage_pricing` cost lookup for unknown models — costs always reflect
+# what's stored on the row. For the production models (kimi-k2.5,
+# claude-opus-4-6) that lookup currently returns zero anyway, so we lose
+# nothing in practice.
+
+
+@router.get("/api/agents/hermes/{profile}/insights")
+async def hermes_profile_insights(profile: str, days: int = 30):
+    """Per-profile activity slice for the FE Overview tab. Returns overview
+    totals, platforms (grouped by ``source``), and top tools — same shape
+    consumed by ``useHermesInsights`` on the FE.
+    """
+    import sqlite3
+    import time as _time
+    from services.cowork_agent.settings import HERMES_DIR
+
+    resolved = _resolve_profile(profile)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+
+    days = max(1, min(int(days), 365))
+    db_path = HERMES_DIR / "state.db" if profile == "default" else (resolved / "state.db")
+    empty_response = {
+        "profile": profile, "days": days, "empty": True,
+        "overview": {}, "platforms": [], "tools": [],
+    }
+    if not db_path.is_file():
+        return empty_response
+
+    cutoff = _time.time() - days * 86400
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError as e:
+        return JSONResponse(status_code=500, content={"detail": f"open state.db failed: {e}"})
+
+    try:
+        # Overview — single aggregate row for the window.
+        row = conn.execute(
+            "SELECT COUNT(*) AS sessions, "
+            "       COALESCE(SUM(message_count), 0) AS messages, "
+            "       COALESCE(SUM(tool_call_count), 0) AS tools, "
+            "       COALESCE(SUM(input_tokens), 0) AS input_t, "
+            "       COALESCE(SUM(output_tokens), 0) AS output_t, "
+            "       COALESCE(SUM(cache_read_tokens), 0) AS cache_r, "
+            "       COALESCE(SUM(cache_write_tokens), 0) AS cache_w, "
+            "       COALESCE(SUM(reasoning_tokens), 0) AS reasoning, "
+            "       COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd, 0)), 0) AS cost "
+            "FROM sessions WHERE started_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        if not row or int(row[0] or 0) == 0:
+            return empty_response
+
+        sessions, messages, tools_total, in_t, out_t, cache_r, cache_w, reasoning, cost = row
+        overview = {
+            "total_sessions": int(sessions or 0),
+            "total_messages": int(messages or 0),
+            "total_tool_calls": int(tools_total or 0),
+            "total_input_tokens": int(in_t or 0),
+            "total_output_tokens": int(out_t or 0),
+            "total_cache_read_tokens": int(cache_r or 0),
+            "total_cache_write_tokens": int(cache_w or 0),
+            "total_tokens": int((in_t or 0) + (out_t or 0) + (cache_r or 0) + (cache_w or 0) + (reasoning or 0)),
+            "estimated_cost": float(cost or 0),
+            "actual_cost": float(cost or 0),
+        }
+
+        # Platforms — GROUP BY source. The `source` column is api_server / cli /
+        # slack / telegram / etc. NULL sources fall under "unknown".
+        platforms = [
+            {
+                "platform": (p_src or "unknown"),
+                "sessions": int(p_sessions or 0),
+                "messages": int(p_messages or 0),
+                "total_tokens": int((p_in or 0) + (p_out or 0) + (p_cache or 0)),
+            }
+            for (p_src, p_sessions, p_messages, p_in, p_out, p_cache) in conn.execute(
+                "SELECT source, COUNT(*), "
+                "       COALESCE(SUM(message_count), 0), "
+                "       COALESCE(SUM(input_tokens), 0), "
+                "       COALESCE(SUM(output_tokens), 0), "
+                "       COALESCE(SUM(cache_read_tokens), 0) "
+                "FROM sessions WHERE started_at >= ? GROUP BY source ORDER BY COUNT(*) DESC",
+                (cutoff,),
+            ).fetchall()
+        ]
+
+        # Tools — two sources, merged:
+        # 1. assistant rows: tool names live inside a `tool_calls` JSON array
+        #    as `[{function: {name: <tool>}, ...}, ...]` (api_server flow)
+        # 2. tool-role rows: `tool_name` column is populated (CLI flow)
+        # We use sqlite's json1 to extract names from #1, then UNION ALL with
+        # the simpler #2 query and aggregate in Python.
+        tool_counter: dict[str, int] = {}
+        try:
+            for name, count in conn.execute(
+                "SELECT json_extract(je.value, '$.function.name') AS tool, COUNT(*) "
+                "FROM messages m "
+                "JOIN sessions s ON s.id = m.session_id "
+                "JOIN json_each(m.tool_calls) je "
+                "WHERE s.started_at >= ? AND m.tool_calls IS NOT NULL AND m.role = 'assistant' "
+                "GROUP BY tool",
+                (cutoff,),
+            ):
+                if name:
+                    tool_counter[name] = tool_counter.get(name, 0) + int(count)
+        except sqlite3.OperationalError:
+            # json1 missing or unexpected JSON shape — skip silently
+            pass
+
+        try:
+            for name, count in conn.execute(
+                "SELECT m.tool_name, COUNT(*) "
+                "FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE s.started_at >= ? AND m.tool_name IS NOT NULL AND m.role = 'tool' "
+                "GROUP BY m.tool_name",
+                (cutoff,),
+            ):
+                if name:
+                    tool_counter[name] = tool_counter.get(name, 0) + int(count)
+        except sqlite3.OperationalError:
+            pass
+
+        total_tool_calls = sum(tool_counter.values()) or 1
+        tools_list = [
+            {"tool": name, "count": count, "percentage": (count / total_tool_calls) * 100.0}
+            for name, count in sorted(tool_counter.items(), key=lambda kv: -kv[1])
+        ][:10]
+    finally:
+        conn.close()
+
+    return {
+        "profile": profile,
+        "days": days,
+        "empty": False,
+        "overview": overview,
+        "platforms": platforms,
+        "tools": tools_list,
+    }

@@ -117,6 +117,13 @@ async def update_session(session_id: str, request: Request):
     if not updated:
         updated = update_claude_session_directory(session_id, directory)
     if not updated:
+        # Hermes sessions live in per-profile state.db files and don't
+        # have a session-level "directory" concept. Return ok (no-op)
+        # rather than 404 so the FE workspace picker doesn't fail when
+        # an existing hermes chat is open.
+        from services.cowork_agent.hermes_state_db import find_hermes_profile
+        if find_hermes_profile(session_id):
+            return {"ok": True, "session_id": session_id, "directory": directory, "backend": "hermes", "applied": False}
         return JSONResponse(status_code=404, content={"detail": "Session not found"})
 
     return {"ok": True, "session_id": session_id, "directory": directory}

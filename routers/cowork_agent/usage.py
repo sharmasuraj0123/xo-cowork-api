@@ -12,14 +12,40 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import sqlite3
+from pathlib import Path
+
 from fastapi import APIRouter
 
-from services.cowork_agent.settings import AGENTS_DIR
+from services.cowork_agent.settings import AGENTS_DIR, HERMES_DIR
 from services.cowork_agent.helpers import iso_now, parse_jsonl, derive_title_native_claude
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.sessions_io import _find_native_claude_file, _resolve_index_path
 
 router = APIRouter()
+
+
+def _hermes_state_dbs() -> "list[tuple[str, Path]]":
+    """Yield (profile_name, state.db path) for every hermes profile with a db.
+
+    Default profile lives at HERMES_DIR/state.db (not in profiles/). Named
+    profiles live at HERMES_DIR/profiles/<name>/state.db. Missing files are
+    silently skipped — a freshly-created profile has no state.db until the
+    first chat lands.
+    """
+    out: list[tuple[str, Path]] = []
+    default_db = HERMES_DIR / "state.db"
+    if default_db.is_file():
+        out.append(("default", default_db))
+    profiles_root = HERMES_DIR / "profiles"
+    if profiles_root.is_dir():
+        for entry in sorted(profiles_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            db = entry / "state.db"
+            if db.is_file():
+                out.append((entry.name, db))
+    return out
 
 
 def _empty_tokens():
@@ -328,6 +354,105 @@ def usage(days: int = 30):
                 if session_entry["message_count"] > 0:
                     session_entry["time_created"] = first_user_ts or iso_now()
                     session_stats[session_id] = session_entry
+
+    # ── Hermes sessions (all profiles aggregated) ─────────────────────────────
+    #
+    # Hermes stores per-profile session metadata in SQLite at
+    # `~/.hermes/state.db` (default profile) and
+    # `~/.hermes/profiles/<name>/state.db` (named profiles). The `sessions`
+    # table already carries rolled-up tokens, message counts, model, billing
+    # provider, and start time — so we read at session granularity rather than
+    # walking every message row.
+    #
+    # We could spawn `hermes insights` subprocesses per profile to get the
+    # rich engine output (platform/tool/skill breakdowns) — but that adds
+    # ~200ms × N profiles and the engine's killer feature (pricing lookup)
+    # currently returns 0 for the models in production (claude-opus-4-6,
+    # kimi-k2.5). Plain SQL gives identical numbers at <10ms total.
+
+    cutoff_epoch = cutoff.timestamp()
+    for _profile, db_path in _hermes_state_dbs():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            continue
+        try:
+            rows = conn.execute(
+                "SELECT id, source, model, started_at, title, "
+                "       message_count, input_tokens, output_tokens, "
+                "       cache_read_tokens, cache_write_tokens, "
+                "       reasoning_tokens, "
+                "       billing_provider, estimated_cost_usd, actual_cost_usd "
+                "FROM sessions WHERE started_at >= ?",
+                (cutoff_epoch,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Schema mismatch (older/newer hermes); skip rather than 500.
+            conn.close()
+            continue
+        conn.close()
+
+        for row in rows:
+            (sid, _source, model, started_at, title,
+             msg_count, inp, out, cache_r, cache_w, reasoning,
+             provider, est_cost, act_cost) = row
+
+            inp = int(inp or 0)
+            out = int(out or 0)
+            cache_r = int(cache_r or 0)
+            cache_w = int(cache_w or 0)
+            reasoning = int(reasoning or 0)
+            msg_count = int(msg_count or 0)
+            # Prefer actual cost over estimate; both may be NULL for models
+            # the hermes pricing lookup doesn't know yet.
+            cost_val = float(act_cost if act_cost is not None else (est_cost or 0))
+
+            total_tokens["input"] += inp
+            total_tokens["output"] += out
+            total_tokens["cache_read"] += cache_r
+            total_tokens["cache_write"] += cache_w
+            total_tokens["reasoning"] += reasoning
+            total_cost += cost_val
+            session_ids.add(sid)
+            # We don't split user/assistant here — total_messages is just
+            # `assistant_messages + user_messages` in the final response, so
+            # parking the rollup in assistant_messages preserves the total.
+            assistant_messages += msg_count
+
+            rt = datetime.fromtimestamp(started_at, tz=timezone.utc)
+            day_key = rt.date().isoformat()
+            day = by_day.setdefault(
+                day_key,
+                {"date": day_key, "cost": 0.0, "tokens": 0, "messages": 0},
+            )
+            day["cost"] += cost_val
+            day["tokens"] += inp + out
+            day["messages"] += msg_count
+
+            model_id = model or "unknown"
+            provider_id = provider or "hermes"
+            mk = (model_id, provider_id)
+            m = by_model_key.setdefault(mk, {
+                "model_id": model_id, "provider_id": provider_id,
+                "total_cost": 0.0, "total_tokens": _empty_tokens(), "message_count": 0,
+            })
+            m["total_cost"] += cost_val
+            m["total_tokens"]["input"] += inp
+            m["total_tokens"]["output"] += out
+            m["total_tokens"]["cache_read"] += cache_r
+            m["total_tokens"]["cache_write"] += cache_w
+            m["total_tokens"]["reasoning"] += reasoning
+            m["message_count"] += msg_count
+
+            if msg_count > 0:
+                session_stats[sid] = {
+                    "session_id": sid,
+                    "title": (title or "Untitled Session")[:80],
+                    "total_cost": cost_val,
+                    "total_tokens": inp + out,
+                    "message_count": msg_count,
+                    "time_created": rt.isoformat(),
+                }
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
 
