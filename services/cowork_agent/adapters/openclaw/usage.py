@@ -3,28 +3,118 @@ OpenClaw JSONL session parsing logic.
 
 Moved from routers/openclaw_usage.py so it can be reused across adapters
 and tested independently of the HTTP layer.
+
+Parity with the gateway's own aggregator (see
+docs/openclaw-gateway-usage-internals.md) is verified by
+scripts/openclaw_usage_parity.py.
 """
 from __future__ import annotations
 
-import glob
 import json
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
+
+_TOOL_CALL_BLOCK_TYPES = frozenset({"tool_use", "toolcall", "tool_call"})
+_TOOL_RESULT_BLOCK_TYPES = frozenset({"tool_result", "tool_result_error"})
+_ERROR_STOP_REASONS = frozenset({"error", "aborted", "timeout"})
+
+# Gateway filename filter: mirrors `isUsageCountedSessionTranscriptFileName`
+# in openclaw `dist/artifacts-B81-HgBC.js`. We count active `.jsonl`
+# transcripts, plus their `.reset.<iso>` / `.deleted.<iso>` archives, plus
+# `.checkpoint.<uuid>.jsonl` (treated as primary). We exclude `.bak.<iso>`
+# archives and the `sessions.json` index (any variant).
+_ARCHIVE_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z$")
+_SESSIONS_JSON_BAK_RE = re.compile(r"^sessions\.json\.bak\.\d+$")
+
+
+def _is_usage_counted_session_filename(name: str) -> bool:
+    """Match gateway's filename filter byte-for-byte. See doc §A1."""
+    if name == "sessions.json" or _SESSIONS_JSON_BAK_RE.match(name):
+        return False
+    # Archive variants: name contains `.jsonl.<reset|deleted|bak>.<iso>` tail.
+    for tail in (".jsonl.reset.", ".jsonl.deleted.", ".jsonl.bak."):
+        idx = name.find(tail)
+        if idx > 0:
+            ts_part = name[idx + len(tail):]
+            if _ARCHIVE_TS_RE.match(ts_part):
+                # `.bak` is NOT counted; `.reset` and `.deleted` are.
+                return tail != ".jsonl.bak."
+            # Malformed timestamp tail → fall through to default check.
+            return False
+    # Otherwise: must end in `.jsonl` (covers active transcripts AND
+    # checkpoint files like `<sid>.checkpoint.<uuid>.jsonl`).
+    return name.endswith(".jsonl")
+
+
+def _extract_tool_counts(message: dict) -> tuple[list[str], dict]:
+    """Mirror gateway extractToolCallNames + countToolResults.
+
+    Returns (deduped_tool_names, {"total": int, "errors": int}).
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    results = {"total": 0, "errors": 0}
+
+    direct = message.get("toolName") or message.get("tool_name")
+    if isinstance(direct, str) and direct and direct not in seen:
+        seen.add(direct)
+        names.append(direct)
+
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if not isinstance(btype, str):
+                continue
+            btype_lc = btype.lower()
+            if btype_lc in _TOOL_CALL_BLOCK_TYPES:
+                # Gateway extractToolCallNames reads only block.name.
+                name = block.get("name")
+                if isinstance(name, str) and name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+            elif btype_lc in _TOOL_RESULT_BLOCK_TYPES:
+                # Gateway countToolResults only marks errors on
+                # is_error===true. The block *type* tool_result_error
+                # does NOT auto-imply error in the gateway's accounting.
+                results["total"] += 1
+                if block.get("is_error") is True:
+                    results["errors"] += 1
+
+    return names, results
 
 
 def discover_session_files(
     agent_id: str = "main",
     agents_dir: str | None = None,
 ) -> list[str]:
-    """Find all .jsonl session transcript files for an agent."""
+    """Find every session transcript file the gateway counts toward usage.
+
+    Mirrors `isUsageCountedSessionTranscriptFileName` from openclaw
+    `dist/artifacts-B81-HgBC.js`. Includes the active `.jsonl` transcript,
+    `.reset.<iso>` / `.deleted.<iso>` archives, and
+    `.checkpoint.<uuid>.jsonl` checkpoints. Excludes `.bak.<iso>` archives
+    and `sessions.json` (including legacy `sessions.json.bak.<N>` files).
+    """
     base = agents_dir or os.getenv(
         "OPENCLAW_AGENTS_DIR",
         os.path.expanduser("~/.openclaw/agents"),
     )
-    pattern = os.path.join(base, agent_id, "sessions", "*.jsonl")
-    return sorted(glob.glob(pattern))
+    sessions_dir = os.path.join(base, agent_id, "sessions")
+    try:
+        names = os.listdir(sessions_dir)
+    except OSError:
+        return []
+    return sorted(
+        os.path.join(sessions_dir, n)
+        for n in names
+        if _is_usage_counted_session_filename(n)
+    )
 
 
 def parse_session_file(
@@ -34,7 +124,14 @@ def parse_session_file(
 ) -> tuple[dict, list]:
     """
     Parse a single session JSONL file.
-    Returns (session_meta, assistant_entries).
+
+    Returns (session_meta, entries). Each entry carries a "role" field
+    ("user" or "assistant"). User entries are minimal — only role +
+    timestamp — but consumers that only care about token/cost math should
+    filter them out via ``e.get("role") == "user"``. Emitting them keeps
+    parity with the gateway's messageCounts (gateway counts every user
+    AND assistant record, not just paired ones — see
+    docs/openclaw-gateway-usage-internals.md §A19).
     """
     session_meta: dict = {}
     entries: list = []
@@ -87,6 +184,7 @@ def parse_session_file(
 
             if role == "user":
                 last_user_ts = ts_epoch_ms
+                entries.append({"role": "user", "timestamp": ts_epoch_ms})
                 continue
 
             if role != "assistant":
@@ -96,31 +194,28 @@ def parse_session_file(
             if not usage:
                 continue
 
-            tool_names = []
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "toolCall":
-                        name = block.get("name")
-                        if name:
-                            tool_names.append(name)
+            tool_names, tool_result_counts = _extract_tool_counts(msg)
 
-            duration_ms: Optional[int] = None
-            if last_user_ts and ts_epoch_ms:
-                duration_ms = ts_epoch_ms - last_user_ts
+            # Gateway parity: prefer message.durationMs; do NOT reset
+            # last_user_ts after consume (multi-assistant turns pair to
+            # the same user timestamp). See doc §A13/§A14.
+            duration_ms = msg.get("durationMs")
+            if not (isinstance(duration_ms, (int, float)) and duration_ms > 0):
+                duration_ms = (ts_epoch_ms - last_user_ts) if (last_user_ts and ts_epoch_ms) else None
 
             entries.append(
                 {
+                    "role": "assistant",
                     "usage": usage,
                     "provider": msg.get("provider"),
                     "model": msg.get("model"),
                     "timestamp": ts_epoch_ms,
                     "stopReason": msg.get("stopReason"),
                     "toolNames": tool_names,
+                    "toolResultCounts": tool_result_counts,
                     "durationMs": duration_ms,
                 }
             )
-            last_user_ts = None
 
     return session_meta, entries
 
@@ -156,10 +251,34 @@ def build_session_cost_summary(session_meta: dict, entries: list) -> dict:
     last_activity: Optional[int] = None
     activity_dates: set = set()
 
+    total_user_msgs = 0
+    total_assistant_msgs = 0
+    total_tool_results = 0
+    total_errors = 0
+
     for entry in entries:
+        role = entry.get("role", "assistant")
+        ts = entry.get("timestamp")
+
+        if role == "user":
+            total_user_msgs += 1
+            if ts:
+                date_str = _date_from_ms(ts)
+                activity_dates.add(date_str)
+                if first_activity is None or ts < first_activity:
+                    first_activity = ts
+                if last_activity is None or ts > last_activity:
+                    last_activity = ts
+                dm = daily_messages[date_str]
+                dm["date"] = date_str
+                dm["user"] += 1
+                dm["total"] += 1
+            continue
+
+        # role == "assistant"
+        total_assistant_msgs += 1
         usage = entry["usage"]
         cost_obj = usage.get("cost", {})
-        ts = entry.get("timestamp")
 
         inp = usage.get("input", 0)
         out = usage.get("output", 0)
@@ -186,6 +305,13 @@ def build_session_cost_summary(session_meta: dict, entries: list) -> dict:
             tool_counter[tn] += 1
             total_tool_calls += 1
 
+        tr = entry.get("toolResultCounts") or {}
+        total_tool_results += int(tr.get("total", 0) or 0)
+        msg_errors = int(tr.get("errors", 0) or 0)
+        if entry.get("stopReason") in _ERROR_STOP_REASONS:
+            msg_errors += 1
+        total_errors += msg_errors
+
         if ts:
             date_str = _date_from_ms(ts)
             activity_dates.add(date_str)
@@ -201,10 +327,11 @@ def build_session_cost_summary(session_meta: dict, entries: list) -> dict:
 
             dm = daily_messages[date_str]
             dm["date"] = date_str
-            dm["total"] += 2
-            dm["user"] += 1
             dm["assistant"] += 1
+            dm["total"] += 1
             dm["toolCalls"] += len(entry.get("toolNames", []))
+            dm["toolResults"] += int(tr.get("total", 0) or 0)
+            dm["errors"] += msg_errors
 
             dur = entry.get("durationMs")
             if dur and dur > 0:
@@ -288,12 +415,12 @@ def build_session_cost_summary(session_meta: dict, entries: list) -> dict:
         "dailyLatency": daily_latency_list,
         "dailyModelUsage": sorted(daily_model_usage.values(), key=lambda d: d["date"]),
         "messageCounts": {
-            "total": sum(d["total"] for d in daily_messages.values()),
-            "user": sum(d["user"] for d in daily_messages.values()),
-            "assistant": sum(d["assistant"] for d in daily_messages.values()),
+            "total": total_user_msgs + total_assistant_msgs,
+            "user": total_user_msgs,
+            "assistant": total_assistant_msgs,
             "toolCalls": total_tool_calls,
-            "toolResults": total_tool_calls,
-            "errors": 0,
+            "toolResults": total_tool_results,
+            "errors": total_errors,
         },
         "toolUsage": {
             "totalCalls": total_tool_calls,

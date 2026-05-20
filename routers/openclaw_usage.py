@@ -4,12 +4,10 @@ Parses OpenClaw session JSONL files to expose usage/cost data for frontend dashb
 Data format mirrors the OpenClaw Control UI "Export JSON" output.
 """
 
-import json
-import glob
 import os
-from datetime import datetime, timezone
-from typing import Optional
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Query
 
@@ -36,9 +34,28 @@ router = APIRouter(prefix="/openclaw/usage", tags=["openclaw-usage"])
 # ---------------------------------------------------------------------------
 
 
-def _discover_session_files(agent_id: str = "main") -> list[str]:
-    """Find all .jsonl session transcript files for an agent."""
-    return discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
+def _list_agent_ids() -> list[str]:
+    """Return every agent subdirectory name under OPENCLAW_AGENTS_DIR."""
+    try:
+        return sorted(
+            name for name in os.listdir(OPENCLAW_AGENTS_DIR)
+            if os.path.isdir(os.path.join(OPENCLAW_AGENTS_DIR, name))
+        )
+    except OSError:
+        return []
+
+
+def _discover_session_files(agent_id: Optional[str] = None) -> list[str]:
+    """Find session transcript files. ``agent_id=None`` iterates every
+    agent under OPENCLAW_AGENTS_DIR (gateway "all agents" view). Pass an
+    explicit id to scope to a single agent.
+    """
+    if agent_id:
+        return discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
+    files: list[str] = []
+    for aid in _list_agent_ids():
+        files.extend(discover_session_files(aid, OPENCLAW_AGENTS_DIR))
+    return sorted(files)
 
 
 def _parse_session_file(
@@ -67,7 +84,7 @@ def _build_session_cost_summary(session_meta: dict, entries: list) -> dict:
 
 @router.get("/analytics")
 async def get_usage_analytics(
-    agent_id: str = Query("main", description="Agent ID to query"),
+    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
     days: Optional[int] = Query(None, description="Limit to last N days"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -87,8 +104,6 @@ async def get_usage_analytics(
       "modelUsage": [{ "model", "provider", "calls", "tokens", "cost" }]
     }
     """
-    from datetime import timedelta
-
     start_ms = None
     end_ms = None
 
@@ -149,6 +164,19 @@ async def get_usage_analytics(
     model_map: dict[str, dict] = {}
 
     for entry in all_entries:
+        role = entry.get("role", "assistant")
+        ts = entry.get("timestamp")
+
+        if role == "user":
+            total_messages += 1
+            if ts:
+                d = _date_from_ms(ts)
+                dm = daily_msgs[d]
+                dm["date"] = d
+                dm["user"] += 1
+                dm["total"] += 1
+            continue
+
         usage = entry["usage"]
         cost_val = usage.get("cost", {}).get("total", 0) or 0
         tok = usage.get("totalTokens", 0) or 0
@@ -161,7 +189,6 @@ async def get_usage_analytics(
         if dur and dur > 0:
             latencies.append(dur)
 
-        ts = entry.get("timestamp")
         if ts:
             d = _date_from_ms(ts)
 
@@ -172,9 +199,8 @@ async def get_usage_analytics(
 
             dm = daily_msgs[d]
             dm["date"] = d
-            dm["total"] += 2  # user + assistant pair
-            dm["user"] += 1
             dm["assistant"] += 1
+            dm["total"] += 1
             dm["toolCalls"] += len(entry.get("toolNames", []))
 
             if dur and dur > 0:
@@ -287,7 +313,7 @@ async def get_usage_analytics(
 
 @router.get("/summary/card")
 async def get_usage_summary_card(
-    agent_id: str = Query("main", description="Agent ID to query"),
+    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
     days: int = Query(5, description="Number of days to include (default 5)"),
 ):
     """
@@ -306,8 +332,6 @@ async def get_usage_summary_card(
       ]
     }
     """
-    from datetime import timedelta
-
     now = datetime.now(timezone.utc)
     start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
 
@@ -330,6 +354,8 @@ async def get_usage_summary_card(
     total_messages = 0
 
     for entry in all_entries:
+        if entry.get("role") == "user":
+            continue
         cost_val = (entry["usage"].get("cost", {}).get("total", 0) or 0)
         tok = entry["usage"].get("totalTokens", 0) or 0
         total_cost += cost_val
@@ -371,7 +397,7 @@ async def get_usage_summary_card(
 
 @router.get("/summary")
 async def get_usage_summary(
-    agent_id: str = Query("main", description="Agent ID to query"),
+    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
     days: Optional[int] = Query(None, description="Limit to last N days"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -429,7 +455,7 @@ async def get_usage_summary(
 
 @router.get("/sessions")
 async def get_session_list(
-    agent_id: str = Query("main", description="Agent ID to query"),
+    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
 ):
     """
     List all discovered sessions with basic metadata.
@@ -443,11 +469,12 @@ async def get_session_list(
         if not meta:
             continue
 
+        assistant_entries = [e for e in entries if e.get("role") != "user"]
         total_cost = sum(
-            (e["usage"].get("cost", {}).get("total", 0) or 0) for e in entries
+            (e["usage"].get("cost", {}).get("total", 0) or 0) for e in assistant_entries
         )
         total_tokens = sum(
-            (e["usage"].get("totalTokens", 0) or 0) for e in entries
+            (e["usage"].get("totalTokens", 0) or 0) for e in assistant_entries
         )
         timestamps = [e["timestamp"] for e in entries if e.get("timestamp")]
 
@@ -455,7 +482,12 @@ async def get_session_list(
             {
                 "sessionId": meta.get("sessionId"),
                 "sessionFile": meta.get("sessionFile"),
-                "messageCount": len(entries),
+                # messageCount = assistant turns only — preserves the API
+                # contract of /openclaw/usage/sessions. The parser now also
+                # emits user records (so build_session_cost_summary can
+                # match the gateway's messageCounts split), which is why
+                # we filter explicitly instead of taking len(entries).
+                "messageCount": len(assistant_entries),
                 "totalTokens": total_tokens,
                 "totalCost": round(total_cost, 6),
                 "firstActivity": min(timestamps) if timestamps else None,
@@ -469,7 +501,7 @@ async def get_session_list(
 @router.get("/sessions/{session_id}")
 async def get_session_usage(
     session_id: str,
-    agent_id: str = Query("main", description="Agent ID to query"),
+    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
