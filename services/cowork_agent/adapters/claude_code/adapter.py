@@ -106,11 +106,20 @@ def get_session_directory(session_key: str) -> str | None:
     return meta.get("directory") if meta else None
 
 
-def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None:
+def write_preliminary_entry(
+    session_key: str,
+    session_id: str,
+    cwd: str,
+    native_session_id: str = "",
+) -> None:
     """
     Write a sessionslist.json entry BEFORE the subprocess starts so the polling
     loop in chat.py can resolve session_id without waiting for the full response.
     Messages are NOT stored here — they live in ~/.claude/projects/.
+
+    ``native_session_id`` is the pre-allocated UUID passed to claude via
+    ``--session-id``. Leaving it empty falls back to the patch-on-first-event
+    path; callers that pre-allocate make the JSONL filename predictable from t=0.
     """
     agent_id = _agent_id_from_key(session_key)
     sd = _xo_sessions_dir(agent_id)
@@ -119,13 +128,15 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
     index = _load_index(index_path)
     index[session_key] = {
         "sessionId": session_id,
-        "nativeSessionId": "",
+        "nativeSessionId": native_session_id,
         "directory": cwd,
         "backend": "claude_code",
         "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
         "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
     }
     _write_index(index_path, index)
+    if native_session_id:
+        _native_map[session_key] = native_session_id
 
 
 def _patch_native_session_id(session_key: str, native_sid: str) -> bool:
@@ -220,6 +231,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         agent_type: str | None = None,
         cwd: str | None = None,
         mcp_config_path: "Path | None" = None,
+        new_session_id: str | None = None,
     ) -> list[str]:
         cli = self.config.get("cli_path") or "claude"
         workspace = cwd or str(xo_projects_root())
@@ -243,8 +255,11 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             cmd.append("--verbose")
         if mcp_config_path is not None:
             cmd += ["--mcp-config", str(mcp_config_path)]
+        # --resume and --session-id are mutually exclusive at the CLI.
         if native_session_id:
             cmd += ["--resume", native_session_id]
+        elif new_session_id:
+            cmd += ["--session-id", new_session_id]
         cmd += ["-p", prompt]
         return cmd
 
@@ -366,9 +381,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         else:
             effective_cwd = self._resolve_cwd(agent_id)
 
-        # Write preliminary sessions.json entry only for new sessions.
+        # Pre-allocate the native session id and persist it to the index
+        # before spawning, so the JSONL filename is known from t=0 and
+        # a fast SSE cancellation can't orphan the mapping.
+        pre_allocated_native_sid: str | None = None
         if is_new and sk and our_session_id:
-            write_preliminary_entry(sk, our_session_id, effective_cwd)
+            pre_allocated_native_sid = str(uuid.uuid4())
+            write_preliminary_entry(
+                sk, our_session_id, effective_cwd,
+                native_session_id=pre_allocated_native_sid,
+            )
 
         # Resolve native --resume ID for existing sessions.
         native_resume_id: str | None = None
@@ -380,6 +402,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             cmd = self._build_cmd(
                 question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
                 mcp_config_path=mcp_config_path,
+                new_session_id=pre_allocated_native_sid,
             )
 
             proc = await asyncio.create_subprocess_exec(
