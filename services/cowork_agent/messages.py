@@ -212,6 +212,17 @@ def convert_native_claude_messages(session_id: str, records: list[dict]) -> list
         if not msg:
             continue
 
+        # Skip runtime-injected meta records (e.g. Skill payloads). The Claude
+        # Code runtime tags them with isMeta=true and ties them to a tool call
+        # via sourceToolUseID; the model needs them in history, but rendering
+        # them as user bubbles surfaces multi-thousand-character internal
+        # content into the chat. Skipping before flipping
+        # saw_user_since_last_assistant lets the bracketing assistant blocks
+        # (thinking → tool_use → post-skill text) merge into one rendered
+        # turn, matching the user's mental model of a single assistant reply.
+        if record.get("isMeta") is True:
+            continue
+
         role = msg.get("role", rtype)
         record_id = record.get("uuid") or record.get("id") or short_id()
         timestamp = record.get("timestamp") or iso_now()

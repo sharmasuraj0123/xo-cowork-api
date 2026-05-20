@@ -121,6 +121,11 @@ def derive_title_native_claude(records: list[dict]) -> str:
     for r in records:
         if r.get("type") != "user":
             continue
+        # Skip runtime-injected meta records (Skill payloads etc.) so the
+        # sidebar title is never sourced from a several-thousand-character
+        # skill body when the user's first real prompt happened to load one.
+        if r.get("isMeta") is True:
+            continue
         msg = r.get("message", {})
         content = msg.get("content", "")
         if isinstance(content, str):
