@@ -1,80 +1,84 @@
 """
-OpenClaw Usage API Router
-Parses OpenClaw session JSONL files to expose usage/cost data for frontend dashboards.
-Data format mirrors the OpenClaw Control UI "Export JSON" output.
+OpenClaw-shaped Usage API router.
+
+URL stays ``/openclaw/usage/*`` for backward compatibility (the cowork frontend
+and any external pollers depend on it). The body, however, dispatches to the
+**active agent's** usage module — resolved by AGENT_NAME via
+``services.cowork_agent.usage_loader.load_usage_module()``. With
+``AGENT_NAME=openclaw`` the response is what the OpenClaw Control UI "Export
+JSON" emits; with another active agent it's that agent's equivalent (file-
+shaped methods may return empty, e.g. for hermes — see each module).
+
+No if/elif here. The five endpoints all call into the loader's contract.
 """
 
-import os
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from services.cowork_agent.adapters.openclaw.usage import (
-    discover_session_files,
-    parse_session_file,
-    build_session_cost_summary,
-)
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-OPENCLAW_AGENTS_DIR = os.getenv(
-    "OPENCLAW_AGENTS_DIR",
-    os.path.expanduser("~/.openclaw/agents"),
-)
+from services.cowork_agent.usage_loader import load_usage_module
 
 router = APIRouter(prefix="/openclaw/usage", tags=["openclaw-usage"])
 
 
 # ---------------------------------------------------------------------------
-# Helpers – delegate to adapter module; keep private wrappers for backward compat
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _list_agent_ids() -> list[str]:
-    """Return every agent subdirectory name under OPENCLAW_AGENTS_DIR."""
+def _load_or_501():
     try:
-        return sorted(
-            name for name in os.listdir(OPENCLAW_AGENTS_DIR)
-            if os.path.isdir(os.path.join(OPENCLAW_AGENTS_DIR, name))
+        return load_usage_module()
+    except ModuleNotFoundError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"no usage module for active agent (tried config.agents.<name>.usage.usage): {e}",
         )
-    except OSError:
-        return []
 
 
-def _discover_session_files(agent_id: Optional[str] = None) -> list[str]:
-    """Find session transcript files. ``agent_id=None`` iterates every
-    agent under OPENCLAW_AGENTS_DIR (gateway "all agents" view). Pass an
-    explicit id to scope to a single agent.
+def _gateway_window_ms(days: int) -> tuple[int, int]:
+    """Gateway parseDateRange(days=N, mode=gateway): today + (N-1) prior in
+    host local TZ, end snapped to end-of-day-1ms.
     """
-    if agent_id:
-        return discover_session_files(agent_id, OPENCLAW_AGENTS_DIR)
-    files: list[str] = []
-    for aid in _list_agent_ids():
-        files.extend(discover_session_files(aid, OPENCLAW_AGENTS_DIR))
-    return sorted(files)
+    local = datetime.now().astimezone()
+    today_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ms = int((today_start - timedelta(days=days - 1)).timestamp() * 1000)
+    end_ms = int((today_start + timedelta(days=1)).timestamp() * 1000) - 1
+    return start_ms, end_ms
 
 
-def _parse_session_file(
-    path: str,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-):
-    """Delegate to adapter module."""
-    return parse_session_file(path, start_ms, end_ms)
+def _explicit_window_ms(start: Optional[str], end: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """Explicit ``start=YYYY-MM-DD`` / ``end=YYYY-MM-DD`` in UTC, end snapped to
+    end-of-day. Both bounds are independently optional — pass either / both.
+    """
+    start_ms = None
+    end_ms = None
+    if start:
+        start_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    if end:
+        end_ms = int(
+            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000
+        ) + 86_400_000
+    return start_ms, end_ms
 
 
 def _date_from_ms(epoch_ms: int) -> str:
-    """Convert epoch ms to YYYY-MM-DD string (UTC)."""
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
-def _build_session_cost_summary(session_meta: dict, entries: list) -> dict:
-    """Delegate to adapter module."""
-    return build_session_cost_summary(session_meta, entries)
+def _collect_entries(mod, agent_id: Optional[str], start_ms: Optional[int], end_ms: Optional[int]):
+    """Walk every counted session file via the active module's
+    ``get_session_files`` + ``parse_file``. Returns a flat list of entries.
+    """
+    all_entries: list = []
+    for sf in mod.get_session_files(agent_id=agent_id):
+        try:
+            _, entries = mod.parse_file(sf, start_ms=start_ms, end_ms=end_ms)
+        except Exception:
+            continue
+        all_entries.extend(entries)
+    return all_entries
 
 
 # ---------------------------------------------------------------------------
@@ -84,83 +88,48 @@ def _build_session_cost_summary(session_meta: dict, entries: list) -> dict:
 
 @router.get("/analytics")
 async def get_usage_analytics(
-    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
+    agent_id: Optional[str] = Query(None, description="Sub-agent id to query; defaults to all agents"),
     days: Optional[int] = Query(None, description="Limit to last N days"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
     """
-    Full Usage Analytics dashboard endpoint.
-    Powers: stat cards, Cost & Tokens tab, Messages tab, Performance tab,
-    Tool Usage table, and Model Usage table.
-
-    Response shape:
-    {
-      "stats": { "totalCost", "totalTokens", "totalMessages", "avgLatencyMs" },
-      "costAndTokens": [{ "date", "tokens", "cost" }, ...],
-      "messages": [{ "date", "total", "user", "assistant", "toolCalls" }, ...],
-      "performance": [{ "date", "avgMs", "p95Ms", "minMs", "maxMs" }, ...],
-      "toolUsage": { "totalCalls", "uniqueTools", "tools": [{ "name", "count" }] },
-      "modelUsage": [{ "model", "provider", "calls", "tokens", "cost" }]
-    }
+    Usage analytics dashboard payload: stat cards + per-day cost/tokens +
+    per-day messages + per-day performance + per-tool counts + per-model totals.
     """
-    start_ms = None
-    end_ms = None
+    from collections import defaultdict
 
-    if start:
-        start_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-    if end:
-        end_ms = int(
-            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000
-        ) + 86400_000
+    mod = _load_or_501()
+    start_ms, end_ms = _explicit_window_ms(start, end)
     if days and not start_ms:
-        now = datetime.now(timezone.utc)
-        start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
+        start_ms, end_ms = _gateway_window_ms(days)
 
-    session_files = _discover_session_files(agent_id)
-    if not session_files:
-        return {
-            "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
-            "costAndTokens": [],
-            "messages": [],
-            "performance": [],
-            "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
-            "modelUsage": [],
-        }
+    all_entries = _collect_entries(mod, agent_id, start_ms, end_ms)
 
-    all_entries = []
-    for sf in session_files:
-        _, entries = _parse_session_file(sf, start_ms, end_ms)
-        all_entries.extend(entries)
-
+    empty_response = {
+        "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
+        "costAndTokens": [],
+        "messages": [],
+        "performance": [],
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": [],
+    }
     if not all_entries:
-        return {
-            "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
-            "costAndTokens": [],
-            "messages": [],
-            "performance": [],
-            "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
-            "modelUsage": [],
-        }
+        return empty_response
 
-    # ---- Aggregate ----
     total_cost = 0.0
     total_tokens = 0
     total_messages = 0
     latencies: list[int] = []
 
-    # Daily buckets
     daily_cost: dict[str, dict] = defaultdict(lambda: {"date": "", "tokens": 0, "cost": 0.0})
     daily_msgs: dict[str, dict] = defaultdict(
         lambda: {"date": "", "total": 0, "user": 0, "assistant": 0, "toolCalls": 0}
     )
     daily_perf: dict[str, list] = defaultdict(list)
 
-    # Tool usage
     tool_counter: dict[str, int] = defaultdict(int)
     total_tool_calls = 0
-
-    # Model usage
     model_map: dict[str, dict] = {}
 
     for entry in all_entries:
@@ -191,7 +160,6 @@ async def get_usage_analytics(
 
         if ts:
             d = _date_from_ms(ts)
-
             dc = daily_cost[d]
             dc["date"] = d
             dc["tokens"] += tok
@@ -206,12 +174,10 @@ async def get_usage_analytics(
             if dur and dur > 0:
                 daily_perf[d].append(dur)
 
-        # Tools
         for tn in entry.get("toolNames", []):
             tool_counter[tn] += 1
             total_tool_calls += 1
 
-        # Models
         mkey = f"{entry.get('provider', '')}|{entry.get('model', '')}"
         if mkey not in model_map:
             model_map[mkey] = {
@@ -226,40 +192,34 @@ async def get_usage_analytics(
         mm["tokens"] += tok
         mm["cost"] += cost_val
 
-    # ---- Build sorted daily arrays with zero-fill ----
-    # Determine date range to fill
-    range_days = days or 5  # default 5 days if not specified
-    now = datetime.now(timezone.utc)
-    date_range = []
-    for i in range(range_days):
-        date_range.append((now - timedelta(days=range_days - 1 - i)).strftime("%Y-%m-%d"))
+    # Zero-fill date axis anchored on midnight(today, local TZ).
+    range_days = days or 5
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    date_range = [
+        (today_local - timedelta(days=range_days - 1 - i)).strftime("%Y-%m-%d")
+        for i in range(range_days)
+    ]
 
     cost_and_tokens = []
     messages_list = []
     performance_list = []
 
     for d in date_range:
-        # Cost & Tokens
         if d in daily_cost:
             dc = daily_cost[d]
             cost_and_tokens.append({"date": d, "tokens": dc["tokens"], "cost": round(dc["cost"], 6)})
         else:
             cost_and_tokens.append({"date": d, "tokens": 0, "cost": 0})
 
-        # Messages
         if d in daily_msgs:
             dm = daily_msgs[d]
             messages_list.append({
-                "date": d,
-                "total": dm["total"],
-                "user": dm["user"],
-                "assistant": dm["assistant"],
-                "toolCalls": dm["toolCalls"],
+                "date": d, "total": dm["total"], "user": dm["user"],
+                "assistant": dm["assistant"], "toolCalls": dm["toolCalls"],
             })
         else:
             messages_list.append({"date": d, "total": 0, "user": 0, "assistant": 0, "toolCalls": 0})
 
-        # Performance
         vals = daily_perf.get(d, [])
         if vals:
             vals_sorted = sorted(vals)
@@ -274,7 +234,6 @@ async def get_usage_analytics(
         else:
             performance_list.append({"date": d, "avgMs": 0, "p95Ms": 0, "minMs": 0, "maxMs": 0})
 
-    # Avg latency for top card
     avg_latency = round(sum(latencies) / len(latencies)) if latencies else 0
 
     return {
@@ -298,11 +257,8 @@ async def get_usage_analytics(
         "modelUsage": sorted(
             [
                 {
-                    "model": m["model"],
-                    "provider": m["provider"],
-                    "calls": m["calls"],
-                    "tokens": m["tokens"],
-                    "cost": round(m["cost"], 6),
+                    "model": m["model"], "provider": m["provider"], "calls": m["calls"],
+                    "tokens": m["tokens"], "cost": round(m["cost"], 6),
                 }
                 for m in model_map.values()
             ],
@@ -313,78 +269,56 @@ async def get_usage_analytics(
 
 @router.get("/summary/card")
 async def get_usage_summary_card(
-    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
+    agent_id: Optional[str] = Query(None, description="Sub-agent id; defaults to all"),
     days: int = Query(5, description="Number of days to include (default 5)"),
 ):
-    """
-    Lightweight usage summary card — returns only what's needed for the
-    "Usage Summary" widget: headline stats + daily cost bars.
+    """Lightweight headline card: totals + per-day cost/tokens/assistant-msgs."""
+    from collections import defaultdict
 
-    Response shape:
-    {
-      "days": 5,
-      "totalCost": 33.78,
-      "totalMessages": 353,
-      "totalTokens": 20000000,
-      "dailyCost": [
-        {"date": "2026-03-13", "cost": 0.12, "tokens": 50000, "messages": 10},
-        ...
-      ]
-    }
-    """
-    now = datetime.now(timezone.utc)
-    start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
+    mod = _load_or_501()
+    start_ms, end_ms = _gateway_window_ms(days)
 
-    session_files = _discover_session_files(agent_id)
-    if not session_files:
-        return {"days": days, "totalCost": 0, "totalMessages": 0, "totalTokens": 0, "dailyCost": []}
-
-    all_entries = []
-    for sf in session_files:
-        _, entries = _parse_session_file(sf, start_ms=start_ms)
-        all_entries.extend(entries)
+    all_entries = _collect_entries(mod, agent_id, start_ms, end_ms)
 
     if not all_entries:
         return {"days": days, "totalCost": 0, "totalMessages": 0, "totalTokens": 0, "dailyCost": []}
 
-    # Bucket by date
     daily: dict[str, dict] = defaultdict(lambda: {"date": "", "cost": 0.0, "tokens": 0, "messages": 0})
     total_cost = 0.0
     total_tokens = 0
-    total_messages = 0
+    total_messages = 0  # legacy semantic: assistant-only count
 
     for entry in all_entries:
         if entry.get("role") == "user":
             continue
-        cost_val = (entry["usage"].get("cost", {}).get("total", 0) or 0)
-        tok = entry["usage"].get("totalTokens", 0) or 0
+        usage = entry["usage"]
+        cost_val = usage.get("cost", {}).get("total", 0) or 0
+        tok = usage.get("totalTokens", 0) or 0
         total_cost += cost_val
         total_tokens += tok
-        total_messages += 1  # each entry = 1 assistant response ≈ 1 exchange
+        total_messages += 1
 
         ts = entry.get("timestamp")
         if ts:
-            date_str = _date_from_ms(ts)
-            d = daily[date_str]
-            d["date"] = date_str
-            d["cost"] += cost_val
-            d["tokens"] += tok
-            d["messages"] += 1
+            d = _date_from_ms(ts)
+            row = daily[d]
+            row["date"] = d
+            row["cost"] += cost_val
+            row["tokens"] += tok
+            row["messages"] += 1
 
-    # Fill in missing dates with zeros so the chart has no gaps
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     daily_list = []
     for i in range(days):
-        date_str = (now - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
-        if date_str in daily:
-            d = daily[date_str]
+        d = (today_local - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        if d in daily:
+            row = daily[d]
             daily_list.append({
-                "date": d["date"],
-                "cost": round(d["cost"], 6),
-                "tokens": d["tokens"],
-                "messages": d["messages"],
+                "date": row["date"], "cost": round(row["cost"], 6),
+                "tokens": row["tokens"], "messages": row["messages"],
             })
         else:
-            daily_list.append({"date": date_str, "cost": 0, "tokens": 0, "messages": 0})
+            daily_list.append({"date": d, "cost": 0, "tokens": 0, "messages": 0})
 
     return {
         "days": days,
@@ -397,78 +331,56 @@ async def get_usage_summary_card(
 
 @router.get("/summary")
 async def get_usage_summary(
-    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
+    agent_id: Optional[str] = Query(None, description="Sub-agent id; defaults to all"),
     days: Optional[int] = Query(None, description="Limit to last N days"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
-    """
-    Aggregated usage summary across all sessions.
-    Returns the same schema as the OpenClaw Control UI "Export JSON" button.
-
-    This is your main endpoint — it has everything:
-    totals, daily breakdowns, message counts, tool usage, model usage, and latency.
-    """
-    start_ms = None
-    end_ms = None
-
-    if start:
-        start_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-    if end:
-        end_ms = int(
-            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000
-        ) + 86400_000  # include the end date fully
-
+    """Aggregated SessionCostSummary across all sessions in the window,
+    plus per-session sub-summaries in ``sessions[]``."""
+    mod = _load_or_501()
+    start_ms, end_ms = _explicit_window_ms(start, end)
     if days and not start_ms:
-        now = datetime.now(timezone.utc)
-        start_ms = int((now.timestamp() - days * 86400) * 1000)
+        start_ms, end_ms = _gateway_window_ms(days)
 
-    session_files = _discover_session_files(agent_id)
-    if not session_files:
+    files = mod.get_session_files(agent_id=agent_id)
+    if not files:
         return {"error": "No session files found", "agentId": agent_id}
 
-    # Aggregate across all sessions
-    all_entries = []
-    session_summaries = []
-
-    for sf in session_files:
-        meta, entries = _parse_session_file(sf, start_ms, end_ms)
+    all_entries: list = []
+    session_summaries: list = []
+    for sf in files:
+        meta, entries = mod.parse_file(sf, start_ms=start_ms, end_ms=end_ms)
         if entries:
-            summary = _build_session_cost_summary(meta, entries)
-            session_summaries.append(summary)
+            session_summaries.append(mod.build_summary(meta, entries))
             all_entries.extend(entries)
 
     if not all_entries:
         return {"error": "No usage data found in the given range", "agentId": agent_id}
 
-    # Build a combined summary from all entries
-    combined_meta = {
-        "sessionId": "all",
-        "sessionFile": f"{len(session_files)} files",
-    }
-    combined = _build_session_cost_summary(combined_meta, all_entries)
+    combined = mod.build_summary(
+        {"sessionId": "all", "sessionFile": f"{len(files)} files"},
+        all_entries,
+    )
     combined["sessionCount"] = len(session_summaries)
     combined["sessions"] = session_summaries
-
     return combined
 
 
 @router.get("/sessions")
 async def get_session_list(
-    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
+    agent_id: Optional[str] = Query(None, description="Sub-agent id; defaults to all"),
 ):
-    """
-    List all discovered sessions with basic metadata.
-    Use a session ID from this list to query /sessions/{session_id} for details.
-    """
-    session_files = _discover_session_files(agent_id)
-    sessions = []
+    """List every discovered session with basic metadata. ``messageCount`` is
+    assistant-only (preserved legacy contract)."""
+    import os as _os
+    mod = _load_or_501()
 
-    for sf in session_files:
-        meta, entries = _parse_session_file(sf)
+    sessions = []
+    for sf in mod.get_session_files(agent_id=agent_id):
+        meta, entries = mod.parse_file(sf, start_ms=None, end_ms=None)
         if not meta:
             continue
-
         assistant_entries = [e for e in entries if e.get("role") != "user"]
         total_cost = sum(
             (e["usage"].get("cost", {}).get("total", 0) or 0) for e in assistant_entries
@@ -478,22 +390,15 @@ async def get_session_list(
         )
         timestamps = [e["timestamp"] for e in entries if e.get("timestamp")]
 
-        sessions.append(
-            {
-                "sessionId": meta.get("sessionId"),
-                "sessionFile": meta.get("sessionFile"),
-                # messageCount = assistant turns only — preserves the API
-                # contract of /openclaw/usage/sessions. The parser now also
-                # emits user records (so build_session_cost_summary can
-                # match the gateway's messageCounts split), which is why
-                # we filter explicitly instead of taking len(entries).
-                "messageCount": len(assistant_entries),
-                "totalTokens": total_tokens,
-                "totalCost": round(total_cost, 6),
-                "firstActivity": min(timestamps) if timestamps else None,
-                "lastActivity": max(timestamps) if timestamps else None,
-            }
-        )
+        sessions.append({
+            "sessionId": meta.get("sessionId"),
+            "sessionFile": meta.get("sessionFile"),
+            "messageCount": len(assistant_entries),
+            "totalTokens": total_tokens,
+            "totalCost": round(total_cost, 6),
+            "firstActivity": min(timestamps) if timestamps else None,
+            "lastActivity": max(timestamps) if timestamps else None,
+        })
 
     return {"agentId": agent_id, "count": len(sessions), "sessions": sessions}
 
@@ -501,31 +406,20 @@ async def get_session_list(
 @router.get("/sessions/{session_id}")
 async def get_session_usage(
     session_id: str,
-    agent_id: Optional[str] = Query(None, description="Agent ID to query; defaults to all agents"),
+    agent_id: Optional[str] = Query(None, description="Sub-agent id; defaults to all"),
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
-    """
-    Detailed usage for a specific session.
-    Returns the full SessionCostSummary matching the OpenClaw Export JSON format.
-    """
-    start_ms = None
-    end_ms = None
+    """Detailed SessionCostSummary for one session, optionally windowed."""
+    import os as _os
+    mod = _load_or_501()
+    start_ms, end_ms = _explicit_window_ms(start, end)
 
-    if start:
-        start_ms = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-    if end:
-        end_ms = int(
-            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000
-        ) + 86400_000
-
-    session_files = _discover_session_files(agent_id)
-
-    for sf in session_files:
-        if session_id in os.path.basename(sf):
-            meta, entries = _parse_session_file(sf, start_ms, end_ms)
+    for sf in mod.get_session_files(agent_id=agent_id):
+        if session_id in _os.path.basename(sf):
+            meta, entries = mod.parse_file(sf, start_ms=start_ms, end_ms=end_ms)
             if not entries:
                 return {"error": "No usage data found for this session in the given range"}
-            return _build_session_cost_summary(meta, entries)
+            return mod.build_summary(meta, entries)
 
     return {"error": f"Session {session_id} not found", "agentId": agent_id}
