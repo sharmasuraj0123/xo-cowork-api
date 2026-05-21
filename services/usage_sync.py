@@ -184,7 +184,7 @@ async def _run_sync(is_backfill: bool = False) -> None:
         return
 
     try:
-        aggregated = mod.aggregate_for_sync(since_date=last_synced_date)
+        aggregated = mod.sync_payload(since_date=last_synced_date)
     except Exception as e:
         note = f"aggregation failed in agent usage module: {e}"
         print(f"{_timestamp_prefix()} usage_sync: {note} — posting placeholder")
