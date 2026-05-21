@@ -147,20 +147,25 @@ write_env_file() {
 
     log "Writing .env from environment (first time)"
     umask 077
+    # Values are single-quoted so openclaw.sh's `source .env` preserves
+    # embedded characters like the JSON double-quotes in ENABLED_CHANNELS
+    # (e.g. ["telegram"]). Without quoting, bash quote-removal would
+    # collapse that to [telegram] and openclaw.sh's grep for '"telegram"'
+    # would fail, silently disabling the plugin.
     cat > "$ENV_FILE" <<ENVEOF
-ENABLED_CHANNELS=${ENABLED_CHANNELS:-}
-TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
-XO_AUTH_SESSION_ID=${XO_AUTH_SESSION_ID:-}
-XO_POLL_TOKEN=${XO_POLL_TOKEN:-}
-XO_API_KEY=${XO_API_KEY:-}
-OPENCLAW_CONTROL_UI_ORIGIN=${OPENCLAW_CONTROL_UI_ORIGIN:-}
-CHAT_API_BASE_URL=${CHAT_API_BASE_URL:-https://api-swarm-dev.xo.builders}
-CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}
-OPENAI_API_KEY=${OPENAI_API_KEY:-}
-SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
-SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+ENABLED_CHANNELS='${ENABLED_CHANNELS:-}'
+TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN:-}'
+ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY:-}'
+OPENCLAW_GATEWAY_TOKEN='${OPENCLAW_GATEWAY_TOKEN:-}'
+XO_AUTH_SESSION_ID='${XO_AUTH_SESSION_ID:-}'
+XO_POLL_TOKEN='${XO_POLL_TOKEN:-}'
+XO_API_KEY='${XO_API_KEY:-}'
+OPENCLAW_CONTROL_UI_ORIGIN='${OPENCLAW_CONTROL_UI_ORIGIN:-}'
+CHAT_API_BASE_URL='${CHAT_API_BASE_URL:-https://api-swarm-dev.xo.builders}'
+CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}'
+OPENAI_API_KEY='${OPENAI_API_KEY:-}'
+SLACK_BOT_TOKEN='${SLACK_BOT_TOKEN:-}'
+SLACK_APP_TOKEN='${SLACK_APP_TOKEN:-}'
 ENVEOF
     chmod 600 "$ENV_FILE"
     log_success ".env written (mode 600)"
