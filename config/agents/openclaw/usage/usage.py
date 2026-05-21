@@ -832,3 +832,409 @@ def aggregate_for_sync(*, since_date: Optional[str] = None) -> dict:
     if parse_errors:
         result["__parse_errors__"] = parse_errors
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contract — canonical view methods (post-restructure surface).
+# Routers under /api/usage/* and /openclaw/usage/* both dispatch into these
+# via load_usage_module(). All openclaw-specific view assembly lives here;
+# the routers contain zero agent code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _window_to_ms(window: dict | None) -> tuple[Optional[int], Optional[int], int]:
+    """Resolve a unified window dict to (start_ms, end_ms, range_days).
+
+      window = {"days": N, "tz": "local"|"utc"}   → gateway parseDateRange
+      window = {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}  → explicit (UTC)
+      None / empty                                → no filter
+    """
+    if not window:
+        return None, None, 0
+    if "start" in window or "end" in window:
+        s = window.get("start"); e = window.get("end")
+        start_ms = (
+            int(datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+            if s else None
+        )
+        end_ms = (
+            int(datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000) + 86_400_000
+            if e else None
+        )
+        if start_ms and end_ms:
+            range_days = max(1, (end_ms - start_ms) // 86_400_000)
+        else:
+            range_days = 0
+        return start_ms, end_ms, int(range_days)
+    if "days" in window:
+        days = int(window["days"])
+        tz = window.get("tz", "local")
+        start_ms, end_ms = _gateway_window_ms(days, tz=tz)
+        return start_ms, end_ms, days
+    return None, None, 0
+
+
+def _collect_entries(start_ms: Optional[int], end_ms: Optional[int],
+                     agent_id: Optional[str] = None) -> list:
+    """Walk every counted session file via parse_file() and flatten entries."""
+    all_entries: list = []
+    for sf in get_session_files(agent_id=agent_id):
+        try:
+            _, entries = parse_file(sf, start_ms=start_ms, end_ms=end_ms)
+        except Exception:
+            continue
+        all_entries.extend(entries)
+    return all_entries
+
+
+# ── dashboard ────────────────────────────────────────────────────────────────
+
+
+def dashboard(*, window: dict) -> dict:
+    """UsageStats shape — what /api/usage returns. Routes here for openclaw."""
+    days = window.get("days", 30) if "days" in window else None
+    tz = window.get("tz", "local")
+    if days is None:
+        # Explicit start/end branch: derive a synthetic days value for the
+        # daily[] zero-fill in aggregate_for_dashboard. Computing exact days
+        # from the explicit window keeps the chart axis correct.
+        start_ms, end_ms, derived_days = _window_to_ms(window)
+        days = derived_days or 30
+    return aggregate_for_dashboard(days=days, tz=tz)
+
+
+# Legacy alias — kept for one ship cycle. Callers (services/usage_sync.py,
+# routers that haven't migrated yet) keep working. Drop in Phase 5.
+# aggregate_for_dashboard already exists above; nothing to alias.
+
+
+# ── analytics ────────────────────────────────────────────────────────────────
+
+
+def analytics(*, window: dict) -> dict:
+    """Time-series dashboard payload: stat cards + per-day cost/tokens +
+    per-day messages + per-day performance + per-tool counts + per-model totals.
+    Relocated from routers/openclaw_usage.py:get_usage_analytics.
+    """
+    from collections import defaultdict
+
+    start_ms, end_ms, range_days = _window_to_ms(window)
+    range_days = range_days or 5  # legacy default for unspecified windows
+
+    all_entries = _collect_entries(start_ms, end_ms)
+
+    empty_response = {
+        "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
+        "costAndTokens": [],
+        "messages": [],
+        "performance": [],
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": [],
+    }
+    if not all_entries:
+        return empty_response
+
+    total_cost = 0.0
+    total_tokens = 0
+    total_messages = 0
+    latencies: list[int] = []
+
+    daily_cost: dict[str, dict] = defaultdict(lambda: {"date": "", "tokens": 0, "cost": 0.0})
+    daily_msgs: dict[str, dict] = defaultdict(
+        lambda: {"date": "", "total": 0, "user": 0, "assistant": 0, "toolCalls": 0}
+    )
+    daily_perf: dict[str, list] = defaultdict(list)
+
+    tool_counter: dict[str, int] = defaultdict(int)
+    total_tool_calls = 0
+    model_map: dict[str, dict] = {}
+
+    for entry in all_entries:
+        role = entry.get("role", "assistant")
+        ts = entry.get("timestamp")
+
+        if role == "user":
+            total_messages += 1
+            if ts:
+                d = _date_from_ms(ts)
+                dm = daily_msgs[d]
+                dm["date"] = d
+                dm["user"] += 1
+                dm["total"] += 1
+            continue
+
+        usage = entry["usage"]
+        cost_val = usage.get("cost", {}).get("total", 0) or 0
+        tok = usage.get("totalTokens", 0) or 0
+
+        total_cost += cost_val
+        total_tokens += tok
+        total_messages += 1
+
+        dur = entry.get("durationMs")
+        if dur and dur > 0:
+            latencies.append(dur)
+
+        if ts:
+            d = _date_from_ms(ts)
+            dc = daily_cost[d]
+            dc["date"] = d
+            dc["tokens"] += tok
+            dc["cost"] += cost_val
+
+            dm = daily_msgs[d]
+            dm["date"] = d
+            dm["assistant"] += 1
+            dm["total"] += 1
+            dm["toolCalls"] += len(entry.get("toolNames", []))
+
+            if dur and dur > 0:
+                daily_perf[d].append(dur)
+
+        for tn in entry.get("toolNames", []):
+            tool_counter[tn] += 1
+            total_tool_calls += 1
+
+        mkey = f"{entry.get('provider', '')}|{entry.get('model', '')}"
+        if mkey not in model_map:
+            model_map[mkey] = {
+                "model": entry.get("model", ""),
+                "provider": entry.get("provider", ""),
+                "calls": 0, "tokens": 0, "cost": 0.0,
+            }
+        mm = model_map[mkey]
+        mm["calls"] += 1
+        mm["tokens"] += tok
+        mm["cost"] += cost_val
+
+    # Zero-fill date axis anchored on midnight(today, local TZ).
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    date_range = [
+        (today_local - timedelta(days=range_days - 1 - i)).strftime("%Y-%m-%d")
+        for i in range(range_days)
+    ]
+
+    cost_and_tokens = []
+    messages_list = []
+    performance_list = []
+
+    for d in date_range:
+        if d in daily_cost:
+            dc = daily_cost[d]
+            cost_and_tokens.append({"date": d, "tokens": dc["tokens"], "cost": round(dc["cost"], 6)})
+        else:
+            cost_and_tokens.append({"date": d, "tokens": 0, "cost": 0})
+
+        if d in daily_msgs:
+            dm = daily_msgs[d]
+            messages_list.append({
+                "date": d, "total": dm["total"], "user": dm["user"],
+                "assistant": dm["assistant"], "toolCalls": dm["toolCalls"],
+            })
+        else:
+            messages_list.append({"date": d, "total": 0, "user": 0, "assistant": 0, "toolCalls": 0})
+
+        vals = daily_perf.get(d, [])
+        if vals:
+            vals_sorted = sorted(vals)
+            p95_idx = max(0, int(len(vals_sorted) * 0.95) - 1)
+            performance_list.append({
+                "date": d,
+                "avgMs": round(sum(vals_sorted) / len(vals_sorted)),
+                "p95Ms": vals_sorted[p95_idx],
+                "minMs": vals_sorted[0],
+                "maxMs": vals_sorted[-1],
+            })
+        else:
+            performance_list.append({"date": d, "avgMs": 0, "p95Ms": 0, "minMs": 0, "maxMs": 0})
+
+    avg_latency = round(sum(latencies) / len(latencies)) if latencies else 0
+
+    return {
+        "stats": {
+            "totalCost": round(total_cost, 6),
+            "totalTokens": total_tokens,
+            "totalMessages": total_messages,
+            "avgLatencyMs": avg_latency,
+        },
+        "costAndTokens": cost_and_tokens,
+        "messages": messages_list,
+        "performance": performance_list,
+        "toolUsage": {
+            "totalCalls": total_tool_calls,
+            "uniqueTools": len(tool_counter),
+            "tools": sorted(
+                [{"name": k, "count": v} for k, v in tool_counter.items()],
+                key=lambda t: -t["count"],
+            ),
+        },
+        "modelUsage": sorted(
+            [
+                {
+                    "model": m["model"], "provider": m["provider"], "calls": m["calls"],
+                    "tokens": m["tokens"], "cost": round(m["cost"], 6),
+                }
+                for m in model_map.values()
+            ],
+            key=lambda m: -m["cost"],
+        ),
+    }
+
+
+# ── summary_card ─────────────────────────────────────────────────────────────
+
+
+def summary_card(*, window: dict) -> dict:
+    """Lightweight headline card: totals + per-day cost/tokens/assistant-msgs.
+    Relocated from routers/openclaw_usage.py:get_usage_summary_card.
+    """
+    from collections import defaultdict
+
+    days = int(window.get("days", 5)) if "days" in window else 5
+    start_ms, end_ms, _ = _window_to_ms(window)
+
+    all_entries = _collect_entries(start_ms, end_ms)
+
+    if not all_entries:
+        return {"days": days, "totalCost": 0, "totalMessages": 0, "totalTokens": 0, "dailyCost": []}
+
+    daily: dict[str, dict] = defaultdict(lambda: {"date": "", "cost": 0.0, "tokens": 0, "messages": 0})
+    total_cost = 0.0
+    total_tokens = 0
+    total_messages = 0  # legacy semantic: assistant-only count
+
+    for entry in all_entries:
+        if entry.get("role") == "user":
+            continue
+        usage = entry["usage"]
+        cost_val = usage.get("cost", {}).get("total", 0) or 0
+        tok = usage.get("totalTokens", 0) or 0
+        total_cost += cost_val
+        total_tokens += tok
+        total_messages += 1
+
+        ts = entry.get("timestamp")
+        if ts:
+            d = _date_from_ms(ts)
+            row = daily[d]
+            row["date"] = d
+            row["cost"] += cost_val
+            row["tokens"] += tok
+            row["messages"] += 1
+
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_list = []
+    for i in range(days):
+        d = (today_local - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        if d in daily:
+            row = daily[d]
+            daily_list.append({
+                "date": row["date"], "cost": round(row["cost"], 6),
+                "tokens": row["tokens"], "messages": row["messages"],
+            })
+        else:
+            daily_list.append({"date": d, "cost": 0, "tokens": 0, "messages": 0})
+
+    return {
+        "days": days,
+        "totalCost": round(total_cost, 6),
+        "totalMessages": total_messages,
+        "totalTokens": total_tokens,
+        "dailyCost": daily_list,
+    }
+
+
+# ── summary ──────────────────────────────────────────────────────────────────
+
+
+def summary(*, window: dict) -> dict:
+    """Aggregated SessionCostSummary across all sessions in the window,
+    plus per-session sub-summaries in ``sessions[]``.
+    Relocated from routers/openclaw_usage.py:get_usage_summary.
+    """
+    start_ms, end_ms, _ = _window_to_ms(window)
+
+    files = get_session_files()
+    if not files:
+        return {"error": "No session files found"}
+
+    all_entries: list = []
+    session_summaries: list = []
+    for sf in files:
+        meta, entries = parse_file(sf, start_ms=start_ms, end_ms=end_ms)
+        if entries:
+            session_summaries.append(build_summary(meta, entries))
+            all_entries.extend(entries)
+
+    if not all_entries:
+        return {"error": "No usage data found in the given range"}
+
+    combined = build_summary(
+        {"sessionId": "all", "sessionFile": f"{len(files)} files"},
+        all_entries,
+    )
+    combined["sessionCount"] = len(session_summaries)
+    combined["sessions"] = session_summaries
+    return combined
+
+
+# ── list_sessions ────────────────────────────────────────────────────────────
+
+
+def list_sessions() -> dict:
+    """One row per discovered session. ``messageCount`` is assistant-only
+    (preserved legacy contract).
+    Relocated from routers/openclaw_usage.py:get_session_list.
+    """
+    sessions = []
+    for sf in get_session_files():
+        meta, entries = parse_file(sf, start_ms=None, end_ms=None)
+        if not meta:
+            continue
+        assistant_entries = [e for e in entries if e.get("role") != "user"]
+        total_cost = sum(
+            (e["usage"].get("cost", {}).get("total", 0) or 0) for e in assistant_entries
+        )
+        total_tokens = sum(
+            (e["usage"].get("totalTokens", 0) or 0) for e in assistant_entries
+        )
+        timestamps = [e["timestamp"] for e in entries if e.get("timestamp")]
+
+        sessions.append({
+            "sessionId": meta.get("sessionId"),
+            "sessionFile": meta.get("sessionFile"),
+            "messageCount": len(assistant_entries),
+            "totalTokens": total_tokens,
+            "totalCost": round(total_cost, 6),
+            "firstActivity": min(timestamps) if timestamps else None,
+            "lastActivity": max(timestamps) if timestamps else None,
+        })
+
+    return {"count": len(sessions), "sessions": sessions}
+
+
+# ── get_session ──────────────────────────────────────────────────────────────
+
+
+def get_session(session_id: str, *, window: dict | None = None) -> dict | None:
+    """Detailed SessionCostSummary for one session, optionally windowed.
+    Returns None if not found so the router can 404.
+    Relocated from routers/openclaw_usage.py:get_session_usage.
+    """
+    start_ms, end_ms, _ = _window_to_ms(window or {})
+
+    for sf in get_session_files():
+        if session_id in os.path.basename(sf):
+            meta, entries = parse_file(sf, start_ms=start_ms, end_ms=end_ms)
+            if not entries:
+                return {"error": "No usage data found for this session in the given range"}
+            return build_summary(meta, entries)
+
+    return None
+
+
+# ── sync_payload alias ───────────────────────────────────────────────────────
+# Canonical name going forward. Old `aggregate_for_sync` stays as the function
+# definition above; this alias lets new callers use the new name during the
+# transition. Phase 5 swaps which side is the alias.
+sync_payload = aggregate_for_sync

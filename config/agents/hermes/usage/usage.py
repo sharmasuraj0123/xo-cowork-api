@@ -335,3 +335,358 @@ def aggregate_for_sync(*, since_date: Optional[str] = None) -> dict:
         }
     result["__session_dates__"] = {k: len(v) for k, v in session_dates.items()}
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contract — canonical view methods (post-restructure surface).
+# Hermes synthesizes views from session-row SQL — no per-message data, so
+# tool/error counts and per-call latency are always zero.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _window_to_ms(window: dict | None) -> tuple[float, float, int]:
+    """Resolve a unified window dict to (cutoff_epoch_secs, until_epoch_secs, range_days)."""
+    if not window:
+        return 0.0, float("inf"), 0
+    if "start" in window or "end" in window:
+        s = window.get("start"); e = window.get("end")
+        cutoff = (
+            datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+            if s else 0.0
+        )
+        until = (
+            datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() + 86400
+            if e else float("inf")
+        )
+        if s and e:
+            range_days = max(1, int((until - cutoff) // 86400))
+        else:
+            range_days = 0
+        return cutoff, until, range_days
+    if "days" in window:
+        days = int(window["days"])
+        tz = window.get("tz", "local")
+        z = _resolve_tz(tz)
+        today_start = datetime.now(z).replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = (today_start - timedelta(days=days - 1)).timestamp()
+        until = (today_start + timedelta(days=1)).timestamp()
+        return cutoff, until, days
+    return 0.0, float("inf"), 0
+
+
+def _rows_in_window(window: dict | None) -> list[tuple]:
+    cutoff, until, _ = _window_to_ms(window)
+    rows = _read_sessions(cutoff)
+    if until != float("inf"):
+        rows = [r for r in rows if r[3] <= until]  # r[3] = started_at
+    return rows
+
+
+# ── dashboard ────────────────────────────────────────────────────────────────
+
+
+def dashboard(*, window: dict) -> dict:
+    if "days" in window:
+        return aggregate_for_dashboard(days=int(window["days"]), tz=window.get("tz", "local"))
+    _, _, derived_days = _window_to_ms(window)
+    return aggregate_for_dashboard(days=derived_days or 30, tz="local")
+
+
+# ── analytics ────────────────────────────────────────────────────────────────
+
+
+def analytics(*, window: dict) -> dict:
+    """Time-series dashboard payload — synthesized from session-row SQL.
+    Per-call latency / tool counts unavailable from hermes schema (always 0)."""
+    from collections import defaultdict
+
+    cutoff, until, range_days = _window_to_ms(window)
+    range_days = range_days or 5
+    rows = _rows_in_window(window)
+
+    empty = {
+        "stats": {"totalCost": 0, "totalTokens": 0, "totalMessages": 0, "avgLatencyMs": 0},
+        "costAndTokens": [], "messages": [], "performance": [],
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": [],
+    }
+    if not rows:
+        return empty
+
+    total_cost = 0.0
+    total_tokens = 0
+    total_messages = 0
+
+    daily_cost: dict[str, dict] = defaultdict(lambda: {"date": "", "tokens": 0, "cost": 0.0})
+    daily_msgs: dict[str, dict] = defaultdict(
+        lambda: {"date": "", "total": 0, "user": 0, "assistant": 0, "toolCalls": 0}
+    )
+    model_map: dict[str, dict] = {}
+
+    for row in rows:
+        (_sid, _src, model, started_at, _title,
+         msg_count, inp, out, cache_r, cache_w, reasoning,
+         provider, est_cost, act_cost) = row
+        inp = int(inp or 0); out = int(out or 0)
+        cache_r = int(cache_r or 0); cache_w = int(cache_w or 0)
+        reasoning = int(reasoning or 0); msg_count = int(msg_count or 0)
+        cost_val = float(act_cost if act_cost is not None else (est_cost or 0))
+        tok = inp + out + cache_r + cache_w + reasoning
+
+        total_cost += cost_val
+        total_tokens += tok
+        total_messages += msg_count
+
+        rt = datetime.fromtimestamp(started_at, tz=timezone.utc)
+        d = rt.strftime("%Y-%m-%d")
+        dc = daily_cost[d]
+        dc["date"] = d; dc["tokens"] += tok; dc["cost"] += cost_val
+        dm = daily_msgs[d]
+        dm["date"] = d; dm["assistant"] += msg_count; dm["total"] += msg_count
+
+        mkey = f"{provider or 'hermes'}|{model or 'unknown'}"
+        if mkey not in model_map:
+            model_map[mkey] = {
+                "model": model or "unknown", "provider": provider or "hermes",
+                "calls": 0, "tokens": 0, "cost": 0.0,
+            }
+        mm = model_map[mkey]
+        mm["calls"] += msg_count
+        mm["tokens"] += tok
+        mm["cost"] += cost_val
+
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    date_range = [
+        (today_local - timedelta(days=range_days - 1 - i)).strftime("%Y-%m-%d")
+        for i in range(range_days)
+    ]
+    cost_and_tokens, messages_list, performance_list = [], [], []
+    for d in date_range:
+        if d in daily_cost:
+            dc = daily_cost[d]
+            cost_and_tokens.append({"date": d, "tokens": dc["tokens"], "cost": round(dc["cost"], 6)})
+        else:
+            cost_and_tokens.append({"date": d, "tokens": 0, "cost": 0})
+        if d in daily_msgs:
+            dm = daily_msgs[d]
+            messages_list.append({
+                "date": d, "total": dm["total"], "user": dm["user"],
+                "assistant": dm["assistant"], "toolCalls": 0,
+            })
+        else:
+            messages_list.append({"date": d, "total": 0, "user": 0, "assistant": 0, "toolCalls": 0})
+        performance_list.append({"date": d, "avgMs": 0, "p95Ms": 0, "minMs": 0, "maxMs": 0})
+
+    return {
+        "stats": {
+            "totalCost": round(total_cost, 6), "totalTokens": total_tokens,
+            "totalMessages": total_messages, "avgLatencyMs": 0,
+        },
+        "costAndTokens": cost_and_tokens,
+        "messages": messages_list,
+        "performance": performance_list,
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": sorted(
+            [{"model": m["model"], "provider": m["provider"], "calls": m["calls"],
+              "tokens": m["tokens"], "cost": round(m["cost"], 6)}
+             for m in model_map.values()],
+            key=lambda m: -m["cost"],
+        ),
+    }
+
+
+# ── summary ──────────────────────────────────────────────────────────────────
+
+
+def _row_to_session_summary(row: tuple) -> dict:
+    """Synthesize a SessionCostSummary from one hermes sessions-table row."""
+    (sid, _src, model, started_at, title,
+     msg_count, inp, out, cache_r, cache_w, reasoning,
+     provider, est_cost, act_cost) = row
+    inp = int(inp or 0); out = int(out or 0)
+    cache_r = int(cache_r or 0); cache_w = int(cache_w or 0)
+    reasoning = int(reasoning or 0); msg_count = int(msg_count or 0)
+    cost_val = float(act_cost if act_cost is not None else (est_cost or 0))
+    tok = inp + out + cache_r + cache_w + reasoning
+    ts_ms = int(started_at * 1000)
+    date_str = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d")
+    return {
+        "sessionId": sid,
+        "sessionFile": None,
+        "firstActivity": ts_ms,
+        "lastActivity": ts_ms,
+        "durationMs": 0,
+        "activityDates": [date_str],
+        "input": inp, "output": out, "cacheRead": cache_r, "cacheWrite": cache_w,
+        "totalTokens": tok,
+        "totalCost": round(cost_val, 6),
+        "inputCost": 0.0, "outputCost": 0.0, "cacheReadCost": 0.0, "cacheWriteCost": 0.0,
+        "missingCostEntries": 0,
+        "dailyBreakdown": [{"date": date_str, "tokens": tok, "cost": round(cost_val, 6)}],
+        "dailyMessageCounts": [{
+            "date": date_str, "total": msg_count, "user": 0, "assistant": msg_count,
+            "toolCalls": 0, "toolResults": 0, "errors": 0,
+        }],
+        "dailyLatency": [],
+        "dailyModelUsage": [{
+            "date": date_str, "provider": provider or "hermes",
+            "model": model or "unknown", "tokens": tok,
+            "cost": round(cost_val, 6), "count": msg_count,
+        }],
+        "messageCounts": {
+            "total": msg_count, "user": 0, "assistant": msg_count,
+            "toolCalls": 0, "toolResults": 0, "errors": 0,
+        },
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": [{
+            "provider": provider or "hermes", "model": model or "unknown",
+            "count": msg_count,
+            "totals": {
+                "input": inp, "output": out, "cacheRead": cache_r, "cacheWrite": cache_w,
+                "totalTokens": tok, "totalCost": round(cost_val, 6),
+                "inputCost": 0, "outputCost": 0, "cacheReadCost": 0, "cacheWriteCost": 0,
+                "missingCostEntries": 0,
+            },
+        }],
+        "latency": {"count": 0, "avgMs": 0, "p95Ms": 0, "minMs": 0, "maxMs": 0},
+        "_title": title,
+    }
+
+
+def summary(*, window: dict) -> dict:
+    rows = _rows_in_window(window)
+    if not rows:
+        return {"error": "No session data found in the given range"}
+
+    session_summaries = [_row_to_session_summary(r) for r in rows]
+
+    # Aggregate combined totals
+    agg = {
+        "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+        "totalCost": 0.0, "inputCost": 0.0, "outputCost": 0.0,
+        "cacheReadCost": 0.0, "cacheWriteCost": 0.0, "missingCostEntries": 0,
+    }
+    total_msgs = 0
+    for s in session_summaries:
+        for k in ("input", "output", "cacheRead", "cacheWrite", "totalTokens"):
+            agg[k] += s[k]
+        agg["totalCost"] += s["totalCost"]
+        total_msgs += s["messageCounts"]["total"]
+
+    daily_breakdown: dict[str, dict] = {}
+    for s in session_summaries:
+        for r in s["dailyBreakdown"]:
+            row = daily_breakdown.setdefault(r["date"], {"date": r["date"], "tokens": 0, "cost": 0.0})
+            row["tokens"] += r["tokens"]; row["cost"] += r["cost"]
+
+    return {
+        "sessionId": "all",
+        "sessionFile": f"{len(rows)} hermes sessions",
+        "firstActivity": min(s["firstActivity"] for s in session_summaries),
+        "lastActivity": max(s["lastActivity"] for s in session_summaries),
+        "durationMs": 0,
+        "activityDates": sorted(set(d for s in session_summaries for d in s["activityDates"])),
+        **{k: (round(v, 6) if isinstance(v, float) else v) for k, v in agg.items()},
+        "dailyBreakdown": sorted(daily_breakdown.values(), key=lambda d: d["date"]),
+        "dailyMessageCounts": [],
+        "dailyLatency": [],
+        "dailyModelUsage": [],
+        "messageCounts": {
+            "total": total_msgs, "user": 0, "assistant": total_msgs,
+            "toolCalls": 0, "toolResults": 0, "errors": 0,
+        },
+        "toolUsage": {"totalCalls": 0, "uniqueTools": 0, "tools": []},
+        "modelUsage": [],
+        "latency": {"count": 0, "avgMs": 0, "p95Ms": 0, "minMs": 0, "maxMs": 0},
+        "sessionCount": len(session_summaries),
+        "sessions": session_summaries,
+    }
+
+
+# ── summary_card ─────────────────────────────────────────────────────────────
+
+
+def summary_card(*, window: dict) -> dict:
+    from collections import defaultdict
+    days = int(window.get("days", 5)) if "days" in window else 5
+    rows = _rows_in_window(window)
+
+    if not rows:
+        return {"days": days, "totalCost": 0, "totalMessages": 0, "totalTokens": 0, "dailyCost": []}
+
+    daily: dict[str, dict] = defaultdict(lambda: {"date": "", "cost": 0.0, "tokens": 0, "messages": 0})
+    total_cost = 0.0; total_tokens = 0; total_messages = 0
+
+    for row in rows:
+        (_sid, _src, _model, started_at, _title,
+         msg_count, inp, out, cache_r, cache_w, reasoning,
+         _provider, est_cost, act_cost) = row
+        tok = int(inp or 0) + int(out or 0) + int(cache_r or 0) + int(cache_w or 0) + int(reasoning or 0)
+        msg_count = int(msg_count or 0)
+        cost_val = float(act_cost if act_cost is not None else (est_cost or 0))
+        total_cost += cost_val; total_tokens += tok; total_messages += msg_count
+
+        d = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d")
+        row_d = daily[d]
+        row_d["date"] = d
+        row_d["cost"] += cost_val
+        row_d["tokens"] += tok
+        row_d["messages"] += msg_count
+
+    today_local = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_list = []
+    for i in range(days):
+        d = (today_local - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        if d in daily:
+            row_d = daily[d]
+            daily_list.append({
+                "date": row_d["date"], "cost": round(row_d["cost"], 6),
+                "tokens": row_d["tokens"], "messages": row_d["messages"],
+            })
+        else:
+            daily_list.append({"date": d, "cost": 0, "tokens": 0, "messages": 0})
+
+    return {
+        "days": days,
+        "totalCost": round(total_cost, 6),
+        "totalMessages": total_messages,
+        "totalTokens": total_tokens,
+        "dailyCost": daily_list,
+    }
+
+
+# ── list_sessions / get_session ─────────────────────────────────────────────
+
+
+def list_sessions() -> dict:
+    rows = _read_sessions(0)  # all sessions, ever
+    sessions = []
+    for row in rows:
+        (sid, _src, _model, started_at, _title,
+         msg_count, inp, out, cache_r, cache_w, reasoning,
+         _provider, est_cost, act_cost) = row
+        tok = int(inp or 0) + int(out or 0) + int(cache_r or 0) + int(cache_w or 0) + int(reasoning or 0)
+        cost_val = float(act_cost if act_cost is not None else (est_cost or 0))
+        ts_ms = int(started_at * 1000)
+        sessions.append({
+            "sessionId": sid,
+            "sessionFile": None,
+            "messageCount": int(msg_count or 0),
+            "totalTokens": tok,
+            "totalCost": round(cost_val, 6),
+            "firstActivity": ts_ms,
+            "lastActivity": ts_ms,
+        })
+    return {"count": len(sessions), "sessions": sessions}
+
+
+def get_session(session_id: str, *, window: dict | None = None) -> dict | None:
+    rows = _read_sessions(0)
+    for row in rows:
+        if row[0] == session_id:
+            return _row_to_session_summary(row)
+    return None
+
+
+# Canonical sync surface alias.
+sync_payload = aggregate_for_sync
