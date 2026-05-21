@@ -1,11 +1,14 @@
 """
-Aggregated usage statistics for the active agent.
+Canonical usage router — `/api/usage/*`.
 
-Thin wrapper around ``services.cowork_agent.usage_loader.load_usage_module()``.
-The body of ``/api/usage`` delegates to the loaded module's
-``aggregate_for_dashboard`` — the active agent's ``config/agents/<name>/usage/usage.py``.
+Body is pure URL → module-method dispatch. The active agent is resolved by
+``services.cowork_agent.usage_loader.load_usage_module()`` (single
+``importlib.import_module`` call, no if/elif), and every endpoint forwards
+into that module's view method. Zero agent-specific code lives here.
 
-Returns the UsageStats shape expected by the frontend (src/types/usage.ts).
+The legacy ``/openclaw/usage/*`` URLs are kept as backward-compat aliases
+in ``routers/openclaw_usage.py``; they bind to the **same handler
+functions** defined below, so the two prefixes return byte-identical JSON.
 """
 from typing import Optional
 
@@ -13,29 +16,102 @@ from fastapi import APIRouter, HTTPException, Query
 
 from services.cowork_agent.usage_loader import load_usage_module
 
-router = APIRouter()
+router = APIRouter(tags=["usage"])
 
 
-@router.get("/api/usage")
-def usage(
-    days: int = 30,
-    tz: Optional[str] = Query(None, description="Day-bucket timezone: 'local' (default, host TZ) or 'utc'."),
-):
-    """Aggregate usage for the active agent within the last ``days``.
-
-    Active agent is resolved from AGENT_NAME (or DEFAULT_AGENT) and the
-    corresponding module loaded via importlib. No per-agent if/else lives
-    in the router.
-    """
-    days = max(1, min(days, 365))
-    tz_resolved = tz if tz in ("local", "utc") else "local"
-
+def _load_or_501():
     try:
-        mod = load_usage_module()
+        return load_usage_module()
     except ModuleNotFoundError as e:
         raise HTTPException(
             status_code=501,
             detail=f"no usage module for active agent (tried config.agents.<name>.usage.usage): {e}",
         )
 
-    return mod.aggregate_for_dashboard(days=days, tz=tz_resolved)
+
+def _window_from_query(days: Optional[int], start: Optional[str],
+                       end: Optional[str], tz: str) -> dict:
+    """Translate HTTP query params into the uniform module window shape.
+
+    Explicit ``start`` + ``end`` take precedence; otherwise ``days``
+    (default 30) becomes a rolling gateway-aligned window.
+    """
+    if start or end:
+        if not (start and end):
+            raise HTTPException(400, "start and end must be passed together")
+        return {"start": start, "end": end, "tz": tz}
+    return {"days": days if days is not None else 30, "tz": tz}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/usage")
+def usage_dashboard(
+    days: int = Query(30, description="Number of days to include (default 30)"),
+    tz: Optional[str] = Query(None, description="Day-bucket timezone: 'local' (default, host TZ) or 'utc'."),
+):
+    """Aggregated UsageStats for the active agent. The shape the frontend
+    Settings → Usage tab consumes."""
+    days = max(1, min(days, 365))
+    tz_resolved = tz if tz in ("local", "utc") else "local"
+    return _load_or_501().dashboard(window={"days": days, "tz": tz_resolved})
+
+
+@router.get("/api/usage/analytics")
+def usage_analytics(
+    days: Optional[int] = Query(None, description="Limit to last N days"),
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    tz: str = Query("local", description="Day-bucket timezone: 'local' or 'utc'"),
+):
+    """Time-series dashboard payload: stat cards + per-day cost/tokens +
+    per-day messages + per-day performance + per-tool counts + per-model totals."""
+    return _load_or_501().analytics(window=_window_from_query(days, start, end, tz))
+
+
+@router.get("/api/usage/summary")
+def usage_summary(
+    days: Optional[int] = Query(None, description="Limit to last N days"),
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    tz: str = Query("local", description="Day-bucket timezone: 'local' or 'utc'"),
+):
+    """Aggregated SessionCostSummary across all sessions in the window, plus
+    per-session sub-summaries in ``sessions[]``."""
+    return _load_or_501().summary(window=_window_from_query(days, start, end, tz))
+
+
+@router.get("/api/usage/summary/card")
+def usage_summary_card(
+    days: int = Query(5, description="Number of days to include (default 5)"),
+    tz: str = Query("local", description="Day-bucket timezone: 'local' or 'utc'"),
+):
+    """Lightweight headline card: totals + per-day cost/tokens/assistant-msgs."""
+    return _load_or_501().summary_card(window={"days": days, "tz": tz})
+
+
+@router.get("/api/usage/sessions")
+def usage_sessions():
+    """List every discovered session with basic metadata.
+    ``messageCount`` is assistant-only (preserved legacy contract)."""
+    return _load_or_501().list_sessions()
+
+
+@router.get("/api/usage/sessions/{session_id}")
+def usage_session(
+    session_id: str,
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    tz: str = Query("local", description="Day-bucket timezone: 'local' or 'utc'"),
+):
+    """Detailed SessionCostSummary for one session, optionally windowed."""
+    window = None
+    if start or end:
+        window = _window_from_query(None, start, end, tz)
+    result = _load_or_501().get_session(session_id, window=window)
+    if result is None:
+        raise HTTPException(404, f"Session {session_id} not found")
+    return result
