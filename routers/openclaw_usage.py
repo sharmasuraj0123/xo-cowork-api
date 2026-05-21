@@ -7,7 +7,7 @@ Every endpoint here binds to the **same handler function** from
 handler under two URLs — no duplicate logic.
 
 All usage computation lives in the per-agent module at
-``config/agents/<AGENT_NAME>/usage/usage.py``, resolved via
+``services/cowork_agent/adapters/<AGENT_NAME>/usage.py``, resolved via
 ``services.cowork_agent.usage_loader.load_usage_module()``. This file
 contains only route registration; flip a route by editing the canonical
 handler in ``routers/cowork_agent/usage.py``.

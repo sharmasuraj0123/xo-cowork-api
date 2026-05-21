@@ -3,8 +3,11 @@ Dynamic loader for the active agent's usage module.
 
 The active agent is resolved from ``AGENT_NAME`` (or ``DEFAULT_AGENT``) via
 ``get_active_agent()``. The corresponding usage module is imported at
-``config.agents.<name>.usage.usage`` — adding a new agent is "drop
-config/agents/<name>/usage/usage.py" with no other code changes.
+``services.cowork_agent.adapters.<name>.usage`` — alongside the other
+agent-specific Python (adapter.py, channels_status.py, providers_status.py,
+models_status.py, streaming.py, transcript.py). Adding a new agent is
+"drop services/cowork_agent/adapters/<name>/usage.py" with no other code
+changes.
 
 No if/elif dispatcher. Single resolver, single source of truth.
 """
@@ -21,8 +24,8 @@ def load_usage_module() -> ModuleType:
 
     Raises:
         ModuleNotFoundError: if the active agent has no
-            ``config/agents/<name>/usage/usage.py``. The error names the path
-            we tried to import so the fix is obvious.
+            ``services/cowork_agent/adapters/<name>/usage.py``. The error
+            names the path we tried to import so the fix is obvious.
     """
     name = get_active_agent().name
-    return importlib.import_module(f"config.agents.{name}.usage.usage")
+    return importlib.import_module(f"services.cowork_agent.adapters.{name}.usage")
