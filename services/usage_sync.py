@@ -24,6 +24,7 @@ from collections import defaultdict
 
 import httpx
 
+from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.usage_loader import load_usage_module
 
 # ---------------------------------------------------------------------------
@@ -33,12 +34,15 @@ from services.cowork_agent.usage_loader import load_usage_module
 CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders")
 USAGE_REPORT_PATH = "/usage/report"
 
-# Watermark file lives inside the cowork repo, not in openclaw's directory.
-# Name kept legacy ("openclaw") to avoid forcing every deployed instance to
-# either migrate the file or do a one-time full backfill on next boot —
-# the file simply tracks the active agent's sync state regardless of name.
+# Watermark file is namespaced under the active agent so each adapter keeps
+# its own independent sync state. Switching AGENT_NAME (e.g. openclaw →
+# claude_code) lands on a fresh path with no watermark, which correctly
+# triggers a full backfill for the new agent rather than reusing the
+# previous agent's truncation point.
 _REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DEFAULT_WATERMARK_PATH = os.path.join(_REPO_DIR, "data", "openclaw", "usage_sync_state.json")
+_DEFAULT_WATERMARK_PATH = os.path.join(
+    _REPO_DIR, "data", get_active_agent().name, "usage_sync_state.json"
+)
 SYNC_STATE_FILE = os.getenv("USAGE_SYNC_STATE_FILE", _DEFAULT_WATERMARK_PATH)
 
 SYNC_HOUR_UTC = int(os.getenv("USAGE_SYNC_HOUR_UTC", "2"))
