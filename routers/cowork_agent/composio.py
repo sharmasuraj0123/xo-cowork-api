@@ -14,8 +14,8 @@ Endpoints (all under /api/connectors/composio):
   GET    /{toolkit}/prefs                — per-action enable/disable map
   PUT    /{toolkit}/prefs                — toggle one or more actions
                                           (404 for toolkits not yet supported)
-  POST   /execute                        — direct (non-chat) action invocation
-  GET    /mcp-url                        — per-user hosted MCP URL (used by adapters)
+  POST   /refresh-gateway                — rewrite the session-backed MCP entry
+                                          in ~/.openclaw or ~/.hermes config
   GET    /callback                       — OAuth callback (HTML, postMessages opener)
 """
 
@@ -89,13 +89,6 @@ class DisconnectBody(BaseModel):
     user_id: Optional[str] = None
 
 
-class ExecuteBody(BaseModel):
-    toolkit: str
-    tool_slug: str
-    arguments: dict[str, Any] = {}
-    user_id: Optional[str] = None
-
-
 # ---------------------------------------------------------------------------
 # Catalog + status
 # ---------------------------------------------------------------------------
@@ -137,15 +130,22 @@ async def connect(toolkit: str, body: ConnectBody, request: Request) -> JSONResp
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # Evict cached Tool Router session — the new Connected Account won't be
+    # pinned into a session minted before this point.
+    composio_service.invalidate_session(user_id)
     return JSONResponse(result)
 
 
 @router.get("/api/connectors/composio/{toolkit}/status")
 async def connect_status(
     toolkit: str,
+    request: Request,
     connection_request_id: str = Query(...),
 ) -> JSONResponse:
     result = composio_service.check_connection(connection_request_id)
+    # If the OAuth dance just finished, the user's pinned set changed.
+    if (result.get("status") or "").upper() == "ACTIVE":
+        composio_service.invalidate_session(_resolve_user_id(request))
     return JSONResponse(result)
 
 
@@ -161,6 +161,7 @@ async def disconnect(toolkit: str, body: DisconnectBody, request: Request) -> JS
         r.get("connected_account_id") == body.connected_account_id and r.get("status") == "ACTIVE"
         for r in rows
     )
+    composio_service.invalidate_session(user_id)
     return JSONResponse({"status": "needs_auth" if not still_connected else "connected"})
 
 
@@ -240,39 +241,17 @@ async def put_toolkit_prefs(
     return JSONResponse({"actions": updated})
 
 
-@router.post("/api/connectors/composio/execute")
-async def execute(body: ExecuteBody, request: Request) -> JSONResponse:
-    user_id = _resolve_user_id(request, body.user_id)
-    try:
-        result = composio_service.execute_tool(user_id, body.tool_slug, body.arguments)
-    except Exception as exc:
-        log.exception("composio: execute_tool failed")
-        raise HTTPException(status_code=502, detail=str(exc))
-    return JSONResponse(result)
-
-
-# ---------------------------------------------------------------------------
-# Per-user MCP URL (consumed by the Claude adapter to wire --mcp-config)
-# ---------------------------------------------------------------------------
-
-@router.get("/api/connectors/composio/mcp-url")
-async def mcp_url(request: Request) -> JSONResponse:
-    user_id = _resolve_user_id(request)
-    url = composio_service.get_mcp_url(user_id)
-    return JSONResponse({"url": url})
-
-
 # ---------------------------------------------------------------------------
 # Gateway install — openclaw / hermes
 #
 # Unlike claude_code which gets per-session --mcp-config, openclaw and hermes
-# expose tools/MCP via gateway-side config only. This endpoint writes the
-# current user's Composio MCP URL into the gateway's config file. The gateway
-# typically needs a restart to pick the change up.
+# expose MCP via gateway-side config only. This endpoint writes the current
+# user's session-backed Composio MCP entry into the gateway's config file.
+# Idempotent — re-call to refresh.
 # ---------------------------------------------------------------------------
 
-@router.post("/api/connectors/composio/install-into-gateway")
-async def install_into_gateway(
+@router.post("/api/connectors/composio/refresh-gateway")
+async def refresh_gateway(
     request: Request,
     agent: str = Query(..., regex="^(openclaw|hermes)$"),
 ) -> JSONResponse:

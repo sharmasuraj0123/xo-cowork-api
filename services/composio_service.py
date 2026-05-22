@@ -345,181 +345,125 @@ def _toolkit_id_for_slug(slug: str) -> Optional[str]:
     return None
 
 
-def execute_tool(user_id: str, tool_slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Run a single Composio action and return its result payload.
+# ---------------------------------------------------------------------------
+# Session — the unifying Composio abstraction
+# ---------------------------------------------------------------------------
+#
+# Per Composio docs (https://docs.composio.dev/docs/how-composio-works), a
+# session is the runtime context for one user. Both access modes —
+# session.tools() for in-process Python and session.mcp.url for MCP clients —
+# point at the same context. We use only the MCP mode (our three runtimes
+# are subprocess MCP clients), and cache the session.id per user so each
+# user's one OAuth grant via COMPOSIO_MANAGE_CONNECTIONS is visible across
+# every runtime and every chat turn.
 
-    Honours the per-action enable/disable preferences from
-    `services.composio_action_prefs`. If the slug's toolkit has the
-    action explicitly disabled, returns a `successful=False` payload
-    immediately — Composio is never called. This is a fail-safe for the
-    case where the model picks a disabled slug despite it not being in
-    `composio_list_tools` output (older context, hallucinated slug, etc).
 
-    `dangerously_skip_version_check=True` is the documented escape hatch for
-    direct .tools.execute() calls when the host app hasn't pinned a specific
-    toolkit version via `toolkit_versions=...` on the Composio client config
-    or via the COMPOSIO_TOOLKIT_VERSION_<SLUG> env vars. We don't pin
-    versions today — pinning here would require keeping the catalog in sync.
+_SESSION_IDS: dict[str, str] = {}
+
+
+def _pinned_connected_accounts(user_id: str) -> dict[str, list[str]]:
+    """{toolkit_slug: [connected_account_id, ...]} for every ACTIVE Connected
+    Account this user owns. Passed to composio.create() so the Tool Router
+    session sees the same connections the Connectors UI lit up.
+
+    Without this, a freshly minted session starts in an empty connection
+    sandbox and reports every toolkit as `initiated` — even if the user
+    already authorized them via the UI's Connected Accounts flow.
     """
-    from services import composio_action_prefs  # noqa: PLC0415  — see list_tools
+    pinned: dict[str, list[str]] = {}
+    try:
+        rows = list_connections(user_id)
+    except Exception as exc:
+        log.warning("composio: list_connections failed while building pin map for user=%s: %s", user_id, exc)
+        return pinned
+    for row in rows:
+        if (row.get("status") or "").upper() != "ACTIVE":
+            continue
+        slug = (row.get("toolkit") or "").lower()
+        cid = row.get("connected_account_id")
+        if not slug or not cid:
+            continue
+        pinned.setdefault(slug, []).append(cid)
+    return pinned
 
-    toolkit_id = _toolkit_id_for_slug(tool_slug)
-    if toolkit_id and not composio_action_prefs.is_action_enabled(toolkit_id, tool_slug):
-        return {
-            "successful": False,
-            "data": None,
-            "error": f"Action '{tool_slug}' is disabled by user preference.",
-        }
 
-    client = _composio()
-    result = client.tools.execute(  # type: ignore[attr-defined]
-        slug=tool_slug,
-        arguments=arguments,
-        user_id=user_id,
-        dangerously_skip_version_check=True,
+def invalidate_session(user_id: str) -> None:
+    """Evict the cached session for `user_id`. Call after any Connectors UI
+    state change (connect / disconnect / status flip) so the next agent
+    turn re-mints a session with the updated pin map."""
+    _SESSION_IDS.pop(user_id or _DEFAULT_USER_ID, None)
+
+
+def get_session(user_id: str):
+    """Return Composio's session object for `user_id`.
+
+    Reuses an existing session (`composio.use(session_id)`) when we have
+    its id from a previous call, otherwise mints a new one
+    (`composio.create(user_id=…, connected_accounts=…)`) with the user's
+    ACTIVE Connected Accounts pinned. In-memory cache only — if
+    xo-cowork-api restarts, the next call re-mints.
+    """
+    user_id = user_id or _DEFAULT_USER_ID
+    sid = _SESSION_IDS.get(user_id)
+    if sid:
+        try:
+            return _composio().use(sid)
+        except Exception as exc:
+            log.debug("composio: use(%s) failed for user=%s: %s", sid, user_id, exc)
+            _SESSION_IDS.pop(user_id, None)  # stale id; fall through to create
+    create_kwargs: dict[str, Any] = {"user_id": user_id}
+    pinned = _pinned_connected_accounts(user_id)
+    if pinned:
+        create_kwargs["connected_accounts"] = pinned
+    session = _composio().create(**create_kwargs)
+    new_id = getattr(session, "session_id", None) or getattr(session, "id", None)
+    if new_id:
+        _SESSION_IDS[user_id] = str(new_id)
+    return session
+
+
+def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
+    """Emit the canonical MCP server config for `user_id`.
+
+    URL and auth headers come straight from `session.mcp.url` /
+    `session.mcp.headers` — no host-prefix matching, no manually
+    constructed auth dicts. Every adapter writes this verbatim under the
+    server key ``cowork``.
+    """
+    session = get_session(user_id)
+    mcp = getattr(session, "mcp", None)
+    url = getattr(mcp, "url", None) if mcp is not None else None
+    headers = getattr(mcp, "headers", None) if mcp is not None else None
+    # Fall back to _attr in case the SDK shape ever returns dicts.
+    if not url:
+        url = _attr(session, "mcp", "url") or _attr(session, "url")
+    if not headers:
+        headers = _attr(session, "mcp", "headers", default=None)
+    entry: dict[str, Any] = {"type": "http", "url": str(url)}
+    if headers:
+        entry["headers"] = dict(headers)
+    log.info(
+        "composio: session %s for user=%s -> %s",
+        _SESSION_IDS.get(user_id or _DEFAULT_USER_ID, "?"), user_id, url,
     )
-    return {
-        "successful": _attr(result, "successful", "success", default=True),
-        "data": _attr(result, "data", default=result),
-        "error": _attr(result, "error", default=None),
-    }
-
-
-_MCP_CONFIG_NAME = "xo-cowork-api"
-_mcp_config_id_cache: Optional[str] = None
-
-
-def _get_or_create_mcp_config_id() -> Optional[str]:
-    """Resolve (and cache) the stable MCP server config id for this app.
-
-    Composio's `client.create(user_id=...).mcp.url` returns an ephemeral
-    Tool Router session bound to its own connection sandbox — connections
-    made through the cowork-api UI are NOT visible to that session. The
-    `client.mcp.*` family instead manages persistent server configs whose
-    per-user URLs surface the user's actual account-level connections.
-
-    We keep a single config (named "xo-cowork-api") that lists all toolkits
-    in TOOLKITS, look it up by name on first use, create it if missing.
-    """
-    global _mcp_config_id_cache
-    if _mcp_config_id_cache:
-        return _mcp_config_id_cache
-
-    client = _composio()
-    try:
-        listing = client.mcp.list(name=_MCP_CONFIG_NAME)
-        items = listing.get("items", []) if isinstance(listing, dict) else []
-        for s in items:
-            sd = s.model_dump() if hasattr(s, "model_dump") else s
-            if isinstance(sd, dict) and sd.get("name") == _MCP_CONFIG_NAME and sd.get("id"):
-                _mcp_config_id_cache = sd["id"]
-                return _mcp_config_id_cache
-    except Exception as exc:
-        log.warning("composio: mcp.list failed: %s", exc)
-
-    toolkits = [meta.slug.lower() for meta in TOOLKITS.values()]
-    try:
-        cfg = client.mcp.create(
-            name=_MCP_CONFIG_NAME,
-            toolkits=toolkits,
-            manually_manage_connections=False,
-        )
-        cfg_d = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg
-        _mcp_config_id_cache = cfg_d.get("id") if isinstance(cfg_d, dict) else None
-        return _mcp_config_id_cache
-    except Exception as exc:
-        log.warning("composio: mcp.create failed: %s", exc)
-        return None
-
-
-def get_mcp_url(user_id: str) -> Optional[str]:
-    """Per-user hosted MCP URL — the agent talks to Composio through this.
-
-    Uses the persistent MCP server config (not the ephemeral Tool Router),
-    so the returned URL surfaces the user's existing account-level
-    connections instead of starting in an empty sandbox.
-    """
-    try:
-        cfg_id = _get_or_create_mcp_config_id()
-        if not cfg_id:
-            return None
-        inst = _composio().mcp.generate(user_id=user_id, mcp_config_id=cfg_id)
-        inst_d = inst.model_dump() if hasattr(inst, "model_dump") else inst
-        if isinstance(inst_d, dict):
-            return inst_d.get("url") or inst_d.get("mcp_url")
-        return _attr(inst, "url") or _attr(inst, "mcp_url")
-    except Exception as exc:
-        log.warning("composio: get_mcp_url failed for user=%s: %s", user_id, exc)
-        return None
+    return entry
 
 
 # ---------------------------------------------------------------------------
-# Gateway install — openclaw / hermes / claude-code
+# Gateway install — openclaw / hermes
 # ---------------------------------------------------------------------------
 #
-# These gateways accept tool/MCP wiring at config time, NOT per request. We
-# point each one at our local meta-tool MCP server (services/cowork_mcp.py)
-# instead of Composio's hosted per-user URL. That URL would otherwise
-# register every action of every connected toolkit (Stripe alone ships 200+),
-# blowing past Kimi's 262k context window. The meta-tool surface keeps the
-# gateway prompt at 2 composio tools; the agent fetches a toolkit's catalogue
-# on demand via composio_list_tools when it actually needs to act.
-#
-# The exact config keys below are best-guess based on the gateway's general
-# plugin/MCP conventions; verify against the running gateway's docs before
-# relying on them in production.
-
-
-def get_meta_mcp_url() -> str:
-    """URL of the local /mcp/cowork meta-tool MCP server.
-
-    Reads HOST/PORT exactly the way server.py's __main__ block does so a
-    single env override (PORT=5003, …) propagates without touching this
-    file. Always returns 127.0.0.1 — gateways live on the same box, and
-    binding the published URL to whatever HOST is set to (often 0.0.0.0)
-    would route gateway → wildcard, which doesn't always resolve cleanly.
-    """
-    port = int(os.getenv("PORT", "5002"))
-    # Trailing slash — Starlette mounts return 307 on the no-slash form and
-    # not every gateway's MCP client follows redirects.
-    return f"http://127.0.0.1:{port}/mcp/cowork/"
-
-
-def get_session_mcp_url(user_id: Optional[str]) -> Optional[str]:
-    """Mint a Composio Tool Router session for `user_id` and return its MCP URL.
-
-    Unlike get_mcp_url() (persistent MCP server config — raw toolkit actions)
-    and get_meta_mcp_url() (local FastMCP proxy — composio_list_tools +
-    composio_execute), the session URL exposes Composio's four session-level
-    meta-tools: SEARCH_TOOLS, MULTI_EXECUTE_TOOL, MANAGE_CONNECTIONS, and
-    REMOTE_WORKBENCH. This is the URL we hand to every MCP-speaking gateway
-    (Claude Code, openclaw, hermes).
-
-    Returns None on any error so callers can transparently fall back to
-    get_meta_mcp_url() during rollout.
-    """
-    try:
-        session = _composio().create(user_id=user_id or _DEFAULT_USER_ID)
-    except Exception as exc:
-        log.warning("composio: get_session_mcp_url failed for user=%s: %s", user_id, exc)
-        return None
-    url = _attr(session, "mcp", "url") or _attr(session, "url")
-    return str(url) if url else None
+# Both gateways accept MCP wiring at config time (not per request). We write
+# the session-backed MCP URL into the gateway's config file under the server
+# key "cowork". Claude Code uses the per-session mcp.json path
+# (services/cowork_agent/adapters/claude_code/mcp_config.py).
 
 
 def install_into_openclaw(user_id: str) -> dict[str, Any]:
-    """Point OpenClaw at the local meta-tool MCP server.
+    """Write the session-backed MCP server entry to ~/.openclaw/openclaw.json.
 
-    Writes `mcp.servers.cowork` in ~/.openclaw/openclaw.json with the URL
-    of services/cowork_mcp.py. The `user_id` argument is unused — kept on
-    the signature so the HTTP route in routers/cowork_agent/composio.py
-    and the parallel install_into_hermes() / write_session_mcp_config()
-    callers stay uniform. The meta-tool server resolves the user itself
-    (single-tenant "default_user" today; header-based dispatch later).
-
-    Drops the legacy `mcp.servers.composio` and `plugins.entries.composio`
-    entries — the latter generated a recurring "plugin not found" warning
-    on every gateway boot.
+    Idempotent. Caller (the refresh-gateway HTTP route) is responsible for
+    asking the user to restart OpenClaw.
     """
     config_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
     if not config_path.exists():
@@ -530,27 +474,16 @@ def install_into_openclaw(user_id: str) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read OpenClaw config: {exc}"}
 
-    # transport: "streamable-http" forces OpenClaw onto the newer transport.
-    # ("http" is rejected by the schema; "sse" would be SSE.) Composio's
-    # hosted Tool Router URL and our local FastMCP proxy both speak it.
+    entry = build_mcp_server_entry(user_id)
+    # OpenClaw config schema flags
+    entry["enabled"] = True
+    entry["transport"] = "streamable-http"
+
     mcp_section = data.setdefault("mcp", {})
     servers = mcp_section.setdefault("servers", {})
-
-    # Prefer the Composio-hosted session URL (4 meta-tools + workbench);
-    # fall back to the local FastMCP proxy if minting the session fails.
-    url = get_session_mcp_url(user_id) or get_meta_mcp_url()
-    entry: dict[str, Any] = {
-        "url": url,
-        "enabled": True,
-        "transport": "streamable-http",
-    }
-    # Composio's hosted URL needs X-API-Key; the local proxy doesn't.
-    if url.startswith("https://mcp.composio.dev"):
-        api_key = os.getenv("COMPOSIO_API_KEY", "").strip()
-        if api_key:
-            entry["headers"] = {"X-API-Key": api_key}
     servers["cowork"] = entry
     servers.pop("composio", None)
+    servers.pop("xo_composio", None)
 
     plugins = data.get("plugins") or {}
     entries = plugins.get("entries") or {}
@@ -563,11 +496,7 @@ def install_into_openclaw(user_id: str) -> dict[str, Any]:
 
 
 def install_into_hermes(user_id: str) -> dict[str, Any]:
-    """Point Hermes at the local meta-tool MCP server.
-
-    Writes `mcp_servers.cowork` in ~/.hermes/config.yaml. See
-    install_into_openclaw() for the rationale; `user_id` is unused.
-    """
+    """Write the session-backed MCP server entry to ~/.hermes/config.yaml."""
     config_path = Path(os.path.expanduser("~/.hermes/config.yaml"))
     if not config_path.exists():
         return {"ok": False, "error": f"Hermes config not found at {config_path}"}
@@ -582,19 +511,14 @@ def install_into_hermes(user_id: str) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read Hermes config: {exc}"}
 
+    entry = build_mcp_server_entry(user_id)
+    entry["enabled"] = True
+    entry["transport"] = "streamable-http"
+
     servers = data.setdefault("mcp_servers", {})
-    url = get_session_mcp_url(user_id) or get_meta_mcp_url()
-    entry: dict[str, Any] = {
-        "url": url,
-        "enabled": True,
-        "transport": "streamable-http",
-    }
-    if url.startswith("https://mcp.composio.dev"):
-        api_key = os.getenv("COMPOSIO_API_KEY", "").strip()
-        if api_key:
-            entry["headers"] = {"X-API-Key": api_key}
     servers["cowork"] = entry
     servers.pop("composio", None)
+    servers.pop("xo_composio", None)
 
     tmp = config_path.with_suffix(".yaml.tmp")
     tmp.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
