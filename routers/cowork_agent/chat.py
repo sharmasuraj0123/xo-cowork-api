@@ -22,6 +22,7 @@ from services.cowork_agent.streaming import (
     create_new_session,
     emit_prefetched_sse,
     find_session_id_by_key,
+    hermes_profile_from_prompt_body,
     openclaw_agent_id_from_prompt_body,
     stream_openclaw_to_sse,
 )
@@ -183,23 +184,6 @@ async def chat_prompt(request: Request):
         if detected:
             agent_name = detected
 
-    # The frontend may send the sidebar agent's name (e.g. a hermes profile
-    # name like "default") in agent_name instead of the backend name. If
-    # agent_name isn't a registered adapter but matches a hermes profile,
-    # rewrite to ``agent_name="hermes"`` and carry the profile in agent_id.
-    # Without this, the dispatcher gets an unknown adapter and the chat
-    # silently drops.
-    if agent_name:
-        from services.cowork_agent.adapter_registry import list_adapters
-        if agent_name not in list_adapters():
-            from services.cowork_agent.hermes_state_db import _profile_state_dbs
-            hermes_profiles = {p for p, _ in _profile_state_dbs()}
-            if agent_name in hermes_profiles:
-                resolved_id = body.get("agent_id") or agent_name
-                print(f"[chat] resolved hermes profile {agent_name!r} → agent_name='hermes' agent_id={resolved_id!r}")
-                body["agent_id"] = resolved_id
-                agent_name = "hermes"
-
     # Agent switched mid-session (e.g., user picked a different agent from the
     # sidebar dropdown while a chat was open): the incoming session_id belongs
     # to a different backend than the one the user just selected. Treat as a
@@ -235,6 +219,15 @@ async def chat_prompt(request: Request):
                     agent_id = ws_path.relative_to(cc_path).parts[0]
             except Exception:
                 pass
+
+    # Hermes profile selection mirrors openclaw's pattern: the picker sends
+    # ``model: "hermes/<profile>"`` and we parse the profile name out here.
+    # Only fires when the FE didn't already supply ``agent_id`` (explicit
+    # selection from the sidebar takes precedence over the model string).
+    if agent_name == "hermes" and not agent_id:
+        parsed_profile = hermes_profile_from_prompt_body(body)
+        if parsed_profile:
+            agent_id = parsed_profile
 
     # OpenClaw: direct streaming path (dev-branch behavior).
     if agent_name == "openclaw":
