@@ -13,6 +13,7 @@ from .agents import router as agents_router
 from .channels import router as channels_router
 from .chat import router as chat_router
 from .composio import router as composio_router
+from .mcp_proxy import router as mcp_proxy_router
 from .config import router as config_router
 from .files import router as files_router
 from .fts import router as fts_router
@@ -50,6 +51,7 @@ all_routers: list[APIRouter] = [
     github_router,
     vercel_router,
     composio_router,
+    mcp_proxy_router,
     manus_router,
     *bff_routers,
     xo_projects_sync_router,

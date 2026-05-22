@@ -258,42 +258,42 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         user_id = kwargs.get("user_id")
         cwd = self._resolve_cwd(agent_id)
         mcp_config_path = write_session_mcp_config(user_id, kwargs.get("session_key"))
-        cmd = self._build_cmd(
-            question, session_id, stream=False, agent_type=agent_type, cwd=cwd,
-            mcp_config_path=mcp_config_path,
-        )
-        timeout = self.config.get("timeout", 300)
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._subprocess_env(),
-            cwd=cwd,
-        )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            cleanup_session_mcp_config(mcp_config_path)
-            raise RuntimeError(f"ClaudeCodeAdapter.run timed out after {timeout}s")
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Claude CLI exited with code {proc.returncode}: {stderr.decode()[:500]}"
+            cmd = self._build_cmd(
+                question, session_id, stream=False, agent_type=agent_type, cwd=cwd,
+                mcp_config_path=mcp_config_path,
             )
+            timeout = self.config.get("timeout", 300)
 
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError as exc:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._subprocess_env(),
+                cwd=cwd,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise RuntimeError(f"ClaudeCodeAdapter.run timed out after {timeout}s")
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Claude CLI exited with code {proc.returncode}: {stderr.decode()[:500]}"
+                )
+
+            try:
+                data = json.loads(stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Claude CLI returned non-JSON output: {exc}") from exc
+
+            return {
+                "message": data.get("result", ""),
+                "native_session_id": data.get("session_id"),
+            }
+        finally:
             cleanup_session_mcp_config(mcp_config_path)
-            raise RuntimeError(f"Claude CLI returned non-JSON output: {exc}") from exc
-
-        cleanup_session_mcp_config(mcp_config_path)
-        return {
-            "message": data.get("result", ""),
-            "native_session_id": data.get("session_id"),
-        }
 
     async def stream(
         self,
@@ -341,49 +341,51 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             native_resume_id = get_native_session_id(sk)
 
         mcp_config_path = write_session_mcp_config(user_id, sk)
-        cmd = self._build_cmd(
-            question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
-            mcp_config_path=mcp_config_path,
-        )
+        try:
+            cmd = self._build_cmd(
+                question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
+                mcp_config_path=mcp_config_path,
+            )
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._subprocess_env(),
-            cwd=effective_cwd,
-        )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._subprocess_env(),
+                cwd=effective_cwd,
+            )
 
-        native_session_id: str | None = None
-        response_parts: list[str] = []
-        result_text: str = ""
-        usage: dict = {}
-        model_id = ""
+            native_session_id: str | None = None
+            response_parts: list[str] = []
+            result_text: str = ""
+            usage: dict = {}
+            model_id = ""
 
-        async for raw_line in proc.stdout:
-            event = parse_stream_line(raw_line)
-            if event is None:
-                continue
+            async for raw_line in proc.stdout:
+                event = parse_stream_line(raw_line)
+                if event is None:
+                    continue
 
-            if event.get("type") == "result":
-                native_session_id = _extract_native_session_id(event)
-                usage = event.get("usage") or {}
-                model_id = event.get("model", "")
-                result_text = (event.get("result") or "").strip()
-                continue
+                if event.get("type") == "result":
+                    native_session_id = _extract_native_session_id(event)
+                    usage = event.get("usage") or {}
+                    model_id = event.get("model", "")
+                    result_text = (event.get("result") or "").strip()
+                    continue
 
-            if event.get("type") == "token":
-                response_parts.append(event.get("token", ""))
+                if event.get("type") == "token":
+                    response_parts.append(event.get("token", ""))
 
-            yield event
+                yield event
 
-        await proc.wait()
-        cleanup_session_mcp_config(mcp_config_path)
+            await proc.wait()
 
-        # Fall back to result event text when no token events were captured.
-        if not response_parts and result_text:
-            response_parts.append(result_text)
-            yield {"type": "token", "token": result_text}
+            # Fall back to result event text when no token events were captured.
+            if not response_parts and result_text:
+                response_parts.append(result_text)
+                yield {"type": "token", "token": result_text}
+        finally:
+            cleanup_session_mcp_config(mcp_config_path)
 
         if sk and native_session_id:
             # Persist nativeSessionId so resume works; messages live in ~/.claude/projects/.
