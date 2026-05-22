@@ -403,7 +403,7 @@ def _run_agent_setup() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _xo_cowork_lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
     # Done synchronously so the API doesn't accept requests until the
@@ -537,6 +537,12 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with _xo_cowork_lifespan(app):
+        yield
 
 
 app = FastAPI(

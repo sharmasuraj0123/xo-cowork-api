@@ -37,6 +37,27 @@ router = APIRouter()
 _AGENT_NAME = os.getenv("AGENT_NAME", "openclaw")
 
 
+def _resolve_user_id(request: Request, body: dict) -> str:
+    """Resolve the user_id for an incoming chat request.
+
+    Order: explicit body field, request.state.user_id (future middleware),
+    auth_state["user_id"] from routers/auth.py, then "default_user".
+    """
+    if body.get("user_id"):
+        return str(body["user_id"])
+    state_user = getattr(request.state, "user_id", None)
+    if state_user:
+        return str(state_user)
+    try:
+        from routers.auth import auth_state
+        uid = auth_state.get("user_id")
+        if uid:
+            return str(uid)
+    except Exception:
+        pass
+    return "default_user"
+
+
 def _resolve_backend_for_session(session_id: str) -> str | None:
     """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default)."""
     from services.cowork_agent.sessions_io import find_session_backend
@@ -77,6 +98,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     agent_type = stream_info.get("agent_type")
     agent_id = stream_info.get("agent_id")
     is_new_session = stream_info.get("is_new_session", False)
+    user_id = stream_info.get("user_id")
 
     if is_new_session and our_session_id:
         event_id = 1
@@ -98,6 +120,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 our_session_id=our_session_id,
                 agent_id=agent_id,
                 is_new_session=is_new_session,
+                user_id=user_id,
             ):
                 await queue.put(event)
         except Exception as exc:
@@ -262,6 +285,7 @@ async def chat_prompt(request: Request):
         "agent_type": body.get("agent_type"),
         "agent_id": agent_id,
         "is_new_session": is_new_session,
+        "user_id": _resolve_user_id(request, body),
     }
     return {"stream_id": stream_id, "session_id": our_session_id}
 

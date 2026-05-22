@@ -184,6 +184,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         stream: bool,
         agent_type: str | None = None,
         cwd: str | None = None,
+        mcp_config_path: "Path | None" = None,
     ) -> list[str]:
         cli = self.config.get("cli_path") or "claude"
         workspace = cwd or str(xo_projects_root())
@@ -205,6 +206,8 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         ]
         if stream:
             cmd.append("--verbose")
+        if mcp_config_path is not None:
+            cmd += ["--mcp-config", str(mcp_config_path)]
         if native_session_id:
             cmd += ["--resume", native_session_id]
         cmd += ["-p", prompt]
@@ -246,9 +249,19 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         agent_type: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        from services.cowork_agent.adapters.claude_code.mcp_config import (
+            cleanup_session_mcp_config,
+            write_session_mcp_config,
+        )
+
         agent_id = kwargs.get("agent_id")
+        user_id = kwargs.get("user_id")
         cwd = self._resolve_cwd(agent_id)
-        cmd = self._build_cmd(question, session_id, stream=False, agent_type=agent_type, cwd=cwd)
+        mcp_config_path = write_session_mcp_config(user_id, kwargs.get("session_key"))
+        cmd = self._build_cmd(
+            question, session_id, stream=False, agent_type=agent_type, cwd=cwd,
+            mcp_config_path=mcp_config_path,
+        )
         timeout = self.config.get("timeout", 300)
 
         proc = await asyncio.create_subprocess_exec(
@@ -262,6 +275,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
+            cleanup_session_mcp_config(mcp_config_path)
             raise RuntimeError(f"ClaudeCodeAdapter.run timed out after {timeout}s")
 
         if proc.returncode != 0:
@@ -272,8 +286,10 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError as exc:
+            cleanup_session_mcp_config(mcp_config_path)
             raise RuntimeError(f"Claude CLI returned non-JSON output: {exc}") from exc
 
+        cleanup_session_mcp_config(mcp_config_path)
         return {
             "message": data.get("result", ""),
             "native_session_id": data.get("session_id"),
@@ -286,11 +302,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         agent_type: str | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
+        from services.cowork_agent.adapters.claude_code.mcp_config import (
+            cleanup_session_mcp_config,
+            write_session_mcp_config,
+        )
         from services.cowork_agent.adapters.claude_code.streaming import parse_stream_line
 
         our_session_id: str | None = kwargs.get("our_session_id") or session_id
         is_new: bool = kwargs.get("is_new_session", session_id is None)
         agent_id: str | None = kwargs.get("agent_id")
+        user_id: str | None = kwargs.get("user_id")
 
         # Resolve session_key: generate for new sessions, look up for existing ones.
         sk: str | None = kwargs.get("session_key")
@@ -319,7 +340,11 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         if not is_new and sk:
             native_resume_id = get_native_session_id(sk)
 
-        cmd = self._build_cmd(question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd)
+        mcp_config_path = write_session_mcp_config(user_id, sk)
+        cmd = self._build_cmd(
+            question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
+            mcp_config_path=mcp_config_path,
+        )
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -353,6 +378,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             yield event
 
         await proc.wait()
+        cleanup_session_mcp_config(mcp_config_path)
 
         # Fall back to result event text when no token events were captured.
         if not response_parts and result_text:
