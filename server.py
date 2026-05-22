@@ -541,6 +541,17 @@ async def _xo_cowork_lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Sweep orphan Claude-Code mcp.json subdirs left behind by a crash or
+    # hard-kill of a previous run. The files are owner-only but they each
+    # contain a Composio session URL + x-api-key; we don't want stale ones
+    # accumulating in /tmp. See docs/composio-claude-code-secret-isolation.md.
+    import shutil
+    from pathlib import Path as _Path
+    _tmp_root = _Path(os.getenv("XO_MCP_TMP_ROOT", "/tmp/xo-cowork"))
+    if _tmp_root.exists():
+        for _child in _tmp_root.iterdir():
+            shutil.rmtree(_child, ignore_errors=True)
+
     async with _xo_cowork_lifespan(app):
         yield
 
