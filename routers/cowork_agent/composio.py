@@ -190,11 +190,14 @@ async def list_toolkit_tools(toolkit: str, request: Request) -> JSONResponse:
 # Per-action enable/disable prefs (UI: Connectors → Composio → tile expand)
 # ---------------------------------------------------------------------------
 #
-# v1: only googlecalendar accepts mutations (PUT). All toolkits accept reads
-# (GET) and return an empty map by default — keeps the UI's fetch logic free
-# of toolkit-specific branches.
+# Toolkits whose actions are configurable via the Connectors UI. Adding a
+# new entry here additionally requires (a) a category map / heuristic in
+# services/composio_categories.py and (b) the frontend's
+# TOOLKITS_WITH_ACTION_TOGGLES set to include it. All toolkits accept reads
+# (GET) and return an empty map by default — keeps the UI's fetch logic
+# free of toolkit-specific branches.
 
-_PREFS_WRITABLE_TOOLKITS = frozenset({"googlecalendar"})
+_PREFS_WRITABLE_TOOLKITS = frozenset({"googlecalendar", "gmail", "stripe"})
 
 
 class PrefsBody(BaseModel):

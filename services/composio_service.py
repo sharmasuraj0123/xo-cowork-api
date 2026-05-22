@@ -26,6 +26,13 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 
+# Single-tenant sentinel. Matches the value baked into services/cowork_mcp.py
+# and routers/cowork_agent/composio.py's _resolve_user_id() fallback so a
+# session created here sees the same connected_accounts a UI-initiated
+# Connectors flow created for "default_user".
+_DEFAULT_USER_ID = "default_user"
+
+
 # ---------------------------------------------------------------------------
 # Toolkit catalog
 # ---------------------------------------------------------------------------
@@ -477,6 +484,29 @@ def get_meta_mcp_url() -> str:
     # not every gateway's MCP client follows redirects.
     return f"http://127.0.0.1:{port}/mcp/cowork/"
 
+
+def get_session_mcp_url(user_id: Optional[str]) -> Optional[str]:
+    """Mint a Composio Tool Router session for `user_id` and return its MCP URL.
+
+    Unlike get_mcp_url() (persistent MCP server config — raw toolkit actions)
+    and get_meta_mcp_url() (local FastMCP proxy — composio_list_tools +
+    composio_execute), the session URL exposes Composio's four session-level
+    meta-tools: SEARCH_TOOLS, MULTI_EXECUTE_TOOL, MANAGE_CONNECTIONS, and
+    REMOTE_WORKBENCH. This is the URL we hand to every MCP-speaking gateway
+    (Claude Code, openclaw, hermes).
+
+    Returns None on any error so callers can transparently fall back to
+    get_meta_mcp_url() during rollout.
+    """
+    try:
+        session = _composio().create(user_id=user_id or _DEFAULT_USER_ID)
+    except Exception as exc:
+        log.warning("composio: get_session_mcp_url failed for user=%s: %s", user_id, exc)
+        return None
+    url = _attr(session, "mcp", "url") or _attr(session, "url")
+    return str(url) if url else None
+
+
 def install_into_openclaw(user_id: str) -> dict[str, Any]:
     """Point OpenClaw at the local meta-tool MCP server.
 
@@ -501,15 +531,25 @@ def install_into_openclaw(user_id: str) -> dict[str, Any]:
         return {"ok": False, "error": f"Failed to read OpenClaw config: {exc}"}
 
     # transport: "streamable-http" forces OpenClaw onto the newer transport.
-    # ("http" is rejected by the schema; "sse" would be SSE.) The cowork MCP
-    # server only speaks streamable-http.
+    # ("http" is rejected by the schema; "sse" would be SSE.) Composio's
+    # hosted Tool Router URL and our local FastMCP proxy both speak it.
     mcp_section = data.setdefault("mcp", {})
     servers = mcp_section.setdefault("servers", {})
-    servers["cowork"] = {
-        "url": get_meta_mcp_url(),
+
+    # Prefer the Composio-hosted session URL (4 meta-tools + workbench);
+    # fall back to the local FastMCP proxy if minting the session fails.
+    url = get_session_mcp_url(user_id) or get_meta_mcp_url()
+    entry: dict[str, Any] = {
+        "url": url,
         "enabled": True,
         "transport": "streamable-http",
     }
+    # Composio's hosted URL needs X-API-Key; the local proxy doesn't.
+    if url.startswith("https://mcp.composio.dev"):
+        api_key = os.getenv("COMPOSIO_API_KEY", "").strip()
+        if api_key:
+            entry["headers"] = {"X-API-Key": api_key}
+    servers["cowork"] = entry
     servers.pop("composio", None)
 
     plugins = data.get("plugins") or {}
@@ -543,11 +583,17 @@ def install_into_hermes(user_id: str) -> dict[str, Any]:
         return {"ok": False, "error": f"Failed to read Hermes config: {exc}"}
 
     servers = data.setdefault("mcp_servers", {})
-    servers["cowork"] = {
-        "url": get_meta_mcp_url(),
+    url = get_session_mcp_url(user_id) or get_meta_mcp_url()
+    entry: dict[str, Any] = {
+        "url": url,
         "enabled": True,
         "transport": "streamable-http",
     }
+    if url.startswith("https://mcp.composio.dev"):
+        api_key = os.getenv("COMPOSIO_API_KEY", "").strip()
+        if api_key:
+            entry["headers"] = {"X-API-Key": api_key}
+    servers["cowork"] = entry
     servers.pop("composio", None)
 
     tmp = config_path.with_suffix(".yaml.tmp")
