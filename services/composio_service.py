@@ -453,18 +453,38 @@ def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
 # Gateway install — openclaw / hermes
 # ---------------------------------------------------------------------------
 #
-# Both gateways accept MCP wiring at config time (not per request). We write
-# the session-backed MCP URL into the gateway's config file under the server
-# key "cowork". Claude Code uses the per-session mcp.json path
-# (services/cowork_agent/adapters/claude_code/mcp_config.py).
+# Both gateways accept MCP wiring at config time (not per request). To keep
+# the Composio API key out of these on-disk configs, we point both gateways
+# at xo-cowork-api's localhost MCP proxy (routers/cowork_agent/mcp_proxy.py)
+# rather than at Composio's session URL directly. The proxy resolves user_id
+# server-side and injects x-api-key from .env at request time.
+#
+# Claude Code uses its own per-session mcp.json path
+# (services/cowork_agent/adapters/claude_code/mcp_config.py) and is NOT
+# routed through the proxy — its config file is per-turn and auto-deleted.
+
+
+def _cowork_proxy_url() -> str:
+    """Localhost URL of the MCP reverse proxy that injects x-api-key
+    server-side. Trailing slash matches the routed paths in
+    routers/cowork_agent/mcp_proxy.py and avoids 307 redirects."""
+    port = int(os.getenv("PORT", "5002"))
+    return f"http://127.0.0.1:{port}/mcp/cowork-proxy/"
 
 
 def install_into_openclaw(user_id: str) -> dict[str, Any]:
-    """Write the session-backed MCP server entry to ~/.openclaw/openclaw.json.
+    """Write the proxy URL into ~/.openclaw/openclaw.json under
+    mcp.servers.cowork. No headers, no API key — the proxy injects it.
 
     Idempotent. Caller (the refresh-gateway HTTP route) is responsible for
     asking the user to restart OpenClaw.
+
+    `user_id` is accepted for signature parity with the rest of the
+    install paths and so the caller-side cache key works; the proxy
+    resolves user_id at request time, so this value is not embedded in
+    the config.
     """
+    del user_id  # value not embedded; see docstring
     config_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
     if not config_path.exists():
         return {"ok": False, "error": f"OpenClaw config not found at {config_path}"}
@@ -474,10 +494,11 @@ def install_into_openclaw(user_id: str) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read OpenClaw config: {exc}"}
 
-    entry = build_mcp_server_entry(user_id)
-    # OpenClaw config schema flags
-    entry["enabled"] = True
-    entry["transport"] = "streamable-http"
+    entry: dict[str, Any] = {
+        "url": _cowork_proxy_url(),
+        "transport": "streamable-http",
+        "enabled": True,
+    }
 
     mcp_section = data.setdefault("mcp", {})
     servers = mcp_section.setdefault("servers", {})
@@ -496,7 +517,9 @@ def install_into_openclaw(user_id: str) -> dict[str, Any]:
 
 
 def install_into_hermes(user_id: str) -> dict[str, Any]:
-    """Write the session-backed MCP server entry to ~/.hermes/config.yaml."""
+    """Write the proxy URL into ~/.hermes/config.yaml under
+    mcp_servers.cowork. No headers, no API key — the proxy injects it."""
+    del user_id  # value not embedded; see install_into_openclaw docstring
     config_path = Path(os.path.expanduser("~/.hermes/config.yaml"))
     if not config_path.exists():
         return {"ok": False, "error": f"Hermes config not found at {config_path}"}
@@ -511,9 +534,11 @@ def install_into_hermes(user_id: str) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read Hermes config: {exc}"}
 
-    entry = build_mcp_server_entry(user_id)
-    entry["enabled"] = True
-    entry["transport"] = "streamable-http"
+    entry: dict[str, Any] = {
+        "url": _cowork_proxy_url(),
+        "transport": "streamable-http",
+        "enabled": True,
+    }
 
     servers = data.setdefault("mcp_servers", {})
     servers["cowork"] = entry

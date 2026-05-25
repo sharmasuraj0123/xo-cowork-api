@@ -6,9 +6,11 @@ We materialize a Composio MCP URL into a JSON file and pass
 session-level meta-tools (SEARCH_TOOLS, MULTI_EXECUTE_TOOL,
 MANAGE_CONNECTIONS, GET_TOOL_SCHEMAS, REMOTE_WORKBENCH, REMOTE_BASH_TOOL).
 
-URL and auth headers come from `composio_service.build_mcp_server_entry`,
-which is the single source of truth used by every runtime (Claude Code,
-OpenClaw, Hermes). The server is registered under the key ``cowork``.
+The URL written into the file is xo-cowork-api's localhost MCP proxy
+(`composio_service._cowork_proxy_url()` →
+`http://127.0.0.1:<PORT>/mcp/cowork-proxy/`). The proxy resolves user_id
+server-side and injects the COMPOSIO_API_KEY from .env at request time.
+Net: this file contains no Composio credentials — only a localhost URL.
 
 The file lives under /tmp/xo-cowork/<session>/mcp.json and is unlinked
 after the subprocess exits.
@@ -45,14 +47,13 @@ def write_session_mcp_config(user_id: Optional[str], session_key: Optional[str])
         log.debug("mcp_config: composio_service not importable: %s", exc)
         return None
 
-    try:
-        server_entry = composio_service.build_mcp_server_entry(user_id)
-    except Exception as exc:
-        log.warning("mcp_config: build_mcp_server_entry failed for user=%s: %s", user_id, exc)
-        return None
-
-    if not server_entry or not server_entry.get("url"):
-        return None
+    # Use the localhost MCP proxy URL — no headers, no Composio credentials
+    # written to disk. The proxy resolves user_id and injects x-api-key
+    # server-side at request time. See routers/cowork_agent/mcp_proxy.py.
+    server_entry = {
+        "type": "http",
+        "url": composio_service._cowork_proxy_url(),
+    }
 
     session_dir = _MCP_TMP_ROOT / (session_key or uuid.uuid4().hex)
     session_dir.mkdir(parents=True, exist_ok=True)
