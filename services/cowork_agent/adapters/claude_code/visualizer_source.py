@@ -52,6 +52,7 @@ from services.cowork_agent.visualizer.ingest.events import (
     compute_latency_ms,
 )
 from services.cowork_agent.visualizer.project_index import project_id_for_cwd
+from services.cowork_agent.visualizer.workspace_index import list_project_ids
 from services.cowork_agent.project_layout import xo_projects_root
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,12 @@ class Source:
         """
         if not _CLAUDE_PROJECTS_DIR.is_dir():
             return
+
+        yielded: set[Path] = set()
+
+        # 1. Existing adapter-row path (cowork-api chat flow). Preserved
+        # unchanged so sessions started via the chat UI keep their full
+        # composite-key / directory metadata.
         for project_id, _composite_key, row in iter_sessionslist_rows(self.name):
             native = row.get("nativeSessionId")
             directory = row.get("directory")
@@ -192,7 +199,31 @@ class Source:
             # Claude's encoding: '/foo/bar' → '-foo-bar' (lossless forward).
             encoded = directory.replace("/", "-")
             jsonl = _CLAUDE_PROJECTS_DIR / encoded / f"{native}.jsonl"
-            if jsonl.is_file():
+            if jsonl.is_file() and jsonl not in yielded:
+                yielded.add(jsonl)
+                yield project_id, jsonl
+
+        # 2. Auto-discovery for sessions launched directly inside an
+        # xo-project (e.g. ``cd ~/xo-projects/foo && claude``). These
+        # don't have a sessionslist row, so step 1 misses them. We
+        # walk each project's encoded-cwd directory under
+        # ``~/.claude/projects/`` and yield any jsonl we haven't
+        # already yielded above. Existing rows take precedence — only
+        # genuinely-new jsonls flow through here. The ``default``
+        # project, whose chat cwd is the workspace root (not
+        # ``xo-projects/default``), is intentionally skipped here:
+        # its sessions arrive only via the adapter-row path above.
+        projects_root = xo_projects_root()
+        for project_id in list_project_ids():
+            project_path = projects_root / project_id
+            encoded = str(project_path).replace("/", "-")
+            log_dir = _CLAUDE_PROJECTS_DIR / encoded
+            if not log_dir.is_dir():
+                continue
+            for jsonl in log_dir.glob("*.jsonl"):
+                if jsonl in yielded:
+                    continue
+                yielded.add(jsonl)
                 yield project_id, jsonl
 
     # ── Per-jsonl pipeline ──────────────────────────────────────────────

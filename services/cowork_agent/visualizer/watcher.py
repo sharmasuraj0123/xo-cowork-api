@@ -151,6 +151,16 @@ class Watcher:
                 presence_by_project[pid].append(row)
 
         for pid in list_project_ids():
+            # Identity fill is idempotent (no-ops once _template is cleared).
+            # Running it here — alongside the per-project activity sink that
+            # already iterates every known project — closes the gap where a
+            # scaffolded project that has not yet produced events would
+            # otherwise sit on `_template: true` indefinitely. Matches the
+            # documented intent of the project_json sink (see its docstring).
+            try:
+                project_json.fill_identity(xo_dir(pid), pid)
+            except Exception:
+                logger.exception("identity fill failed for %s", pid)
             try:
                 activity.apply(
                     xo_dir(pid),
