@@ -43,6 +43,7 @@ from routers.cowork_agent.bff._visualizer_models import (
     TimelineEvent,
     TimelineResponse,
     ToolUsage,
+    ToolUsageEntry,
     UsageAnalyticsResponse,
     UsageSummaryCardResponse,
 )
@@ -123,6 +124,275 @@ def _tokens_from_stats(stats: dict, days: int) -> int:
     rolling = (stats.get("rolling") or {}).get(_rolling_key_for(days)) or {}
     t = rolling.get("tokens") or {}
     return int(t.get("input", 0) or 0) + int(t.get("output", 0) or 0)
+
+
+def _by_day_from_stats(stats: dict) -> dict[str, dict]:
+    """Return the workspace stats' ``by_day`` block; empty for schema
+    1 / pre-Phase-2 files."""
+    bd = stats.get("by_day")
+    return bd if isinstance(bd, dict) else {}
+
+
+def _performance_entry_for_day(date: str, day: dict) -> PerformanceEntry:
+    """One per-day latency rollup. Zero entry when no samples."""
+    lat = (day.get("latency") or {}) if isinstance(day, dict) else {}
+    count = int(lat.get("count", 0) or 0)
+    if count <= 0:
+        return PerformanceEntry(date=date, avgMs=0, p95Ms=0, minMs=0, maxMs=0)
+    sample = sorted(int(x) for x in (lat.get("p95_sample") or []))
+    p95 = sample[max(0, int(0.95 * (len(sample) - 1)))] if sample else 0
+    return PerformanceEntry(
+        date=date,
+        avgMs=int(int(lat.get("sum_ms", 0) or 0) / count),
+        p95Ms=p95,
+        minMs=int(lat.get("min_ms", 0) or 0),
+        maxMs=int(lat.get("max_ms", 0) or 0),
+    )
+
+
+def _response_time_stats_from_by_day(by_day: dict[str, dict]) -> dict:
+    """Aggregate every day's latency samples into the ``ResponseTimeStats``
+    shape the FE expects (seconds, not ms).
+
+    Concatenates each day's bounded reservoir into one pool, then
+    derives min/median/avg/p95/max from the pool. Gives the dashboard
+    the same shape the canonical ``/api/usage`` returns, so the
+    "Response Time" card on the xo-coworker FE finds the fields it's
+    looking for instead of N/A.
+    """
+    pool: list[int] = []
+    sum_ms = 0
+    count = 0
+    min_ms_overall: Optional[int] = None
+    max_ms_overall = 0
+    for day in by_day.values():
+        if not isinstance(day, dict):
+            continue
+        lat = day.get("latency") or {}
+        if not isinstance(lat, dict):
+            continue
+        c = int(lat.get("count", 0) or 0)
+        if c <= 0:
+            continue
+        count += c
+        sum_ms += int(lat.get("sum_ms", 0) or 0)
+        dmin = int(lat.get("min_ms", 0) or 0)
+        dmax = int(lat.get("max_ms", 0) or 0)
+        if dmin > 0 and (min_ms_overall is None or dmin < min_ms_overall):
+            min_ms_overall = dmin
+        if dmax > max_ms_overall:
+            max_ms_overall = dmax
+        sample = lat.get("p95_sample") or []
+        if isinstance(sample, list):
+            pool.extend(int(x) for x in sample if isinstance(x, (int, float)))
+    if count == 0:
+        return {"avg": 0.0, "median": 0.0, "p95": 0.0,
+                "min": 0.0, "max": 0.0, "count": 0}
+    avg_s = (sum_ms / count) / 1000.0
+    pool.sort()
+    if pool:
+        median_s = pool[len(pool) // 2] / 1000.0
+        p95_s = pool[max(0, int(0.95 * (len(pool) - 1)))] / 1000.0
+    else:
+        median_s = 0.0
+        p95_s = 0.0
+    return {
+        "avg":    round(avg_s, 3),
+        "median": round(median_s, 3),
+        "p95":    round(p95_s, 3),
+        "min":    round((min_ms_overall or 0) / 1000.0, 3),
+        "max":    round(max_ms_overall / 1000.0, 3),
+        "count":  count,
+    }
+
+
+def _avg_latency_ms_from_by_day(by_day: dict[str, dict]) -> int:
+    total_sum = 0
+    total_count = 0
+    for day in by_day.values():
+        if not isinstance(day, dict):
+            continue
+        lat = day.get("latency") or {}
+        if not isinstance(lat, dict):
+            continue
+        c = int(lat.get("count", 0) or 0)
+        if c <= 0:
+            continue
+        total_sum += int(lat.get("sum_ms", 0) or 0)
+        total_count += c
+    return int(total_sum / total_count) if total_count else 0
+
+
+def _tool_usage_from_stats(stats: dict, days: int) -> ToolUsage:
+    """Workspace tool tally from the chosen rolling window's by_tool.
+    Sorted descending; empty when no by_tool block present."""
+    window = "30d" if days > 7 else "7d"
+    rolling = (stats.get("rolling") or {}).get(window) or {}
+    by_tool = rolling.get("by_tool") or {}
+    tools: list[ToolUsageEntry] = []
+    if isinstance(by_tool, dict):
+        for name, count in by_tool.items():
+            n = int(count or 0)
+            if n <= 0:
+                continue
+            tools.append(ToolUsageEntry(name=str(name), count=n))
+    tools.sort(key=lambda t: t.count, reverse=True)
+    total = sum(t.count for t in tools)
+    return ToolUsage(totalCalls=total, uniqueTools=len(tools), tools=tools)
+
+
+def _provider_for_model(model: str) -> str:
+    """Best-effort provider tag from a model id; empty when unknown."""
+    if not model:
+        return ""
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gpt") or model.startswith("o1") or model.startswith("o3"):
+        return "openai"
+    if model.startswith("gemini"):
+        return "google"
+    return ""
+
+
+# ── /api/xo-projects/usage — UsageStats-shaped aggregate ─────────────────────
+#
+# Mirrors the canonical ``/api/usage`` response shape so the xo-coworker
+# dashboard's ``useUsage`` hook can swap its URL constant and consume the
+# workspace-aggregated picture (across every xo-project) instead of the
+# global active-agent picture. See docs/xo-coworker-usage-via-xo-projects-
+# investigation.md for the design context.
+
+@router.get("/api/xo-projects/usage")
+def workspace_usage_dashboard(
+    days: int = Query(30, ge=1, le=365),
+) -> dict:
+    """Workspace-aggregated ``UsageStats`` (UI-facing shape).
+
+    Aggregated across every project's ``.xo/sessions/sessionslist.json``
+    (token totals, message counts, per-session view) plus
+    ``~/xo-projects/.xo/stats.json`` (per-model rolling window). Same
+    field names and nesting as the canonical ``/api/usage`` endpoint
+    so the FE's ``UsageStats`` TypeScript type is unchanged.
+
+    Honest zeros where the workspace tier does not have the data:
+    ``response_time`` (no per-message latency on disk),
+    cost (no pricing table), ``reasoning`` tokens (not tracked).
+    """
+    workspace = scopes.resolve_scope("xo-workspace-visualizer")
+    stats = workspace.read_stats() or {}
+    sessionslist = _union_sessionslist()
+
+    # ── Total tokens (TokenBreakdown across the 4 token classes on disk) ──
+    tot_in = tot_out = tot_cr = tot_cw = 0
+    tot_msg = 0
+    for row in sessionslist.values():
+        usage = row.get("usage") or {}
+        tot_in += int(usage.get("input_tokens", 0) or 0)
+        tot_out += int(usage.get("output_tokens", 0) or 0)
+        tot_cr += int(usage.get("cache_read_input_tokens", 0) or 0)
+        tot_cw += int(usage.get("cache_creation_input_tokens", 0) or 0)
+        tot_msg += int(row.get("messageCount", 0) or 0)
+
+    total_sessions = len(sessionslist)
+    total_tokens_sum = tot_in + tot_out + tot_cr + tot_cw
+    avg_tokens_per_session = (
+        round(total_tokens_sum / total_sessions, 2) if total_sessions else 0.0
+    )
+
+    # ── by_model (from workspace stats.json rolling.<window>.by_model) ──
+    rolling = (stats.get("rolling") or {}).get(_rolling_key_for(days)) or {}
+    by_model_raw = rolling.get("by_model") or {}
+    by_model: list[dict] = []
+    for model, t in by_model_raw.items():
+        if not isinstance(t, dict):
+            continue
+        m_in = int(t.get("input", 0) or 0)
+        m_out = int(t.get("output", 0) or 0)
+        if m_in + m_out <= 0:
+            continue  # skip <synthetic> and other zero-token rows
+        by_model.append({
+            "model_id": str(model),
+            "provider_id": _provider_for_model(str(model)),
+            "total_cost": 0.0,  # no pricing table
+            "total_tokens": {
+                "input": m_in,
+                "output": m_out,
+                "reasoning": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+            },
+            "message_count": 0,  # stats.by_model carries tokens only, not call counts
+        })
+    by_model.sort(key=lambda m: m["total_tokens"]["input"] + m["total_tokens"]["output"], reverse=True)
+
+    # ── by_session (top 10 by tokens) ──
+    session_rows: list[dict] = []
+    for composite_key, row in sessionslist.items():
+        usage = row.get("usage") or {}
+        total = (
+            int(usage.get("input_tokens", 0) or 0)
+            + int(usage.get("output_tokens", 0) or 0)
+            + int(usage.get("cache_read_input_tokens", 0) or 0)
+            + int(usage.get("cache_creation_input_tokens", 0) or 0)
+        )
+        first = row.get("firstActivity") or row.get("updatedAt")
+        time_created = (
+            datetime.fromtimestamp(first / 1000, tz=timezone.utc).isoformat()
+            if isinstance(first, int) and first > 0 else ""
+        )
+        session_rows.append({
+            "session_id": composite_key,
+            "title": row.get("_project_id") or composite_key,
+            "total_cost": 0.0,
+            "total_tokens": total,
+            "message_count": int(row.get("messageCount", 0) or 0),
+            "time_created": time_created,
+        })
+    session_rows.sort(key=lambda s: s["total_tokens"], reverse=True)
+    by_session = session_rows[:10]
+
+    # ── daily (per-event-date accurate; Phase 2 / Stage 1) ──
+    # Reads the watcher-aggregated workspace by_day block. Falls back
+    # to all-zero entries when no by_day data is present (pre-Phase-2
+    # files, or a fresh deployment that hasn't ticked yet).
+    by_day = _by_day_from_stats(stats)
+    daily: list[dict] = []
+    for d in _zero_filled_dates(days):
+        day = by_day.get(d) or {}
+        tk = (day.get("tokens") or {}) if isinstance(day, dict) else {}
+        msgs = (day.get("messages") or {}) if isinstance(day, dict) else {}
+        daily.append({
+            "date": d,
+            "cost": 0.0,
+            "tokens": int(tk.get("input", 0) or 0) + int(tk.get("output", 0) or 0),
+            "messages": int(msgs.get("total", 0) or 0),
+        })
+
+    # Phase 2 / Stage 4 — latency from the workspace by_day.latency
+    # blocks the watcher writes. Aggregated across every project's
+    # samples (already merged at the workspace tier). Reported in
+    # seconds to match the canonical /api/usage UsageStats shape that
+    # this endpoint mirrors.
+    rt_stats = _response_time_stats_from_by_day(by_day)
+
+    return {
+        "total_cost": 0.0,
+        "total_tokens": {
+            "input": tot_in,
+            "output": tot_out,
+            "reasoning": 0,
+            "cache_read": tot_cr,
+            "cache_write": tot_cw,
+        },
+        "total_sessions": total_sessions,
+        "total_messages": tot_msg,
+        "avg_tokens_per_session": avg_tokens_per_session,
+        "avg_response_time": rt_stats["avg"],
+        "by_model": by_model,
+        "by_session": by_session,
+        "daily": daily,
+        "response_time": rt_stats,
+    }
 
 
 # ── /api/xo-projects/usage/summary/card ──────────────────────────────────────
@@ -216,25 +486,39 @@ def workspace_usage_analytics(
     sessionslist = _union_sessionslist()
     total_messages = sum(int(r.get("messageCount", 0) or 0) for r in sessionslist.values())
 
-    zero_dates = _zero_filled_dates(window_days)
+    dates = _zero_filled_dates(window_days)
+    by_day = _by_day_from_stats(stats)
+
+    cost_and_tokens: list[CostAndTokensEntry] = []
+    messages_per_day: list[MessagesEntry] = []
+    for d in dates:
+        day = by_day.get(d) or {}
+        tk = (day.get("tokens") or {}) if isinstance(day, dict) else {}
+        msgs = (day.get("messages") or {}) if isinstance(day, dict) else {}
+        cost_and_tokens.append(CostAndTokensEntry(
+            date=d,
+            tokens=int(tk.get("input", 0) or 0) + int(tk.get("output", 0) or 0),
+            cost=0.0,
+        ))
+        messages_per_day.append(MessagesEntry(
+            date=d,
+            total=int(msgs.get("total", 0) or 0),
+            user=int(msgs.get("user", 0) or 0),
+            assistant=int(msgs.get("assistant", 0) or 0),
+            toolCalls=int(msgs.get("toolCalls", 0) or 0),
+        ))
 
     return UsageAnalyticsResponse(
         stats=AnalyticsStats(
             totalCost=0.0,
             totalTokens=total_tokens,
             totalMessages=total_messages,
-            avgLatencyMs=0,
+            avgLatencyMs=_avg_latency_ms_from_by_day(by_day),
         ),
-        costAndTokens=[CostAndTokensEntry(date=d, tokens=0, cost=0.0) for d in zero_dates],
-        messages=[
-            MessagesEntry(date=d, total=0, user=0, assistant=0, toolCalls=0)
-            for d in zero_dates
-        ],
-        performance=[
-            PerformanceEntry(date=d, avgMs=0, p95Ms=0, minMs=0, maxMs=0)
-            for d in zero_dates
-        ],
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
+        costAndTokens=cost_and_tokens,
+        messages=messages_per_day,
+        performance=[_performance_entry_for_day(d, by_day.get(d) or {}) for d in dates],
+        toolUsage=_tool_usage_from_stats(stats, window_days),
         modelUsage=[],
     )
 
@@ -296,13 +580,47 @@ def _row_total_tokens(usage: dict) -> int:
     )
 
 
-def _row_to_summary(composite_key: str, row: dict) -> SessionCostSummary:
+def _row_to_summary(
+    composite_key: str, row: dict, *, stats: Optional[dict] = None,
+) -> SessionCostSummary:
     usage = row.get("usage") or {}
     inp = int(usage.get("input_tokens", 0) or 0)
     out = int(usage.get("output_tokens", 0) or 0)
     cr = int(usage.get("cache_read_input_tokens", 0) or 0)
     cw = int(usage.get("cache_creation_input_tokens", 0) or 0)
     native = row.get("nativeSessionId") or ""
+
+    # Per-session tool tally + model breakdown from workspace stats —
+    # workspace `by_session` passes per-project rows through verbatim,
+    # so the same lookup we use per-project applies here.
+    tool_usage = ToolUsage(totalCalls=0, uniqueTools=0, tools=[])
+    model_usage: list = []
+    if stats is not None and native:
+        by_session = stats.get("by_session") or {}
+        sess = by_session.get(native) if isinstance(by_session, dict) else None
+        if isinstance(sess, dict):
+            tools_raw = sess.get("tools")
+            if isinstance(tools_raw, dict):
+                entries = [
+                    ToolUsageEntry(name=str(n), count=int(c or 0))
+                    for n, c in tools_raw.items() if int(c or 0) > 0
+                ]
+                entries.sort(key=lambda t: t.count, reverse=True)
+                tool_usage = ToolUsage(
+                    totalCalls=sum(t.count for t in entries),
+                    uniqueTools=len(entries),
+                    tools=entries,
+                )
+            # by_model is intentionally not wired into modelUsage here —
+            # the workspace summary's per-session shape doesn't currently
+            # carry it; adding it requires the same ModelUsageWithTotals
+            # wiring we did in the per-project BFF. Stage 2 follow-up if
+            # needed.
+
+    # Phase 2 / Stage 3 — read role split from augment row's
+    # messageCountByRole; legacy schema 1 rows degrade to zeros.
+    by_role_raw = row.get("messageCountByRole")
+    by_role = by_role_raw if isinstance(by_role_raw, dict) else {}
     return SessionCostSummary(
         sessionId=composite_key,
         sessionFile=f"{native}.jsonl" if native else "",
@@ -312,12 +630,14 @@ def _row_to_summary(composite_key: str, row: dict) -> SessionCostSummary:
         totalTokens=inp + out + cr + cw,
         messageCounts=MessageCounts(
             total=int(row.get("messageCount", 0) or 0),
-            user=0, assistant=0,
+            user=int(by_role.get("user", 0) or 0),
+            assistant=int(by_role.get("assistant", 0) or 0),
             toolCalls=int(row.get("toolCallCount", 0) or 0),
-            toolResults=0, errors=0,
+            toolResults=int(by_role.get("toolResults", 0) or 0),
+            errors=int(by_role.get("errors", 0) or 0),
         ),
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
-        modelUsage=[],
+        toolUsage=tool_usage,
+        modelUsage=model_usage,
     )
 
 
@@ -344,13 +664,25 @@ def workspace_usage_summary(
     except ValueError as exc:
         raise _bad_query("start / end must be YYYY-MM-DD") from exc
 
+    workspace = scopes.resolve_scope("xo-workspace-visualizer")
+    stats = workspace.read_stats() or {}
+    summary_window_days = days or 30
+
     sessionslist = _union_sessionslist()
-    per_session = [_row_to_summary(k, r) for k, r in sessionslist.items()]
+    per_session = [_row_to_summary(k, r, stats=stats) for k, r in sessionslist.items()]
     inp = sum(s.input for s in per_session)
     out = sum(s.output for s in per_session)
     cr = sum(s.cacheRead for s in per_session)
     cw = sum(s.cacheWrite for s in per_session)
-    msgs = sum(s.messageCounts.total for s in per_session)
+    # Sum the per-session role-split (Stage 3) into the aggregate.
+    agg_msg = MessageCounts(
+        total=sum(s.messageCounts.total for s in per_session),
+        user=sum(s.messageCounts.user for s in per_session),
+        assistant=sum(s.messageCounts.assistant for s in per_session),
+        toolCalls=sum(s.messageCounts.toolCalls for s in per_session),
+        toolResults=sum(s.messageCounts.toolResults for s in per_session),
+        errors=sum(s.messageCounts.errors for s in per_session),
+    )
 
     return SessionCostSummary(
         sessionId="all-projects",
@@ -359,8 +691,8 @@ def workspace_usage_summary(
         lastActivity=max((s.lastActivity for s in per_session if s.lastActivity), default=None),
         input=inp, output=out, cacheRead=cr, cacheWrite=cw,
         totalTokens=inp + out + cr + cw,
-        messageCounts=MessageCounts(total=msgs, user=0, assistant=0, toolCalls=0, toolResults=0, errors=0),
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
+        messageCounts=agg_msg,
+        toolUsage=_tool_usage_from_stats(stats, summary_window_days),
         modelUsage=[],
         sessionCount=len(per_session),
         sessions=per_session,
@@ -385,7 +717,11 @@ def workspace_usage_one_session(session_id: str) -> SessionCostSummary:
         found = scope.read_one_session(session_id)
         if found is not None:
             composite_key, row = found
-            return _row_to_summary(composite_key, row)
+            # Use the owning project's stats so tools/by_model lookups
+            # find the right by_session entry (workspace stats also
+            # contain it, but per-project is cheaper and equivalent).
+            stats = scope.read_stats() or {}
+            return _row_to_summary(composite_key, row, stats=stats)
     raise HTTPException(
         status_code=404,
         detail={"code": "session_not_found", "message": "Session not found."},

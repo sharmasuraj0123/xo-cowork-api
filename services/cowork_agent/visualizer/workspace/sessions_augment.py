@@ -30,7 +30,7 @@ def apply() -> bool:
                 sessions[key] = row
 
     payload = {
-        "schema": 1,
+        "schema": 2,
         "updated_at": _now_iso(),
         "sessions": sessions,
     }

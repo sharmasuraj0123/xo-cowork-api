@@ -1,5 +1,9 @@
-"""Claude Code source — tails ``~/.claude/projects/*.jsonl`` and reads
-``~/.claude/sessions/<pid>.json`` for live presence.
+"""Claude Code visualizer source — tails ``~/.claude/projects/*.jsonl``
+and reads ``~/.claude/sessions/<pid>.json`` for live presence.
+
+Loaded by :func:`services.cowork_agent.visualizer.source_loader.load_source_module`
+when ``AGENT_NAME=claude_code``. The class name ``Source`` is the
+loader contract.
 
 Responsibilities:
 
@@ -34,21 +38,24 @@ import re
 from pathlib import Path
 from typing import Iterator, Optional
 
+from services.cowork_agent.visualizer.discovery import iter_sessionslist_rows
 from services.cowork_agent.visualizer.ingest import jsonl_tail, pii_filter
 from services.cowork_agent.visualizer.ingest.events import (
     Event,
     FileTouched,
+    MessageObserved,
     SessionFirstSeen,
     TaskCreated,
     TaskCreateObserved,
     ToolResultObserved,
+    UsageObserved,
+    compute_latency_ms,
 )
-from services.cowork_agent.visualizer.project_index import (
+from services.cowork_agent.adapters.claude_code._project_encoding import (
     encoded_cwd_for_project,
-    project_id_for_cwd,
 )
-from services.cowork_agent.visualizer.workspace_index import list_project_ids
-from services.cowork_agent.project_layout import xo_dir, xo_projects_root
+from services.cowork_agent.visualizer.project_index import project_id_for_cwd
+from services.cowork_agent.project_layout import xo_projects_root
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +66,12 @@ _CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 _TASK_RESULT_RE = re.compile(r"Task #(\d+) created", re.IGNORECASE)
 
 
-class ClaudeCodeSource:
-    """Concrete :class:`Source` implementation for Claude Code."""
+class Source:
+    """Visualizer source for the Claude Code backend.
+
+    The class name ``Source`` is the loader contract — see
+    ``services/cowork_agent/visualizer/source_loader.py``.
+    """
 
     name = "claude_code"
 
@@ -71,6 +82,11 @@ class ClaudeCodeSource:
         self._sessions_seen: set[str] = set()
         # (native_session_id, tool_use_id) → pending TaskCreate.
         self._pending_creates: dict[tuple[str, str], TaskCreateObserved] = {}
+        # native_session_id → ts of the last MessageObserved(role="user").
+        # Used to attach latency_ms on the matching UsageObserved
+        # (Phase 2 / Stage 4). Cleared after each attachment so a
+        # single user message contributes at most one latency sample.
+        self._last_user_ts: dict[str, str] = {}
         # Claude Code's jsonl emits MULTIPLE records per actual assistant
         # turn (streaming chunks + final), each carrying the same
         # ``message.id`` (the Anthropic ``msg_*`` id) and the same
@@ -131,7 +147,7 @@ class ClaudeCodeSource:
                 continue
             rows.append({
                 "session_id":  str(data.get("sessionId", "")),
-                "runtime":     "claude_code",
+                "runtime":     self.name,
                 "project_id":  project_id,
                 "started_at_ms": int(data.get("startedAt", 0) or 0),
                 "updated_at_ms": int(data.get("updatedAt", 0) or 0),
@@ -146,9 +162,14 @@ class ClaudeCodeSource:
     def _discover_jsonls(self) -> Iterator[tuple[str, Path]]:
         """Yield ``(project_id, jsonl_path)`` for every Claude jsonl
         the runtime adapters have recorded in any project's
-        ``sessionslist.json``.
+        sessionslist.
 
-        We iterate the adapter rows (not the encoded-cwd directories)
+        The row enumeration is shared (see
+        :mod:`services.cowork_agent.visualizer.discovery`); we only
+        do the Claude-specific bit: turn the row's ``directory`` into
+        the encoded jsonl path under ``~/.claude/projects/``.
+
+        We iterate adapter rows (not the encoded-cwd directories)
         because the session's actual ``cwd`` doesn't always match the
         project id — e.g. the cowork-api ``default`` project routes
         chats at ``/home/coder/xo-projects/`` (the workspace root)
@@ -164,32 +185,18 @@ class ClaudeCodeSource:
         """
         if not _CLAUDE_PROJECTS_DIR.is_dir():
             return
-        for project_id in list_project_ids():
-            sl_path = xo_dir(project_id) / "sessions" / "sessionslist.json"
-            if not sl_path.is_file():
+        for project_id, _composite_key, row in iter_sessionslist_rows(self.name):
+            native = row.get("nativeSessionId")
+            directory = row.get("directory")
+            if not isinstance(native, str) or not native:
                 continue
-            try:
-                sl = json.loads(sl_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            if not isinstance(directory, str) or not directory:
                 continue
-            if not isinstance(sl, dict):
-                continue
-            for row in sl.values():
-                if not isinstance(row, dict):
-                    continue
-                if row.get("backend") != "claude_code":
-                    continue
-                native = row.get("nativeSessionId")
-                directory = row.get("directory")
-                if not isinstance(native, str) or not native:
-                    continue
-                if not isinstance(directory, str) or not directory:
-                    continue
-                # Claude's encoding: '/foo/bar' → '-foo-bar' (lossless forward).
-                encoded = directory.replace("/", "-")
-                jsonl = _CLAUDE_PROJECTS_DIR / encoded / f"{native}.jsonl"
-                if jsonl.is_file():
-                    yield project_id, jsonl
+            # Claude's encoding: '/foo/bar' → '-foo-bar' (lossless forward).
+            encoded = directory.replace("/", "-")
+            jsonl = _CLAUDE_PROJECTS_DIR / encoded / f"{native}.jsonl"
+            if jsonl.is_file():
+                yield project_id, jsonl
 
     # ── Per-jsonl pipeline ──────────────────────────────────────────────
 
@@ -206,7 +213,7 @@ class ClaudeCodeSource:
             # Dedup duplicate assistant streaming records by the Anthropic
             # message id. Without this, summed token counts in stats.json
             # over-count by the number of streaming chunks per turn (3-7×
-            # in practice). See sources/claude_code.py __init__ comment.
+            # in practice).
             if raw.get("type") == "assistant":
                 msg = raw.get("message") if isinstance(raw.get("message"), dict) else None
                 anth_mid = msg.get("id") if msg else None
@@ -244,7 +251,22 @@ class ClaudeCodeSource:
                 cwd=cwd or "",
             )
 
-        # 2) Task pairing — buffer creates, emit finals on results.
+        # 2) Latency tracking (Phase 2 / Stage 4).
+        # User message: stash its ts so the next assistant turn for
+        # this session can derive a wall-clock delta.
+        # UsageObserved: look up the stashed user ts and attach
+        # latency_ms via dataclass.replace. Pop on use so each user
+        # message contributes at most one latency sample.
+        if isinstance(ev, MessageObserved) and ev.role == "user" and nsid:
+            self._last_user_ts[nsid] = ev.ts
+        elif isinstance(ev, UsageObserved) and nsid:
+            user_ts = self._last_user_ts.pop(nsid, None)
+            if user_ts is not None:
+                latency = compute_latency_ms(user_ts, ev.ts)
+                if latency is not None:
+                    ev = dataclasses.replace(ev, latency_ms=latency)
+
+        # 3) Task pairing — buffer creates, emit finals on results.
         if isinstance(ev, TaskCreateObserved):
             key = (nsid, ev.tool_use_id)
             self._pending_creates[key] = ev
@@ -254,12 +276,12 @@ class ClaudeCodeSource:
             yield from self._pair_task_result(ev)
             return  # ToolResultObserved is internal-only
 
-        # 3) File-touch re-anchoring.
+        # 4) File-touch re-anchoring.
         if isinstance(ev, pii_filter.FileTouchPending):
             yield from self._reanchor_path(ev, cwd=cwd)
             return  # FileTouchPending is internal-only
 
-        # 4) Everything else passes straight to the sinks.
+        # 5) Everything else passes straight to the sinks.
         yield ev
 
     def _pair_task_result(self, ev: ToolResultObserved) -> Iterator[TaskCreated]:

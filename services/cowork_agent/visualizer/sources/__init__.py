@@ -1,7 +1,11 @@
-"""Source modules — read runtime storage, emit normalised events.
+"""Source protocol home.
 
-One module per runtime. Today Claude Code is the only working source;
-Codex is stubbed (see docs/watcher-design.md §10) and OpenClaw
-inherits adapter-written ``sessionslist.json`` rows directly without
-needing a watcher source for counters (covered by a follow-up).
+Concrete sources moved to ``services/cowork_agent/adapters/<name>/visualizer_source.py``
+so each agent owns its own watcher source alongside its other adapter
+modules (``adapter.py``, ``usage.py``, ``streaming.py``, …). The
+active source is resolved at watcher startup by
+``services/cowork_agent/visualizer/source_loader.py``.
+
+What stays here: :mod:`.base`, the :class:`.base.Source` Protocol that
+concrete sources structurally conform to.
 """
