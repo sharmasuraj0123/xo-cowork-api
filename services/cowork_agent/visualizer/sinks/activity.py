@@ -79,6 +79,12 @@ def apply(
         sid = r.get("session_id")
         if not sid:
             continue
+        runtime = r.get("runtime")
+        if not runtime:
+            # Source MUST tag each presence row with its runtime. Dropping
+            # here matches the "no session" treatment above — we'd rather
+            # lose a presence row than mis-tag it as the wrong backend.
+            continue
         agent = model_by_session.get(sid)
         if not agent:
             # Session live but no assistant message yet — invisible
@@ -86,7 +92,7 @@ def apply(
             continue
         row = {
             "session_id":       sid,
-            "runtime":          r.get("runtime") or "claude_code",
+            "runtime":          runtime,
             "agent":            agent,
             "user_id":          user_id,
             "opened_at":        _ms_to_iso(int(r.get("started_at_ms", 0) or 0)),

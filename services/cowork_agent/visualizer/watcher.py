@@ -18,6 +18,7 @@ import logging
 from collections import defaultdict
 from typing import Optional
 
+from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.project_layout import xo_dir
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import UsageObserved
@@ -29,8 +30,7 @@ from services.cowork_agent.visualizer.sinks import (
     timeline,
     todos,
 )
-from services.cowork_agent.visualizer.sources.claude_code import ClaudeCodeSource
-from services.cowork_agent.visualizer.sources.openclaw import OpenClawSource
+from services.cowork_agent.visualizer.source_loader import load_source_module
 from services.cowork_agent.visualizer.workspace import (
     activity as ws_activity,
 )
@@ -70,13 +70,23 @@ class Watcher:
     """
 
     def __init__(self) -> None:
-        # Share one OffsetStore across runtimes so both tails persist
-        # into the same ~/.xo-cowork/watcher/offsets.json file.
+        # One source: whichever the active AGENT_NAME resolves to.
+        # See services/cowork_agent/visualizer/source_loader.py for the
+        # dispatch. Agents without a visualizer_source.py module (today:
+        # hermes) produce an empty source list — the watcher still runs
+        # so sinks can serve whatever data is already on disk.
         offsets = jsonl_tail.OffsetStore()
-        self.sources = [
-            ClaudeCodeSource(offsets=offsets),
-            OpenClawSource(offsets=offsets),
-        ]
+        active_name = get_active_agent().name
+        mod = load_source_module()
+        if mod is None:
+            self.sources = []
+        else:
+            source = mod.Source(offsets=offsets)
+            assert source.name == active_name, (
+                f"visualizer_source.Source.name {source.name!r} does not match "
+                f"active agent {active_name!r}"
+            )
+            self.sources = [source]
         self.model_by_session: dict[str, str] = {}
 
     # ── One tick ────────────────────────────────────────────────────────
@@ -141,6 +151,16 @@ class Watcher:
                 presence_by_project[pid].append(row)
 
         for pid in list_project_ids():
+            # Identity fill is idempotent (no-ops once _template is cleared).
+            # Running it here — alongside the per-project activity sink that
+            # already iterates every known project — closes the gap where a
+            # scaffolded project that has not yet produced events would
+            # otherwise sit on `_template: true` indefinitely. Matches the
+            # documented intent of the project_json sink (see its docstring).
+            try:
+                project_json.fill_identity(xo_dir(pid), pid)
+            except Exception:
+                logger.exception("identity fill failed for %s", pid)
             try:
                 activity.apply(
                     xo_dir(pid),

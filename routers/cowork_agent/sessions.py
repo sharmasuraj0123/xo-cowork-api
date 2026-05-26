@@ -75,12 +75,21 @@ def get_messages(session_id: str, limit: int = 50, offset: int = -1):
         all_messages = convert_messages(session_id, records)
     total = len(all_messages)
 
+    # ``offset=-1`` means "latest page". We deliberately return ALL messages
+    # in that mode (no upper bound on ``page``). The old behaviour returned
+    # ``all_messages[total - limit : total]`` which slid forward as ``total``
+    # grew on the next poll, dropping messages that were previously visible.
+    # Returning everything keeps the rendered list stable across the 10s
+    # ``refetchInterval`` and SSE-driven ``invalidateQueries``. For very long
+    # sessions the response is bigger, but the conversation length is bounded
+    # by the model's context window in practice; a future cursor-pagination
+    # pass can revisit this if needed.
     if offset == -1:
-        start = max(0, total - limit)
+        start = 0
+        page = all_messages
     else:
         start = offset
-
-    page = all_messages[start : start + limit]
+        page = all_messages[start : start + limit]
 
     return {
         "total": total,

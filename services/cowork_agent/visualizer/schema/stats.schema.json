@@ -2,13 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "xo/stats.schema.json",
   "title": "xo stats — rolling project metrics",
-  "description": "Rolling 7d/30d activity stats plus per-session and per-runtime breakdowns. Rebuilt periodically (≈60s) by the watcher from `.xo/timeline.jsonl` — never hand-edited.",
+  "description": "Rolling 7d/30d activity stats plus per-session, per-runtime, and per-day breakdowns. Rebuilt periodically (≈60s) by the watcher from `.xo/timeline.jsonl` — never hand-edited. Schema 2 adds the optional `by_day` block (Phase 2 / Stage 1); schema 1 readers continue to work because `by_day` is optional and BFF helpers treat absent as zero-filled.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "rolling"],
   "properties": {
     "$schema":    { "type": "string" },
-    "schema":     { "type": "integer", "const": 1 },
+    "schema":     { "type": "integer", "enum": [1, 2] },
     "updated_at": { "type": ["string", "null"], "format": "date-time" },
     "rolling": {
       "type": "object",
@@ -26,6 +26,11 @@
     "by_runtime": {
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/window" }
+    },
+    "by_day": {
+      "type": "object",
+      "description": "Per-UTC-day rollup, capped to ~35 entries (30d analytics window + 5d buffer). Keys are YYYY-MM-DD. Introduced in schema 2.",
+      "additionalProperties": { "$ref": "#/definitions/day_bucket" }
     }
   },
   "definitions": {
@@ -44,6 +49,7 @@
       "properties": {
         "tokens":         { "$ref": "#/definitions/tokens" },
         "by_model":       { "type": "object", "description": "Map of model id → window-scoped sub-stats.", "additionalProperties": true },
+        "by_tool":        { "type": "object", "description": "Map of tool name → call count over this window. Populated from per-session tool tallies. Introduced in schema 2 (Phase 2 / Stage 2).", "additionalProperties": { "type": "integer", "minimum": 0 } },
         "files_edited":   { "type": "integer", "minimum": 0 },
         "sessions":       { "type": "integer", "minimum": 0 },
         "active_minutes": { "type": "integer", "minimum": 0 }
@@ -55,8 +61,68 @@
       "properties": {
         "tokens":      { "$ref": "#/definitions/tokens" },
         "files":       { "type": "array", "items": { "type": "string" } },
-        "duration_ms": { "type": "integer", "minimum": 0 }
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "tools":       { "type": "object", "description": "Per-session tool tally. Map of tool name → call count. Introduced in schema 2.", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "by_model":    { "type": "object", "description": "Per-session token split by model. Map of model id → {input, output}. Introduced in schema 2.", "additionalProperties": { "type": "object", "additionalProperties": false, "properties": { "input": { "type": "integer", "minimum": 0 }, "output": { "type": "integer", "minimum": 0 } } } }
       }
+    },
+    "day_bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input":       { "type": "integer", "minimum": 0 },
+            "output":      { "type": "integer", "minimum": 0 },
+            "cache_read":  { "type": "integer", "minimum": 0 },
+            "cache_write": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["input", "output", "cache_read", "cache_write"]
+        },
+        "messages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "total":        { "type": "integer", "minimum": 0 },
+            "user":         { "type": "integer", "minimum": 0 },
+            "assistant":    { "type": "integer", "minimum": 0 },
+            "toolCalls":    { "type": "integer", "minimum": 0 },
+            "toolResults":  { "type": "integer", "minimum": 0 },
+            "errors":       { "type": "integer", "minimum": 0 }
+          },
+          "required": ["total", "user", "assistant", "toolCalls", "toolResults", "errors"]
+        },
+        "by_model": {
+          "type": "object",
+          "description": "Map of model id → {input, output, count} for this day.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "input":  { "type": "integer", "minimum": 0 },
+              "output": { "type": "integer", "minimum": 0 },
+              "count":  { "type": "integer", "minimum": 0 }
+            },
+            "required": ["input", "output", "count"]
+          }
+        },
+        "latency": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-day user→assistant response latency stats in ms. Phase 2 / Stage 4. p95_sample is a bounded reservoir (up to 100 items) used to approximate the p95 at read time.",
+          "properties": {
+            "count":       { "type": "integer", "minimum": 0 },
+            "sum_ms":      { "type": "integer", "minimum": 0 },
+            "min_ms":      { "type": "integer", "minimum": 0 },
+            "max_ms":      { "type": "integer", "minimum": 0 },
+            "p95_sample":  { "type": "array", "maxItems": 100, "items": { "type": "integer", "minimum": 0 } }
+          },
+          "required": ["count", "sum_ms", "min_ms", "max_ms", "p95_sample"]
+        }
+      },
+      "required": ["tokens", "messages", "by_model"]
     }
   }
 }

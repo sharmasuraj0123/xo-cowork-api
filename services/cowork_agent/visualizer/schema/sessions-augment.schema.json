@@ -2,13 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "xo/sessions-augment.schema.json",
   "title": "xo sessions-augment — watcher-owned per-session enrichments",
-  "description": "Sibling file to `sessionslist.json`. Holds the fields the runtime adapters do not compute: message/tool/task counters, first/last activity timestamps, ended_at, and episode_refs. Single writer: the watcher (services/cowork_agent/visualizer/sinks/sessions_augment.py). BFF readers stitch rows here onto the corresponding `sessionslist.json` row at read time (see docs/watcher-design.md §3.7). Keys are the same composite session ids used by `sessionslist.json` so the merge is a simple dict overlay.",
+  "description": "Sibling file to `sessionslist.json`. Holds the fields the runtime adapters do not compute: message/tool/task counters, first/last activity timestamps, ended_at, and episode_refs. Single writer: the watcher (services/cowork_agent/visualizer/sinks/sessions_augment.py). BFF readers stitch rows here onto the corresponding `sessionslist.json` row at read time (see docs/watcher-design.md §3.7). Keys are the same composite session ids used by `sessionslist.json` so the merge is a simple dict overlay. Schema 2 (Phase 2 / Stage 3) adds the optional `messageCountByRole` field; schema 1 files stay valid because the field is optional and BFF helpers treat absence as zeros.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "sessions"],
   "properties": {
     "$schema":    { "type": "string" },
-    "schema":     { "type": "integer", "const": 1 },
+    "schema":     { "type": "integer", "enum": [1, 2] },
     "updated_at": { "type": ["string", "null"], "format": "date-time" },
     "sessions": {
       "type": "object",
@@ -22,6 +22,17 @@
       "additionalProperties": false,
       "properties": {
         "messageCount":   { "type": "integer", "minimum": 0, "description": "Count of user+assistant message events observed in the runtime's session log." },
+        "messageCountByRole": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-role breakdown of message events. Sum of user+assistant should equal messageCount; toolResults and errors are reserved for future event types (currently always 0). Introduced in schema 2.",
+          "properties": {
+            "user":        { "type": "integer", "minimum": 0 },
+            "assistant":   { "type": "integer", "minimum": 0 },
+            "toolResults": { "type": "integer", "minimum": 0 },
+            "errors":      { "type": "integer", "minimum": 0 }
+          }
+        },
         "toolCallCount":  { "type": "integer", "minimum": 0, "description": "Count of tool_use events (all tools combined)." },
         "taskCount":      { "$ref": "#/definitions/task_count" },
         "firstActivity":  { "type": ["integer", "null"], "minimum": 0, "description": "Epoch ms of the first event the watcher observed for this session." },

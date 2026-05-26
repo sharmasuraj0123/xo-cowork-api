@@ -4,6 +4,11 @@ Frozen, ``__slots__``-backed dataclasses. Sinks dispatch on
 ``isinstance`` and never see raw jsonl shapes (P5-style boundary
 inside the watcher itself).
 
+Shared helpers (small enough to live alongside the types they
+operate on): :func:`compute_latency_ms` derives the user→assistant
+latency that :class:`UsageObserved` carries — used by every file-tail
+source.
+
 The shape is intentionally **sink-oriented**, not jsonl-oriented:
 
 * :class:`MessageObserved` collapses both user and assistant messages
@@ -27,7 +32,32 @@ The PII filter drops events whose path resolves outside the project.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
+
+
+_LATENCY_MAX_S = 600  # 10 min — matches the canonical /api/usage clamp
+
+
+def compute_latency_ms(user_ts: str, assistant_ts: str) -> Optional[int]:
+    """User→assistant wall-clock delta in ms, or None if out-of-range.
+
+    Both args are ISO-8601 timestamps. Returns ``None`` when either
+    ts is malformed, when the delta is negative (clock skew / out-
+    of-order events), or when it exceeds :data:`_LATENCY_MAX_S`
+    (treated as a pause/resume rather than a real response time —
+    same semantics the canonical aggregator uses; see
+    ``services/cowork_agent/adapters/claude_code/usage.py``).
+    """
+    try:
+        u = datetime.fromisoformat(user_ts.replace("Z", "+00:00"))
+        a = datetime.fromisoformat(assistant_ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    delta = (a - u).total_seconds()
+    if 0 <= delta <= _LATENCY_MAX_S:
+        return int(delta * 1000)
+    return None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -47,7 +77,7 @@ class Event:
 
     ts: str
     native_session_id: str
-    runtime: str  # "claude_code" | "openclaw" | "codex"
+    runtime: str  # active agent's name, e.g. "claude_code", "openclaw", "hermes"
     project_id: str = ""
 
 
@@ -89,6 +119,12 @@ class UsageObserved(Event):
     cumulative measure for runtimes that emit usage out-of-band).
 
     The watcher's stats sink aggregates these per session-day-model.
+
+    ``latency_ms`` is the wall-clock gap between the preceding user
+    message and this assistant turn, in milliseconds. ``None`` when
+    the source can't derive it (user message preceded the watcher's
+    offset, or the backend doesn't surface per-turn timing — hermes
+    today). The stats sink only accumulates non-None values.
     """
 
     input_tokens: int = 0
@@ -96,6 +132,7 @@ class UsageObserved(Event):
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     model: Optional[str] = None
+    latency_ms: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

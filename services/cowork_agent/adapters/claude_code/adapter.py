@@ -106,11 +106,20 @@ def get_session_directory(session_key: str) -> str | None:
     return meta.get("directory") if meta else None
 
 
-def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None:
+def write_preliminary_entry(
+    session_key: str,
+    session_id: str,
+    cwd: str,
+    native_session_id: str = "",
+) -> None:
     """
     Write a sessionslist.json entry BEFORE the subprocess starts so the polling
     loop in chat.py can resolve session_id without waiting for the full response.
     Messages are NOT stored here — they live in ~/.claude/projects/.
+
+    ``native_session_id`` is the pre-allocated UUID passed to claude via
+    ``--session-id``. Leaving it empty falls back to the patch-on-first-event
+    path; callers that pre-allocate make the JSONL filename predictable from t=0.
     """
     agent_id = _agent_id_from_key(session_key)
     sd = _xo_sessions_dir(agent_id)
@@ -119,13 +128,50 @@ def write_preliminary_entry(session_key: str, session_id: str, cwd: str) -> None
     index = _load_index(index_path)
     index[session_key] = {
         "sessionId": session_id,
-        "nativeSessionId": "",
+        "nativeSessionId": native_session_id,
         "directory": cwd,
         "backend": "claude_code",
         "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
         "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
     }
     _write_index(index_path, index)
+    if native_session_id:
+        _native_map[session_key] = native_session_id
+
+
+def _patch_native_session_id(session_key: str, native_sid: str) -> bool:
+    """Write ``nativeSessionId`` into the agent's ``sessionslist.json`` entry.
+
+    Idempotent: if the entry already has a non-empty ``nativeSessionId``,
+    leave it alone. Returns True if a write happened (or if the entry already
+    matches), False if the entry doesn't exist.
+
+    Called from inside the streaming loop the moment the native session id is
+    first observed, so the mapping survives an SSE disconnect that would
+    otherwise cancel the stream before the post-loop persistence code ran
+    (and orphan the on-disk JSONL — see
+    ``docs/claude-code-message-disappearance-investigation-2026-05-18.md``).
+    """
+    if not session_key or not native_sid:
+        return False
+    agent_id = _agent_id_from_key(session_key)
+    index, index_path = _load_agent_index(agent_id)
+    meta = index.get(session_key)
+    if not isinstance(meta, dict):
+        return False
+    existing = meta.get("nativeSessionId") or ""
+    if existing == native_sid:
+        _native_map[session_key] = native_sid
+        return True
+    if existing:
+        # A different native id is already mapped — don't clobber. The caller
+        # likely resumed an existing session and a new turn produced a new id.
+        return False
+    meta["nativeSessionId"] = native_sid
+    meta["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    _write_index(index_path, index)
+    _native_map[session_key] = native_sid
+    return True
 
 
 def find_session_key_for_session_id(session_id: str) -> str | None:
@@ -185,6 +231,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         agent_type: str | None = None,
         cwd: str | None = None,
         mcp_config_path: "Path | None" = None,
+        new_session_id: str | None = None,
     ) -> list[str]:
         cli = self.config.get("cli_path") or "claude"
         workspace = cwd or str(xo_projects_root())
@@ -208,8 +255,11 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             cmd.append("--verbose")
         if mcp_config_path is not None:
             cmd += ["--mcp-config", str(mcp_config_path)]
+        # --resume and --session-id are mutually exclusive at the CLI.
         if native_session_id:
             cmd += ["--resume", native_session_id]
+        elif new_session_id:
+            cmd += ["--session-id", new_session_id]
         cmd += ["-p", prompt]
         return cmd
 
@@ -331,9 +381,16 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         else:
             effective_cwd = self._resolve_cwd(agent_id)
 
-        # Write preliminary sessions.json entry only for new sessions.
+        # Pre-allocate the native session id and persist it to the index
+        # before spawning, so the JSONL filename is known from t=0 and
+        # a fast SSE cancellation can't orphan the mapping.
+        pre_allocated_native_sid: str | None = None
         if is_new and sk and our_session_id:
-            write_preliminary_entry(sk, our_session_id, effective_cwd)
+            pre_allocated_native_sid = str(uuid.uuid4())
+            write_preliminary_entry(
+                sk, our_session_id, effective_cwd,
+                native_session_id=pre_allocated_native_sid,
+            )
 
         # Resolve native --resume ID for existing sessions.
         native_resume_id: str | None = None
@@ -345,6 +402,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             cmd = self._build_cmd(
                 question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
                 mcp_config_path=mcp_config_path,
+                new_session_id=pre_allocated_native_sid,
             )
 
             proc = await asyncio.create_subprocess_exec(
@@ -366,8 +424,24 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 if event is None:
                     continue
 
+                if event.get("type") == "session_id":
+                    # Early ``system``/``init`` event — claude emits this on the
+                    # very first stdout line, before any tokens. Persist the
+                    # mapping immediately so an SSE disconnect mid-stream
+                    # doesn't orphan the on-disk JSONL.
+                    sid = event.get("session_id")
+                    if sid:
+                        native_session_id = sid
+                        _patch_native_session_id(sk or "", sid)
+                    continue  # internal bookkeeping, don't forward to SSE
+
                 if event.get("type") == "result":
-                    native_session_id = _extract_native_session_id(event)
+                    sid = _extract_native_session_id(event) or native_session_id
+                    if sid and sid != native_session_id:
+                        native_session_id = sid
+                    # Defensive re-persist in case system/init was missed.
+                    if sid:
+                        _patch_native_session_id(sk or "", sid)
                     usage = event.get("usage") or {}
                     model_id = event.get("model", "")
                     result_text = (event.get("result") or "").strip()
@@ -386,23 +460,29 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 yield {"type": "token", "token": result_text}
         finally:
             cleanup_session_mcp_config(mcp_config_path)
-
-        if sk and native_session_id:
-            # Persist nativeSessionId so resume works; messages live in ~/.claude/projects/.
-            agent_id_for_key = _agent_id_from_key(sk)
-            index, index_path = _load_agent_index(agent_id_for_key)
-            if sk in index:
-                existing_usage = index[sk].get("usage") or {}
-                index[sk]["nativeSessionId"] = native_session_id
-                index[sk]["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-                index[sk]["usage"] = {
-                    "input_tokens": existing_usage.get("input_tokens", 0) + usage.get("input_tokens", 0),
-                    "output_tokens": existing_usage.get("output_tokens", 0) + usage.get("output_tokens", 0),
-                    "cache_creation_input_tokens": existing_usage.get("cache_creation_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
-                    "cache_read_input_tokens": existing_usage.get("cache_read_input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
-                }
-                _write_index(index_path, index)
-            _native_map[sk] = native_session_id
+            # Always roll up usage onto the sessions index, even on cancellation.
+            # ``nativeSessionId`` itself was already written from inside the loop
+            # via ``_patch_native_session_id``; this finally block just updates
+            # usage tokens and the timestamp so the sidebar reflects the latest
+            # turn. If we never observed a native session id (e.g. claude
+            # crashed before emitting any event), there is nothing to roll up.
+            if sk and native_session_id:
+                agent_id_for_key = _agent_id_from_key(sk)
+                index, index_path = _load_agent_index(agent_id_for_key)
+                meta = index.get(sk)
+                if isinstance(meta, dict):
+                    existing_usage = meta.get("usage") or {}
+                    if not meta.get("nativeSessionId"):
+                        meta["nativeSessionId"] = native_session_id
+                    meta["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    meta["usage"] = {
+                        "input_tokens": existing_usage.get("input_tokens", 0) + usage.get("input_tokens", 0),
+                        "output_tokens": existing_usage.get("output_tokens", 0) + usage.get("output_tokens", 0),
+                        "cache_creation_input_tokens": existing_usage.get("cache_creation_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
+                        "cache_read_input_tokens": existing_usage.get("cache_read_input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
+                    }
+                    _write_index(index_path, index)
+                _native_map[sk] = native_session_id
 
         yield {"done": True, "native_session_id": native_session_id}
 
