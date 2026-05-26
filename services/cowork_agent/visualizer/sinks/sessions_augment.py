@@ -10,11 +10,10 @@ Tracks the fields the runtime adapters don't compute:
   ``TaskStatusChanged``
 * ``firstActivity`` / ``lastActivity`` — epoch ms of the earliest /
   latest event observed
-* ``ended_at`` — currently always null (filled in by Phase 3 when
-  session-close detection lands)
+* ``ended_at`` — currently always null (filled once session-close
+  detection lands)
 * ``episode_refs`` — preserved verbatim; the
-  :mod:`memory_episodic` watcher (Phase 3) writes to this field
-  separately
+  :mod:`memory_episodic` watcher writes to this field separately
 
 Keys match :mod:`sessionslist` — composite cowork-key when an
 adapter row exists, else native session id (the BFF merge naturally
@@ -154,9 +153,9 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
 
         if isinstance(ev, MessageObserved):
             row["messageCount"] = int(row.get("messageCount", 0)) + 1
-            # Phase 2 / Stage 3: per-role split. Legacy rows (schema 1
-            # on disk) won't have the sub-dict — create it lazily so
-            # an upgrade doesn't lose existing messageCount.
+            # Per-role split. Legacy schema-1 rows on disk won't have
+            # the sub-dict — create it lazily so an upgrade doesn't
+            # lose existing messageCount.
             by_role = row.get("messageCountByRole")
             if not isinstance(by_role, dict):
                 by_role = {"user": 0, "assistant": 0, "toolResults": 0, "errors": 0}

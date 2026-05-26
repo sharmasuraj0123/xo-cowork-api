@@ -51,9 +51,6 @@ from services.cowork_agent.visualizer.ingest.events import (
     UsageObserved,
     compute_latency_ms,
 )
-from services.cowork_agent.adapters.claude_code._project_encoding import (
-    encoded_cwd_for_project,
-)
 from services.cowork_agent.visualizer.project_index import project_id_for_cwd
 from services.cowork_agent.project_layout import xo_projects_root
 
@@ -83,9 +80,9 @@ class Source:
         # (native_session_id, tool_use_id) → pending TaskCreate.
         self._pending_creates: dict[tuple[str, str], TaskCreateObserved] = {}
         # native_session_id → ts of the last MessageObserved(role="user").
-        # Used to attach latency_ms on the matching UsageObserved
-        # (Phase 2 / Stage 4). Cleared after each attachment so a
-        # single user message contributes at most one latency sample.
+        # Used to attach latency_ms on the matching UsageObserved.
+        # Cleared on attachment so a single user message contributes
+        # at most one latency sample.
         self._last_user_ts: dict[str, str] = {}
         # Claude Code's jsonl emits MULTIPLE records per actual assistant
         # turn (streaming chunks + final), each carrying the same
@@ -251,12 +248,11 @@ class Source:
                 cwd=cwd or "",
             )
 
-        # 2) Latency tracking (Phase 2 / Stage 4).
-        # User message: stash its ts so the next assistant turn for
-        # this session can derive a wall-clock delta.
-        # UsageObserved: look up the stashed user ts and attach
-        # latency_ms via dataclass.replace. Pop on use so each user
-        # message contributes at most one latency sample.
+        # 2) Latency tracking. User message: stash its ts so the next
+        # assistant turn for this session can derive a wall-clock
+        # delta. UsageObserved: look up the stashed user ts and
+        # attach latency_ms via dataclass.replace. Pop on use so each
+        # user message contributes at most one latency sample.
         if isinstance(ev, MessageObserved) and ev.role == "user" and nsid:
             self._last_user_ts[nsid] = ev.ts
         elif isinstance(ev, UsageObserved) and nsid:

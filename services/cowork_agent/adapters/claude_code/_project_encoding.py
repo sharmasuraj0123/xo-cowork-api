@@ -83,27 +83,3 @@ def project_id_for_encoded_cwd(encoded: str) -> Optional[str]:
         if remainder == name or remainder.startswith(name + "-"):
             return name
     return None
-
-
-def project_id_for_jsonl(jsonl_path: Path) -> Optional[str]:
-    """Discovery helper for a ``~/.claude/projects/<enc>/<sid>.jsonl``
-    path. Returns the project id, or ``None`` if the jsonl isn't
-    rooted in our workspace.
-
-    The watcher uses this once on first sight; subsequent events
-    inside the jsonl confirm via the authoritative
-    ``project_index.project_id_for_cwd`` (each event carries ``cwd``).
-    """
-    if jsonl_path.suffix != ".jsonl":
-        return None
-    parent = jsonl_path.parent
-    if not parent.name:
-        return None
-    return project_id_for_encoded_cwd(parent.name)
-
-
-def encoded_cwd_for_project(project_id: str) -> str:
-    """Round-trip helper: project id → ``<encoded-cwd>`` directory
-    name under ``~/.claude/projects/``. Lossless (forward direction).
-    """
-    return _encode_path(str((xo_projects_root() / project_id).resolve()))

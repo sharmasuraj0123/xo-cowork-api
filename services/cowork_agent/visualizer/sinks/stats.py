@@ -71,7 +71,7 @@ def _empty_session_totals() -> dict:
         "last_ts":         None,
         "runtime":         "",
         "by_model_tokens": {},   # {model: {input, output}}
-        "tools":           {},   # {tool_name: count} — Phase 2 / Stage 2
+        "tools":           {},   # {tool_name: count}
     }
 
 
@@ -181,10 +181,10 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
             st["first_ts"] = st["first_ts"] or ev.ts
         st["last_ts"] = ev.ts
 
-        # ── Per-day bucketing (Phase 2 / Stage 1) ──
+        # ── Per-day bucketing ──
         # Done alongside the per-session work so the same event walk
-        # populates both. Pre-Phase-2 sessions don't get retroactive
-        # buckets — see docs/watcher-phase-2-implementation-plan.md §8.2.
+        # populates both. Sessions whose events were processed before
+        # by_day existed don't get retroactive buckets — forward-only.
         date = _iso_to_date(ev.ts)
         day_bucket = by_day_priv.setdefault(date, _empty_day_bucket()) if date else None
 
@@ -216,18 +216,17 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
                     mb["input"]  = int(mb["input"])  + int(ev.input_tokens or 0)
                     mb["output"] = int(mb["output"]) + int(ev.output_tokens or 0)
                     mb["count"]  = int(mb["count"])  + 1
-                # Phase 2 / Stage 4 — latency accumulation. Sources
-                # that can't derive it (hermes today) emit None and
-                # the day's latency block stays absent.
+                # Latency accumulation. Sources that can't derive it
+                # (hermes today) emit None and the day's latency
+                # block stays absent.
                 if ev.latency_ms is not None:
                     lat = day_bucket.setdefault("latency", _empty_latency())
                     _accumulate_latency(lat, int(ev.latency_ms))
             changed = True
 
         elif isinstance(ev, ToolUseObserved):
-            # Per-day toolCalls aggregate (Stage 1) + per-session
-            # per-tool tally (Stage 2). The latter feeds the window
-            # by_tool rollup below.
+            # Per-day toolCalls aggregate + per-session per-tool
+            # tally. The latter feeds the window by_tool rollup below.
             if day_bucket is not None:
                 day_bucket["messages"]["toolCalls"] = int(day_bucket["messages"]["toolCalls"]) + 1
             if ev.tool:
@@ -255,7 +254,7 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
     # ── Build the public stats shape ────────────────────────────────────
     # by_session exposes tools + by_model so per-session BFF endpoints
     # can populate toolUsage / modelUsage without a second pass over
-    # the private state. Schema 2 / Stage 2.
+    # the private state.
     by_session = {
         sid: {
             "tokens":      dict(s["tokens"]),
@@ -285,8 +284,8 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
 
     # ── Rolling 7d / 30d windows ────────────────────────────────────────
     # Each session contributes to a window if its `last_ts` is inside
-    # the window. Cheap and exact enough for v1 (per-event bucketing
-    # is Phase 3 polish).
+    # the window. Cheap and good enough; per-event bucketing lives in
+    # by_day above.
     now = datetime.now(timezone.utc)
     rolling = {"7d": _empty_window(), "30d": _empty_window()}
 

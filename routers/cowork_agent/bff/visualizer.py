@@ -1,23 +1,13 @@
 """Project-scope BFF endpoints over ``<project>/.xo/``.
 
-This module never imports ``os`` or ``pathlib`` (P2). All filesystem
-reads happen behind ``services.cowork_agent.scopes.VisualizerScope``,
-which delegates to ``services.cowork_agent.visualizer.reader``. See
-docs/watcher-design.md §6.
+This module never imports ``os`` or ``pathlib``. All filesystem reads
+happen behind ``services.cowork_agent.scopes.VisualizerScope``, which
+delegates to ``services.cowork_agent.visualizer.reader``.
 
-Phase 1 ships six endpoints with empty/zero state where Phase 2's
-watcher has not yet written the backing files:
-
-* ``/usage/summary/card`` — totals from adapter-owned
-  ``sessionslist.json``; daily breakdown is single-bucket by session
-  ``updatedAt`` (true daily roll-up comes from the watcher's
-  ``stats.json`` in Phase 2).
-* ``/todos`` — empty until the watcher writes ``todos.json``.
-* ``/activity`` — empty until the watcher writes ``activity.json``.
-
-The remaining five project-scope endpoints (``/usage/analytics``,
-``/usage/summary``, ``/usage/sessions``, ``/usage/sessions/{id}``,
-``/timeline``) ship in §13.1.6.
+Endpoints are populated when the watcher has written the backing
+files (``stats.json``, ``sessions-augment.json``, ``todos.json``,
+``activity.json``). Files written under older schema versions
+degrade gracefully — readers treat missing keys as zero.
 """
 
 from __future__ import annotations
@@ -100,7 +90,7 @@ def _sum_session_totals(sessionslist: dict[str, dict]) -> tuple[int, int]:
 
     Tokens are read from the adapter-owned ``usage`` block. Message
     count comes from the watcher-augment ``messageCount`` field if
-    present (Phase 2), else ``0``.
+    present, else ``0``.
     """
     total_tokens = 0
     total_messages = 0
@@ -116,11 +106,9 @@ def _bucket_daily_cost(
     sessionslist: dict[str, dict], *, days: int
 ) -> list[DailyCostEntry]:
     """Build the ``dailyCost`` array, zero-filled for the requested
-    window, sorted oldest→newest.
-
-    Phase 1 limitation: one bucket per session, keyed by the session's
-    ``updatedAt`` date. Phase 2's ``stats.json`` will replace this with
-    a true per-event roll-up. Totals are correct either way.
+    window, sorted oldest→newest. One bucket per session keyed by
+    session ``updatedAt``; coarser than the per-event by_day rollup
+    other endpoints use, but totals match either way.
     """
     buckets: dict[str, dict[str, int | float]] = {}
     for row in sessionslist.values():
@@ -132,8 +120,7 @@ def _bucket_daily_cost(
         b["tokens"] += int(usage.get("input_tokens", 0) or 0)
         b["tokens"] += int(usage.get("output_tokens", 0) or 0)
         b["messages"] += int(row.get("messageCount", 0) or 0)
-        # Cost stays 0 for Claude Code in v1 (no cost model — see
-        # docs/watcher-design.md §8.3).
+        # Cost stays 0 — no pricing table.
 
     today = datetime.now(timezone.utc)
     out: list[DailyCostEntry] = []
@@ -175,7 +162,7 @@ def project_usage_summary_card(
     _, total_messages = _sum_session_totals(sessionslist)
     return UsageSummaryCardResponse(
         days=days,
-        totalCost=0.0,  # cost-per-token table is Phase 3 polish
+        totalCost=0.0,  # no pricing table
         totalMessages=total_messages,
         totalTokens=total_tokens,
         dailyCost=_bucket_daily_cost(sessionslist, days=days),
@@ -218,7 +205,7 @@ def _shape_todos(project_id: str, raw: Optional[dict]) -> TodosResponse:
             )
         out_sessions[str(sid)] = SessionTodos(
             runtime=str(entry.get("runtime", "")),
-            source_file=None,  # P1: never echo absolute paths back (§3.4.1)
+            source_file=None,  # never echo absolute paths back
             session_started_at=entry.get("session_started_at"),
             todos=todos,
         )
@@ -237,9 +224,9 @@ def _shape_todos(project_id: str, raw: Optional[dict]) -> TodosResponse:
 def project_todos(project_id: str) -> TodosResponse:
     """Per-session task list for one project.
 
-    Empty ``{sessions: {}}`` until the Phase 2 watcher writes
-    ``todos.json``. Adapter-written ``sessionslist.json`` is NOT a
-    source for todos — todos live exclusively in the watcher-derived
+    Empty ``{sessions: {}}`` when the watcher hasn't written
+    ``todos.json`` yet. Adapter-written ``sessionslist.json`` is NOT
+    a source for todos — todos live exclusively in the watcher-derived
     ``todos.json``.
     """
     scope = _require_project(project_id)
@@ -427,9 +414,9 @@ def _shape_activity(project_id: str, raw: Optional[dict]) -> ActivityResponse:
 def project_activity(project_id: str) -> ActivityResponse:
     """Live presence — which sessions are open in this project right now.
 
-    Empty ``{open_sessions: []}`` until the Phase 2 watcher writes
-    ``activity.json``. AGENTS.md §4 (boot ritual) reads this file to
-    answer "is anyone else working here right now?".
+    Empty ``{open_sessions: []}`` when the watcher hasn't written
+    ``activity.json`` yet. AGENTS.md (boot ritual) reads this file
+    to answer "is anyone else working here right now?".
     """
     scope = _require_project(project_id)
     try:
@@ -468,10 +455,9 @@ def _tokens_from_stats(stats: dict, days: int) -> int:
 def _message_counts_for_row(row: dict) -> MessageCounts:
     """Build a ``MessageCounts`` from one merged sessionslist row.
 
-    Reads ``messageCountByRole`` (Phase 2 / Stage 3) for the role
-    split; falls back to zeros for schema 1 augment rows that don't
-    carry the field. ``total`` and ``toolCalls`` come from their own
-    top-level augment fields, unchanged from Phase 1.
+    Reads ``messageCountByRole`` for the role split; falls back to
+    zeros for schema 1 augment rows that don't carry the field.
+    ``total`` and ``toolCalls`` come from top-level augment fields.
     """
     by_role_raw = row.get("messageCountByRole")
     by_role = by_role_raw if isinstance(by_role_raw, dict) else {}
@@ -528,17 +514,38 @@ def _by_model_from_stats(stats: dict, days: int) -> dict[str, dict]:
     return out
 
 
+def _model_call_counts_from_by_day(
+    by_day: dict[str, dict], dates: list[str]
+) -> dict[str, int]:
+    """``{model_id: total_count}`` summed across ``by_day.<date>.by_model.<model>.count``
+    for the requested ``dates`` window. ``rolling.<window>.by_model`` only
+    carries tokens, so call/message counts have to come from per-day."""
+    counts: dict[str, int] = {}
+    for d in dates:
+        day = by_day.get(d) or {}
+        bm = (day.get("by_model") or {}) if isinstance(day, dict) else {}
+        if not isinstance(bm, dict):
+            continue
+        for model, entry in bm.items():
+            if not isinstance(entry, dict):
+                continue
+            counts[str(model)] = counts.get(str(model), 0) + int(entry.get("count", 0) or 0)
+    return counts
+
+
 def _model_usage_from_stats(stats: dict, days: int) -> list[ModelUsageEntry]:
-    """``/usage/analytics``-shape per-model rollup. ``calls`` and ``cost``
-    are 0 — stats.json's rolling block carries only token splits per
-    model; per-model call counts and cost are not on disk in v1.
+    """``/usage/analytics``-shape per-model rollup. Tokens from
+    rolling.<window>.by_model; ``calls`` from per-day by_model summed
+    across the same window. ``cost`` stays 0 (no pricing table).
     Sorted by tokens descending so the UI's top-of-list is meaningful.
     """
+    by_day = _by_day_from_stats(stats)
+    counts = _model_call_counts_from_by_day(by_day, _zero_filled_dates(days))
     entries = [
         ModelUsageEntry(
             model=model,
             provider=_provider_for_model(model),
-            calls=0,
+            calls=int(counts.get(model, 0)),
             tokens=t["input"] + t["output"],
             cost=0.0,
         )
@@ -553,8 +560,11 @@ def _model_usage_with_totals_from_stats(
 ) -> list[ModelUsageWithTotals]:
     """``SessionCostSummary``-shape per-model rollup. Same source as
     :func:`_model_usage_from_stats` but the nested ``TokenTotals``
-    shape — cache split / costs / count are not in stats.json rolling,
-    so they zero-fill."""
+    shape — ``count`` from per-day by_model; cache split / costs
+    zero-fill (cache tokens aren't tracked per-model anywhere yet;
+    no pricing table)."""
+    by_day = _by_day_from_stats(stats)
+    counts = _model_call_counts_from_by_day(by_day, _zero_filled_dates(days))
     entries: list[ModelUsageWithTotals] = []
     for model, t in _by_model_from_stats(stats, days).items():
         total = t["input"] + t["output"]
@@ -562,7 +572,7 @@ def _model_usage_with_totals_from_stats(
             ModelUsageWithTotals(
                 provider=_provider_for_model(model),
                 model=model,
-                count=0,
+                count=int(counts.get(model, 0)),
                 totals=TokenTotals(
                     input=t["input"],
                     output=t["output"],
@@ -587,7 +597,7 @@ def _tool_usage_from_stats(stats: dict, days: int) -> ToolUsage:
 
     Sorted by count descending so the dashboard's top-N is stable.
     Returns the empty shape (totalCalls=0, tools=[]) when the rolling
-    block is absent or has no tools — same as Stage 1's empty fallback."""
+    block is absent or has no tools."""
     window = "30d" if days > 7 else "7d"
     rolling = (stats.get("rolling") or {}).get(window) or {}
     by_tool = rolling.get("by_tool") or {}
@@ -657,7 +667,7 @@ def _model_usage_for_session(
 
 def _by_day_from_stats(stats: dict) -> dict[str, dict]:
     """Return the ``by_day`` block as a date-keyed dict (empty if
-    absent — schema 1 / pre-Phase-2 files have no by_day)."""
+    absent — schema 1 files have no by_day)."""
     bd = stats.get("by_day")
     return bd if isinstance(bd, dict) else {}
 
@@ -876,14 +886,13 @@ def _aggregate_session_summary(
         duration_ms = _duration_ms_for_session(stats, native)
         dates = _activity_dates(first_act, last_act)
         if dates:
-            # Phase 2 / Stage 1: dailyBreakdown is the by_day token
-            # block filtered to the session's activity window. The
-            # by_day buckets are project-wide rather than per-session
-            # (they aggregate across sessions on the same day), so
-            # this overstates a single session's contribution on days
-            # where other sessions were also active. Per-session
-            # daily breakdown is a Stage 4b follow-up — see
-            # docs/watcher-phase-2-implementation-plan.md §6.4.
+            # dailyBreakdown is the by_day token block filtered to
+            # the session's activity window. by_day buckets are
+            # project-wide (they aggregate across sessions on the
+            # same day), so this overstates a single session's
+            # contribution on days where other sessions were also
+            # active. Per-session daily breakdown would need per-
+            # session daily tracking in sessions-augment.
             daily_breakdown = _daily_breakdown_for_dates(
                 _by_day_from_stats(stats), dates,
             )
@@ -944,12 +953,7 @@ def project_usage_analytics(
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
 ) -> UsageAnalyticsResponse:
-    """Per-project analytics dashboard. Shape mirrors ``/openclaw/usage/analytics``.
-
-    Phase 1 fills ``stats`` (totals) from ``sessionslist.json``;
-    daily/tool/model arrays are zero-filled until Phase 2 writes
-    ``stats.json``.
-    """
+    """Per-project analytics dashboard. Shape mirrors ``/openclaw/usage/analytics``."""
     try:
         if start:
             datetime.strptime(start, "%Y-%m-%d")
@@ -1056,8 +1060,6 @@ def project_usage_summary(
     first_act = min((s.firstActivity for s in per_session if s.firstActivity), default=None)
     last_act = max((s.lastActivity for s in per_session if s.lastActivity), default=None)
     # Aggregate messageCounts by summing each per-session breakdown.
-    # The per-session shapes already include the role split (Stage 3),
-    # so the aggregate just adds them up.
     agg_msg = MessageCounts(
         total=sum(s.messageCounts.total for s in per_session),
         user=sum(s.messageCounts.user for s in per_session),
@@ -1155,8 +1157,8 @@ def project_timeline(
 ) -> TimelineResponse:
     """Newest-first event stream for one project.
 
-    Reads from ``<project>/.xo/timeline.jsonl``. Empty until Phase 2
-    watcher emits events.
+    Reads from ``<project>/.xo/timeline.jsonl``. Empty when the
+    watcher hasn't emitted any events for this project yet.
     """
     if before is not None:
         try:

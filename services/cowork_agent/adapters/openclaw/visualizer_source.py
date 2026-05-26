@@ -16,8 +16,7 @@ that don't apply):
   row — OpenClaw doesn't put ``sessionId`` on every message.
 * Emit a single :class:`events.SessionFirstSeen` per session id.
 
-Not implemented (intentional, see
-``docs/openclaw-watcher-implementation-plan.md`` §4):
+Not implemented (intentional):
 
 * ``poll_presence`` returns ``[]`` — OpenClaw has no per-session pid
   file the way Claude does.
@@ -71,7 +70,7 @@ class Source:
         self._sid_by_path: dict[str, str] = {}
         # native_session_id → ts of the last MessageObserved(role="user").
         # Used to attach latency_ms on the matching UsageObserved
-        # (Phase 2 / Stage 4). Mirrors the claude_code source.
+        # Mirrors the claude_code source.
         self._last_user_ts: dict[str, str] = {}
 
     # ── Public protocol ─────────────────────────────────────────────────
@@ -162,10 +161,9 @@ class Source:
                         project_id=project_id,
                         cwd="",  # OpenClaw doesn't surface a cwd per line
                     )
-                # Latency tracking (Phase 2 / Stage 4). Same pattern
-                # as the claude_code source: stash user-message ts,
-                # attach latency_ms to the next UsageObserved for
-                # this session, pop on use so each user message
+                # Latency tracking: stash user-message ts, attach
+                # latency_ms to the next UsageObserved for this
+                # session, pop on use so each user message
                 # contributes at most one sample.
                 if isinstance(ev, MessageObserved) and ev.role == "user" and nsid:
                     self._last_user_ts[nsid] = ev.ts

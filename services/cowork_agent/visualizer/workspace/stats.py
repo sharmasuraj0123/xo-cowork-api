@@ -91,10 +91,9 @@ def _merge_day_bucket(into: dict, src: dict) -> None:
             bm["input"]  += int(mt.get("input", 0) or 0)
             bm["output"] += int(mt.get("output", 0) or 0)
             bm["count"]  += int(mt.get("count", 0) or 0)
-    # Phase 2 / Stage 4 — merge latency. Sum counts/sum_ms, take the
-    # extremes of min_ms/max_ms, concat reservoirs and trim. The
-    # reservoir trim drops fidelity on high-traffic days; acceptable
-    # for a workspace-tier estimate.
+    # Merge latency: sum counts/sum_ms, take min/max extremes, concat
+    # reservoirs and trim. The trim drops fidelity on high-traffic
+    # days but stays unbiased enough for a workspace-tier estimate.
     src_lat = src.get("latency")
     if isinstance(src_lat, dict) and int(src_lat.get("count", 0) or 0) > 0:
         dst_lat = into.get("latency")
@@ -155,8 +154,8 @@ def apply() -> bool:
                     continue
                 bucket = by_runtime.setdefault(rt, _empty_window())
                 _merge_window(bucket, rdata)
-        # Phase 2 / Stage 1: union by_day across projects. Schema 1
-        # files omit this key — `or {}` keeps backward compatibility.
+        # Union by_day across projects. Schema 1 files omit this key
+        # — `or {}` keeps backward compatibility.
         bd = st.get("by_day") or {}
         if isinstance(bd, dict):
             for date, day in bd.items():

@@ -1,67 +1,27 @@
-"""Hermes visualizer source — polls every hermes profile's SQLite state.db
-and emits message-level events into the watcher.
+"""Hermes visualizer source — polls every hermes profile's SQLite
+state.db and emits message-level events into the watcher.
 
-Loaded by :func:`services.cowork_agent.visualizer.source_loader.load_source_module`
-when ``AGENT_NAME=hermes``. The class name ``Source`` is the loader contract.
+Polling (not JSONL tail) because hermes writes to a WAL SQLite DB,
+not a transcript file. We open each profile's state.db read-only
+per tick, query messages we haven't seen, emit events.
 
-Why this is a polling source, not a JSONL tail
-----------------------------------------------
-Hermes writes session and message state to a WAL SQLite database
-(``~/.hermes/state.db`` for the default profile,
-``~/.hermes/profiles/<name>/state.db`` for each custom profile).
-There is no JSONL transcript file to tail, so the watcher's stock
-``ingest.jsonl_tail`` / ``OffsetStore`` infrastructure does not apply.
-Each tick we open every profile's DB read-only, query for messages
-the watcher hasn't seen yet for any session we know is owned by an
-xo-project, and emit events.
+A session is enriched only if some project's ``sessionslist.json``
+row references it (written by ``adapters/hermes/sessionslist.py``
+at chat-done time). Sessions hermes owns but no project references
+are skipped — same rule the other sources follow.
 
-Project routing
----------------
-Same rule the other sources use: a session is enriched only when an
-adapter row exists in some project's ``sessionslist.json``. For
-hermes that row is written by ``adapters/hermes/sessionslist.py``
-at chat-done time. Sessions hermes knows about but no xo-cowork
-sessionslist row references — agent-only chats, or chats started
-outside the cowork-api — are skipped (matches openclaw/claude_code
-behaviour).
+Emitted: :class:`events.SessionFirstSeen`, :class:`events.MessageObserved`,
+:class:`events.ToolUseObserved`. ``UsageObserved`` is NOT emitted
+yet — the hermes ``messages`` schema doesn't surface token counts in
+any column this source can see; needs a hermes-side addition.
 
-What's emitted today
---------------------
-* :class:`events.SessionFirstSeen` — once per session id
-* :class:`events.MessageObserved` — per user/assistant/tool row
-* :class:`events.ToolUseObserved` — per tool call in an assistant
-  message's ``tool_calls`` JSON array
+Per-``(profile, session_id)`` offsets persisted to
+``watcher_state_dir() / "hermes-offsets.json"`` so restarts don't
+replay. The shared ``OffsetStore`` is byte-offset shaped so we own
+our own state file.
 
-What's NOT emitted yet
-----------------------
-:class:`events.UsageObserved` is **not emitted** because the existing
-hermes ``messages`` schema (as read by
-``services/cowork_agent/hermes_state_db.py``) does not surface token
-counts in any column this source has visibility into. The contract
-hermes maintainers need to implement to unlock token enrichment lives
-in ``docs/hermes-visualizer-source-design.md`` §3.
-
-Until tokens flow:
-
-* ``<project>/.xo/sessions/sessionslist.json`` row has ``usage`` zeros
-  (written by ``sessionslist.write_session_row``).
-* ``<project>/.xo/stats.json`` has hermes message counts, durations,
-  and per-model session counts, but the per-model **token** split is
-  empty for hermes models.
-
-Offset state
-------------
-Per ``(profile, session_id)`` we track the highest ``messages.id``
-seen, persisted to ``~/.xo-cowork/watcher/hermes-offsets.json`` so a
-restart doesn't replay history. The shared :class:`OffsetStore` the
-watcher hands to other sources is byte-offset shaped and does not
-apply here — we own our own state file.
-
-Presence
---------
-``poll_presence`` returns ``[]``. Hermes has no per-process state
-file analogous to claude's ``~/.claude/sessions/<pid>.json``. The
-activity sink degrades to "no live hermes sessions"; honest.
+``poll_presence`` returns ``[]``; hermes has no per-process state
+file analogous to claude's ``~/.claude/sessions/<pid>.json``.
 """
 
 from __future__ import annotations

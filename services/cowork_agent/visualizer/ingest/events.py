@@ -120,12 +120,11 @@ class UsageObserved(Event):
 
     The watcher's stats sink aggregates these per session-day-model.
 
-    ``latency_ms`` (Phase 2 / Stage 4) is the wall-clock gap between
-    the preceding user message and this assistant turn, in
-    milliseconds. ``None`` when the source cannot derive it (e.g. the
-    user message preceded the watcher's offset, or the backend
-    doesn't surface per-turn timing — hermes today). The stats sink
-    accumulates only non-None values into ``by_day.<date>.latency``.
+    ``latency_ms`` is the wall-clock gap between the preceding user
+    message and this assistant turn, in milliseconds. ``None`` when
+    the source can't derive it (user message preceded the watcher's
+    offset, or the backend doesn't surface per-turn timing — hermes
+    today). The stats sink only accumulates non-None values.
     """
 
     input_tokens: int = 0
