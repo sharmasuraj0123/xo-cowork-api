@@ -17,6 +17,7 @@ Reports OK / WARN / FAIL per check. Exit codes: 0 all-ok, 1 any FAIL, 2 only WAR
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -40,13 +41,31 @@ def _paint(status: str) -> str:
     return f"{COLORS[status]}{status}{RESET}"
 
 
+def _timestamp_prefix() -> str:
+    tz_pref = (os.getenv("USAGE_SYNC_LOG_TZ", "UTC") or "UTC").strip().upper()
+    if tz_pref == "IST":
+        tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30), name="IST")
+        tz_name = "IST"
+    else:
+        tz = datetime.timezone.utc
+        tz_name = "UTC"
+    ts = datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    return f"[{ts} {tz_name}]"
+
+
 class Report:
-    def __init__(self) -> None:
+    def __init__(self, agent: str) -> None:
+        self.agent = agent
         self.rows: list[tuple[str, str, str]] = []
 
     def add(self, status: str, name: str, detail: str = "") -> None:
         self.rows.append((status, name, detail))
         print(f"  [{_paint(status)}] {name}" + (f" — {detail}" if detail else ""))
+        if status in (WARN, FAIL):
+            line = f"{_timestamp_prefix()} troubleshooting {self.agent}: {status} {name}"
+            if detail:
+                line += f" — {detail}"
+            print(line)
 
     def exit_code(self) -> int:
         statuses = {s for s, _, _ in self.rows}
@@ -304,7 +323,7 @@ def main() -> int:
     print(f"{binary} troubleshoot — xo.json: {xo_path}")
     print(f"                       {binary} home: {paths['home_dir']}\n")
 
-    report = Report()
+    report = Report(agent=commands.get("name") or binary)
 
     print("Install:")
     installed = check_install(report, binary, paths)
