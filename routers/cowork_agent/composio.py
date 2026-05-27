@@ -95,8 +95,10 @@ class DisconnectBody(BaseModel):
 
 @router.get("/api/connectors/composio/toolkits")
 async def list_toolkits(request: Request) -> JSONResponse:
+    from services import composio_categories  # noqa: PLC0415
     user_id = _resolve_user_id(request)
     status_by_slug = _toolkit_status_map(user_id)
+    classified = composio_categories.classified_toolkits()
 
     toolkits: list[dict[str, Any]] = []
     for toolkit_id, meta in composio_service.TOOLKITS.items():
@@ -109,6 +111,7 @@ async def list_toolkits(request: Request) -> JSONResponse:
             "status": (connection or {}).get("status", "NEEDS_AUTH"),
             "connected_account_id": (connection or {}).get("connected_account_id"),
             "scheme": (connection or {}).get("scheme"),
+            "supports_action_prefs": toolkit_id in classified,
         })
     return JSONResponse({"toolkits": toolkits})
 
@@ -191,14 +194,12 @@ async def list_toolkit_tools(toolkit: str, request: Request) -> JSONResponse:
 # Per-action enable/disable prefs (UI: Connectors → Composio → tile expand)
 # ---------------------------------------------------------------------------
 #
-# Toolkits whose actions are configurable via the Connectors UI. Adding a
-# new entry here additionally requires (a) a category map / heuristic in
-# services/composio_categories.py and (b) the frontend's
-# TOOLKITS_WITH_ACTION_TOGGLES set to include it. All toolkits accept reads
-# (GET) and return an empty map by default — keeps the UI's fetch logic
-# free of toolkit-specific branches.
-
-_PREFS_WRITABLE_TOOLKITS = frozenset({"googlecalendar", "gmail", "stripe"})
+# Toolkits whose actions are configurable via the Connectors UI. Derived from
+# `composio_categories.classified_toolkits()` — every toolkit with a category
+# map (exact or verb-heuristic) is automatically writable. Adding a new
+# toolkit's prefs panel is then a single edit in composio_categories.py.
+# All toolkits accept reads (GET) and return an empty map by default — keeps
+# the UI's fetch logic free of toolkit-specific branches.
 
 
 class PrefsBody(BaseModel):
@@ -229,8 +230,8 @@ async def put_toolkit_prefs(
     404 for any toolkit not yet wired into the Connectors UI — keeps the
     surface honest about which toolkits actually have UI scaffolding.
     """
-    from services import composio_action_prefs  # noqa: PLC0415
-    if toolkit not in _PREFS_WRITABLE_TOOLKITS:
+    from services import composio_action_prefs, composio_categories  # noqa: PLC0415
+    if toolkit not in composio_categories.classified_toolkits():
         raise HTTPException(
             status_code=404,
             detail=f"Per-action prefs are not configurable for toolkit '{toolkit}' yet.",
