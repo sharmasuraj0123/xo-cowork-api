@@ -183,9 +183,14 @@ _DEFAULT_GATEWAY_PORT = 8642
 
 
 async def _probe_gateway_port(port: int) -> str:
+    """Liveness probe for the hermes gateway. Hits /v1/health (which the
+    gateway exposes without auth — see api_server.py:_handle_health) so we
+    don't conflate "gateway is alive" with "our API key was accepted."
+    Auth correctness surfaces separately via the /v1/models proxy used by
+    useHermesModels on the FE."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.0)) as client:
-            resp = await client.get(f"http://127.0.0.1:{port}/v1/models")
+            resp = await client.get(f"http://127.0.0.1:{port}/v1/health")
         if resp.status_code == 200:
             return "up"
         if resp.status_code in (401, 403):
@@ -241,9 +246,10 @@ async def hermes_profile_gateway_status(profile: str):
     an equivalent entry from ~/.hermes/gateway.pid and probe port 8642.
     Non-default profiles are pool-managed.
 
-    The ``probe`` field tries ``GET /v1/models`` on the gateway's
-    port: ``up`` (200), ``unauthorized`` (401, gateway alive but key
-    rejected), ``down`` (connection refused / timeout)."""
+    The ``probe`` field tries ``GET /v1/health`` on the gateway's
+    port (auth-free liveness check): ``up`` (200), ``down``
+    (connection refused / timeout). ``unauthorized`` is kept as a
+    defensive code path in case the endpoint ever moves behind auth."""
     resolved = _resolve_profile(profile)
     if isinstance(resolved, JSONResponse):
         return resolved
