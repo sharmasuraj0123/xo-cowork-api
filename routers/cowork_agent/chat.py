@@ -34,6 +34,42 @@ _RECENTLY_STARTED_TTL = 600  # seconds — must outlast SSE_HEARTBEAT_TIMEOUT (4
 router = APIRouter()
 
 
+
+async def _resolve_user_id(request: Request, body: dict) -> str:
+    """Resolve the user_id for an incoming chat request.
+
+    In multi-tenant mode a valid ``Authorization: Bearer`` token wins (so the
+    launching user is real, not default_user, and can't be spoofed via
+    body.user_id) — this only selects the Composio user passed into the
+    per-session MCP config; chat/session storage is unchanged. When the flag is
+    off, or no valid token is present, we keep the legacy order: explicit body
+    field, request.state.user_id, auth_state["user_id"], then "default_user".
+    """
+    from services.composio_identity import multi_tenant_enabled, resolve_user_from_bearer
+    if multi_tenant_enabled():
+        bearer_user = await resolve_user_from_bearer(request)
+        if bearer_user:
+            return bearer_user
+    if body.get("user_id"):
+        return str(body["user_id"])
+    state_user = getattr(request.state, "user_id", None)
+    if state_user:
+        return str(state_user)
+    try:
+        from routers.auth import auth_state
+        uid = auth_state.get("user_id")
+        if uid:
+            return str(uid)
+    except Exception:
+        pass
+    from services import instance_identity
+    iid = instance_identity.instance_user_id()
+    if iid:
+        return iid
+    return "default_user"
+
+
+
 def _resolve_backend_for_session(session_id: str) -> str | None:
     """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default)."""
     from services.cowork_agent.engine.sessions_io import find_session_backend
@@ -266,6 +302,7 @@ async def chat_prompt(request: Request):
         "agent_type": body.get("agent_type"),
         "agent_id": agent_id,
         "is_new_session": is_new_session,
+        "user_id": await _resolve_user_id(request, body),
     }
     return {"stream_id": stream_id, "session_id": our_session_id}
 
