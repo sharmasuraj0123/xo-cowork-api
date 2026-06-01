@@ -27,3 +27,4 @@ composio>=0.7
 # Model Context Protocol — local MCP server exposes composio meta-tools to
 # OpenClaw / Hermes / Claude Code so gateways don't load every action upfront.
 mcp>=1.2
+inotify_simple>=2.0

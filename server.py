@@ -497,6 +497,7 @@ async def lifespan(app: FastAPI):
     _sync_task = None
     _warmup_task = None
     _watcher_task = None
+    _timekeeper_task = None
     if start_usage_sync_scheduler:
         try:
             _sync_task = asyncio.create_task(start_usage_sync_scheduler())
@@ -513,6 +514,16 @@ async def lifespan(app: FastAPI):
         print("   Watcher: background task started")
     except Exception as e:
         print(f"⚠️ Watcher failed to start (non-fatal): {e}")
+
+    # Timekeeper — recursive inotify watcher on $HOME (or
+    # TIMEKEEPER_WATCH_ROOT). Writes JSONL to timekeeper/ in the repo.
+    # Non-fatal: failure here must not block the API.
+    try:
+        from services.timekeeper.daemon import start_timekeeper
+        _timekeeper_task = asyncio.create_task(start_timekeeper())
+        print("   Timekeeper: background task started")
+    except Exception as e:
+        print(f"⚠️ Timekeeper failed to start (non-fatal): {e}")
 
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
@@ -537,6 +548,13 @@ async def lifespan(app: FastAPI):
         _watcher_task.cancel()
         try:
             await _watcher_task
+        except asyncio.CancelledError:
+            pass
+
+    if _timekeeper_task:
+        _timekeeper_task.cancel()
+        try:
+            await _timekeeper_task
         except asyncio.CancelledError:
             pass
 

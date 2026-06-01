@@ -11,6 +11,11 @@ main.tf
 # install-specific; not committed.
 data/
 
+# Timekeeper output — machine-wide file event log (JSONL + gzipped rotations).
+# Runtime data, machine-local, often sensitive. See docs/timekeeper-watcher.md.
+# Anchored to repo root so it does NOT match services/timekeeper/ (the code).
+/timekeeper/
+
 # Ad-hoc smoke tests, debugging scripts, exploratory work — anything
 # that runs but isn't part of the shipped product. Not committed.
 experiments/
