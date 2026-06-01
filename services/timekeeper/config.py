@@ -8,10 +8,19 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from services.cowork_agent.project_layout import xo_projects_root
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # What to watch. Recursive from this directory down.
-WATCH_ROOT = Path(os.environ.get("TIMEKEEPER_WATCH_ROOT") or os.path.expanduser("~"))
+# Defaults to the xo-projects root (honours XO_PROJECTS_ROOT, ~/xo-projects);
+# override with TIMEKEEPER_WATCH_ROOT to watch somewhere else entirely.
+_watch_override = (os.environ.get("TIMEKEEPER_WATCH_ROOT") or "").strip()
+WATCH_ROOT = (
+    Path(_watch_override).expanduser().resolve()
+    if _watch_override
+    else xo_projects_root()
+)
 
 # Where to put the JSONL.
 OUTPUT_DIR = Path(os.environ.get("TIMEKEEPER_OUTPUT_DIR") or (REPO_ROOT / "timekeeper"))

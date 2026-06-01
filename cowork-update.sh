@@ -75,4 +75,15 @@ if [ -n "$stash_ref" ]; then
     fi
 fi
 
-log_success "Update flow completed."
+# Sync dependencies so newly-pulled requirements (e.g. the timekeeper's
+# inotify_simple) are present before the next restart. Without this a new
+# dependency would import-fail at startup and silently disable the feature.
+log "Syncing Python dependencies..."
+if "$SCRIPT_DIR/cowork-api.sh" install; then
+    log_success "Dependencies in sync"
+else
+    log_error "Dependency install failed. Resolve before restarting cowork-api."
+    exit 1
+fi
+
+log_success "Update flow completed. Restart with: ./cowork-api.sh restart"

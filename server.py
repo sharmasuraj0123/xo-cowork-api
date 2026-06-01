@@ -515,7 +515,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Watcher failed to start (non-fatal): {e}")
 
-    # Timekeeper — recursive inotify watcher on $HOME (or
+    # Timekeeper — recursive inotify watcher on the xo-projects root (or
     # TIMEKEEPER_WATCH_ROOT). Writes JSONL to timekeeper/ in the repo.
     # Non-fatal: failure here must not block the API.
     try:

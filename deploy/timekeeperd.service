@@ -8,9 +8,9 @@ Type=simple
 User=coder
 WorkingDirectory=/home/coder/xo-cowork-api
 Environment=PYTHONUNBUFFERED=1
-# Defaults: watch $HOME, output to {WorkingDirectory}/timekeeper, retain 14 days.
-# Override as needed:
-# Environment=TIMEKEEPER_WATCH_ROOT=/home/coder
+# Defaults: watch the xo-projects root, output to {WorkingDirectory}/timekeeper,
+# retain 14 days. Override as needed:
+# Environment=TIMEKEEPER_WATCH_ROOT=/home/coder/xo-projects
 # Environment=TIMEKEEPER_OUTPUT_DIR=/home/coder/xo-cowork-api/timekeeper
 # Environment=TIMEKEEPER_RETENTION_DAYS=14
 ExecStart=/home/coder/xo-cowork-api/venv/bin/python -m services.timekeeper
