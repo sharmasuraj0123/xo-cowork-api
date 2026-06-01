@@ -1,13 +1,13 @@
 # Timekeeper watcher — research & final design
 
-A new watcher that records file events under a configurable root (default
-`$HOME`) into a `timekeeper/` folder. Distinct from the existing
+A new watcher that records file events under a configurable root (default:
+the xo-projects root) into a `timekeeper/` folder. Distinct from the existing
 `services/cowork_agent/visualizer/watcher.py`, which only tails agent
 JSONL output.
 
 > **Final design (implemented in `services/timekeeper/`):**
-> Recursive `inotify_simple` watcher over `$HOME` (or any directory set
-> via `TIMEKEEPER_WATCH_ROOT`). Runs as the user — no root needed. Pushes
+> Recursive `inotify_simple` watcher over the xo-projects root (or any
+> directory set via `TIMEKEEPER_WATCH_ROOT`). Runs as the user — no root needed. Pushes
 > modification events through a thread→asyncio bridge into the same
 > JsonlWriter (`current.jsonl` + daily gzip rotation, 14-day retention).
 > Race-safe against fast subdir+files creation via a synthetic-event
@@ -233,6 +233,12 @@ no kernel extensions, no root). One watch per directory; the source
 walks the tree at startup and adds watches dynamically for any directory
 created at runtime.
 
+**Watch root:** defaults to the xo-projects root — the same path the rest
+of the app resolves via `xo_projects_root()` (honours `XO_PROJECTS_ROOT`,
+falls back to `~/xo-projects`). This scopes capture to project activity
+rather than the whole home directory. Override with `TIMEKEEPER_WATCH_ROOT`
+to watch any other directory.
+
 **Race handling:** when a new subdir is created at runtime, inotify
 delivers `IN_CREATE | IN_ISDIR` for it but anything written into the
 new dir before we register the watch is invisible. Fix: as soon as a
@@ -259,21 +265,37 @@ output dir itself, …). Read-only ops (`IN_OPEN`, `IN_ACCESS`,
 `IN_CLOSE_NOWRITE`) are not requested from the kernel in the first
 place — saves work end-to-end.
 
-**Cost on this dev box (`$HOME` rooted):**
+**Cost on this dev box (measured with `$HOME` as root — the old, worst-case
+default; the current xo-projects default watches far fewer dirs):**
 - 2,997 directories watched after pruning — well under the 1M kernel ceiling.
 - Idle daemon ~30 MB RSS, ~0% CPU.
 - VSCode + Claude + git background activity produced ~140 events in a
   minute. No queue overflow.
 
-**Deployment:** runs as the invoking user (the unit file sets
-`User=coder`). `apt-get install fatrace` is no longer needed.
-`pip install -r requirements.txt` picks up `inotify_simple`. Start with
-`python -m services.timekeeper` or `sudo systemctl enable --now
-/home/coder/xo-cowork-api/deploy/timekeeperd.service`.
+**Deployment:** the timekeeper is **not** a standalone systemd service in
+the normal flow — it starts as a background asyncio task inside the FastAPI
+lifespan (`server.py`), alongside the visualizer watcher. Its import is
+guarded by a non-fatal `try/except`, so a missing dependency disables the
+feature silently while the API keeps serving. Runs as the invoking user; no
+root, and `apt-get install fatrace` is no longer needed.
 
-**Configuration:** `TIMEKEEPER_WATCH_ROOT`, `TIMEKEEPER_OUTPUT_DIR`,
-`TIMEKEEPER_RETENTION_DAYS`. All ignore lists are constants in
-`services/timekeeper/config.py`.
+`inotify_simple` is declared in `requirements.txt`. The dependency is the
+only prerequisite, and the normal update path installs it automatically:
+
+```bash
+./cowork-update.sh        # git pull + sync deps (runs `cowork-api.sh install`)
+./cowork-api.sh restart   # restart server; timekeeper task auto-starts
+```
+
+`./cowork-update.sh` runs `pip install -r requirements.txt` only after a
+pull — that is the one trigger for dependency installs. `restart`/`start`
+never touch pip. Standalone runs (`python -m services.timekeeper`) and the
+optional `deploy/timekeeperd.service` unit remain available but are not the
+default.
+
+**Configuration:** `TIMEKEEPER_WATCH_ROOT` (default: the xo-projects root),
+`TIMEKEEPER_OUTPUT_DIR`, `TIMEKEEPER_RETENTION_DAYS`. All ignore lists are
+constants in `services/timekeeper/config.py`.
 
 **Known limits:**
 - Files created **and** deleted within ~500 ms of their parent dir's

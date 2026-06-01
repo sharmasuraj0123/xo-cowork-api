@@ -1,5 +1,6 @@
 """Timekeeper daemon — recursive inotify watcher on a configured root
-(default ``$HOME``), filters events, batch-writes JSONL to ``timekeeper/``.
+(default: the xo-projects root), filters events, batch-writes JSONL to
+``timekeeper/``.
 
 Runs as the invoking user. No root or special capabilities needed.
 
