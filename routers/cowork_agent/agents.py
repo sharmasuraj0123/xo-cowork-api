@@ -700,17 +700,16 @@ def create_agent(body: CreateAgentBody):
             )
         workspace_dir = ws
     else:
-        # OpenClaw agents are not projects: default the workspace to the
-        # agent's openclaw home so the gateway has a real path to use, and
-        # nothing materializes a folder under xo-projects/ (which would
-        # pollute the project dropdown). Users pick a real project per chat.
-        workspace_dir = AGENTS_DIR / agent_id
+        # Restore legacy behavior: default a new agent's workspace to a
+        # dedicated ~/.openclaw/workspace-<id>/ folder (via
+        # resolve_agent_workspace_dir) rather than the agent's openclaw home.
+        # ensure_openclaw_agent_disk() seeds that folder below.
+        workspace_dir = resolve_agent_workspace_dir(cfg, agent_id)
 
     try:
         # OpenClaw agents live under ~/.openclaw/agents/<id>/ and are listed in
-        # ~/.openclaw/openclaw.json. They are NOT projects — do not scaffold a
-        # folder under xo-projects/. The project the user chats against is a
-        # separate workspace selection per chat.
+        # ~/.openclaw/openclaw.json. Their workspace (~/.openclaw/workspace-<id>/)
+        # is created and seeded by ensure_openclaw_agent_disk() below.
         next_cfg = apply_agent_list_entry(cfg, agent_id, display_name, workspace_dir)
         write_openclaw_config(next_cfg)
         ensure_openclaw_agent_disk(agent_id, workspace_dir)
