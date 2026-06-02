@@ -7,10 +7,6 @@ main.tf
 
 .claude/
 
-# Runtime state — composio_action_prefs.json holds per-action toggles,
-# install-specific; not committed.
-data/
-
 # Ad-hoc smoke tests, debugging scripts, exploratory work — anything
 # that runs but isn't part of the shipped product. Not committed.
 experiments/

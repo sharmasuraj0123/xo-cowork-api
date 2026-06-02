@@ -405,16 +405,6 @@ def _run_agent_setup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    # Boot sweep: drop any orphan Claude-Code mcp.json subdirs left behind
-    # by a crash or hard-kill of a previous run. Files there used to carry
-    # the Composio session URL + x-api-key; today they only carry the
-    # loopback-proxy URL, but stale per-session dirs still shouldn't
-    # accumulate. See docs/composio-credential-isolation.md §4 (Fix B).
-    tmp_root = Path(os.getenv("XO_MCP_TMP_ROOT", "/tmp/xo-cowork"))
-    if tmp_root.exists():
-        for child in tmp_root.iterdir():
-            shutil.rmtree(child, ignore_errors=True)
-
     # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
     # Done synchronously so the API doesn't accept requests until the
     # agent it's meant to drive is installed and configured.
