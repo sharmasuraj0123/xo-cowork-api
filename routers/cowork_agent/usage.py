@@ -7,8 +7,9 @@ Body is pure URL → module-method dispatch. The active agent is resolved by
 into that module's view method. Zero agent-specific code lives here.
 
 The legacy ``/openclaw/usage/*`` URLs are kept as backward-compat aliases
-in ``routers/openclaw_usage.py``; they bind to the **same handler
-functions** defined below, so the two prefixes return byte-identical JSON.
+in ``routers/cowork_agent/openclaw/usage_dashboard.py``; they bind to the
+**same handler functions** defined below, so the two prefixes return
+byte-identical JSON.
 """
 from typing import Optional
 
