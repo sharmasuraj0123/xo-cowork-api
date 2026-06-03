@@ -85,6 +85,18 @@
         "allowed_users": "*"
       },
       "commands": []
+    },
+    "discord": {
+      "fields": {
+        "token":            "DISCORD_BOT_TOKEN",
+        "allowed_users":    "DISCORD_ALLOWED_USERS",
+        "allowed_channels": "DISCORD_ALLOWED_CHANNELS"
+      },
+      "defaults": {
+        "allowed_users":    "*",
+        "allowed_channels": "*"
+      },
+      "commands": []
     }
   }
 }
