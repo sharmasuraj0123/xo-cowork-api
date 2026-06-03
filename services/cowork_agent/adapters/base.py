@@ -127,17 +127,6 @@ class BaseAgentAdapter(ABC):
         """
         return []
 
-    # ── Usage aggregation (default: empty) ─────────────────────────────────────
-
-    async def aggregate_usage(self, days: int = 30) -> dict[str, Any]:
-        """Return a usage rollup contribution for the shared /api/usage.
-
-        Default returns {}. Override to contribute this backend's
-        tokens/cost; callers merge per-adapter rollups into a single
-        response.
-        """
-        return {}
-
     # ── Extension hooks (configuration time, not request time) ─────────────────
     #
     # Both are typed as ``Any`` here so this module stays import-light

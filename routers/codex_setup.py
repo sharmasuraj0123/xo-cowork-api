@@ -345,6 +345,43 @@ def _upsert_agent_auth_profile(
             pass
 
 
+def _ensure_node_on_path() -> None:
+    """
+    Prepend the directory containing `npm` to PATH if it's not already there.
+
+    Why: when the FastAPI process is launched outside an interactive shell
+    (systemd, supervisor, coder-agent), nvm's shim never runs, so PATH lacks
+    `~/.nvm/versions/node/<ver>/bin` and `shutil.which("npm")` returns None.
+    The /codex/setup endpoint then bails with "npm not found" before any
+    install attempt can happen.
+
+    Order of search: existing PATH → ~/.nvm/versions/node/<latest>/bin →
+    /usr/local/bin → /usr/bin. Idempotent and best-effort.
+    """
+    if shutil.which("npm"):
+        return
+    candidates: list[str] = []
+    nvm_root = os.path.expanduser("~/.nvm/versions/node")
+    if os.path.isdir(nvm_root):
+        try:
+            for entry in sorted(os.listdir(nvm_root), reverse=True):
+                candidates.append(os.path.join(nvm_root, entry, "bin"))
+        except OSError:
+            pass
+    candidates.extend(["/usr/local/bin", "/usr/bin"])
+    for bin_dir in candidates:
+        if os.path.isfile(os.path.join(bin_dir, "npm")):
+            cur = os.environ.get("PATH", "")
+            if bin_dir not in cur.split(os.pathsep):
+                os.environ["PATH"] = bin_dir + os.pathsep + cur
+                print(f"[codex-setup] PATH augmented with {bin_dir}")
+            return
+    print(
+        "[codex-setup] could not locate npm in PATH or nvm/system bin dirs; "
+        f"checked={candidates!r}"
+    )
+
+
 def _codex_cli_path() -> str:
     path = (os.getenv("CODEX_CLI_PATH") or "codex").strip()
     if not os.path.isabs(path):
@@ -388,6 +425,7 @@ async def codex_setup():
         # ------------------------------------------------------------------ #
         # Step 1 – ensure codex CLI is installed                              #
         # ------------------------------------------------------------------ #
+        _ensure_node_on_path()
         if not _is_codex_installed():
             print(f"[codex-setup] codex CLI not found, installing {CODEX_NPM_PACKAGE}")
             yield f"data: {json.dumps({'type': 'installing', 'package': CODEX_NPM_PACKAGE})}\n\n"
@@ -412,6 +450,10 @@ async def codex_setup():
                     while True:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
+                            print(
+                                f"[codex-setup] npm install timed out after "
+                                f"{_NPM_INSTALL_TIMEOUT_SECONDS}s, killing pid={npm_proc.pid}"
+                            )
                             npm_proc.kill()
                             yield f"data: {json.dumps({'type': 'error', 'error': 'npm install timed out'})}\n\n"
                             return
@@ -436,18 +478,36 @@ async def codex_setup():
                     raise
 
                 if npm_proc.returncode != 0:
+                    print(
+                        f"[codex-setup] npm install failed (exit code "
+                        f"{npm_proc.returncode}) for package {CODEX_NPM_PACKAGE}"
+                    )
                     yield f"data: {json.dumps({'type': 'error', 'error': f'npm install failed (exit code {npm_proc.returncode})'})}\n\n"
                     return
 
                 if not _is_codex_installed():
+                    print(
+                        "[codex-setup] codex CLI not found in PATH after npm install; "
+                        f"PATH={os.environ.get('PATH', '')!r}"
+                    )
                     yield f"data: {json.dumps({'type': 'error', 'error': 'codex CLI not found in PATH after npm install'})}\n\n"
                     return
 
                 print("[codex-setup] codex CLI installed successfully")
                 yield f"data: {json.dumps({'type': 'install_log', 'line': 'codex CLI installed successfully'})}\n\n"
 
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                print(
+                    f"[codex-setup] npm executable not found: {e}; "
+                    f"PATH={os.environ.get('PATH', '')!r}"
+                )
                 yield f"data: {json.dumps({'type': 'error', 'error': 'npm not found — cannot install codex CLI'})}\n\n"
+                return
+            except Exception as e:
+                import traceback
+                print(f"[codex-setup] unexpected error during npm install: {e}")
+                traceback.print_exc()
+                yield f"data: {json.dumps({'type': 'error', 'error': f'npm install failed: {e}'})}\n\n"
                 return
         else:
             print("[codex-setup] codex CLI already installed, skipping npm install")
@@ -599,10 +659,15 @@ async def codex_setup():
                 yield f"data: {json.dumps({'type': kind, 'line': value})}\n\n"
 
         except FileNotFoundError:
-            print(f"[codex-setup] CLI not found: {cli_path}")
+            print(
+                f"[codex-setup] codex CLI not found: {cli_path}; "
+                f"PATH={os.environ.get('PATH', '')!r}"
+            )
             yield f"data: {json.dumps({'type': 'error', 'error': f'codex CLI not found: {cli_path}'})}\n\n"
         except Exception as e:
-            print(f"[codex-setup] unexpected error: {e}")
+            import traceback
+            print(f"[codex-setup] unexpected error during login: {type(e).__name__}: {e}")
+            traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         finally:
             if master_fd is not None:

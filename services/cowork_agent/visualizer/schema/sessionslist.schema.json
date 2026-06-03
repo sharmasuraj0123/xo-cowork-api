@@ -14,7 +14,7 @@
         "sessionId":       { "type": "string", "description": "Cowork session UUID written by the adapter at session start (`adapters/claude_code/adapter.py:121`). DIFFERENT from the composite top-level key, which is `<backend>:<agent_id>:<surface>:<8hex>`. The composite key is the row's true identity; this inner UUID is used by some legacy lookups." },
         "nativeSessionId": { "type": "string", "description": "The runtime's own session id (e.g. Claude Code's per-jsonl UUID). May be empty string before the runtime has emitted its first event." },
         "directory":       { "type": "string", "description": "Absolute path to the project the session is running in. Stored for adapter use; STRIPPED before any BFF response (see docs/watcher-design.md §7.3)." },
-        "backend":         { "type": "string", "enum": ["claude_code", "openclaw", "codex"], "description": "Runtime that owns this session." },
+        "backend":         { "type": "string", "description": "Runtime that owns this session, e.g. `claude_code`, `openclaw`, `hermes`. Open string — adding a new agent should not require a schema edit." },
         "updatedAt":       { "type": "integer", "minimum": 0, "description": "Epoch milliseconds of the most recent adapter write to this row." },
         "usage":           { "$ref": "#/definitions/usage" }
       }

@@ -127,7 +127,30 @@ def _agent_info_hermes(profile_name: str) -> dict:
     Frontend routing should read ``metadata.backend`` directly when this
     agent is selected (don't derive backend from workspaceDirectory for
     hermes — multiple profiles would collide on the same path).
+
+    ``sessions_count`` is included so the sidebar can show an authoritative
+    count without falling back to "loaded so far" pagination grouping
+    (which under-counts and bucks everything unknown under "default").
     """
+    from services.cowork_agent.settings import HERMES_DIR
+    from services.cowork_agent.agent_registry import get_agent
+
+    hermes_manifest = get_agent("hermes")
+    profile_dir = HERMES_DIR if profile_name == "default" else hermes_manifest.agents_dir / profile_name
+    sessions_count = 0
+    state_db = profile_dir / "state.db"
+    if state_db.is_file():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+                sessions_count = int(row[0]) if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            sessions_count = 0
+
     return {
         "name": profile_name,
         "description": profile_name,
@@ -141,6 +164,7 @@ def _agent_info_hermes(profile_name: str) -> dict:
             "hermes_profile": profile_name,
             "display_name": profile_name,
             "workspace": "",
+            "sessions_count": sessions_count,
         },
     }
 
@@ -187,9 +211,13 @@ def _agent_detail_hermes(profile_name: str) -> dict:
         except OSError:
             soul_preview = None
 
-    # Session count — read from this profile's state.db only (don't walk
-    # every profile; the global hermes_state_db helpers are aggregate).
+    # Session and message counts — read from this profile's state.db only
+    # (don't walk every profile; the global hermes_state_db helpers are
+    # aggregate). A hermes session represents one continuing conversation;
+    # message_count tracks turns within it, so surfacing both prevents the
+    # "I chatted 7 times but it shows 1 session" confusion.
     session_count = 0
+    message_count = 0
     state_db = profile_dir / "state.db"
     if state_db.is_file():
         try:
@@ -198,10 +226,15 @@ def _agent_detail_hermes(profile_name: str) -> dict:
             try:
                 row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
                 session_count = int(row[0]) if row else 0
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(message_count), 0) FROM sessions"
+                ).fetchone()
+                message_count = int(row[0]) if row else 0
             finally:
                 conn.close()
         except Exception:
             session_count = 0
+            message_count = 0
 
     # .env keys — no values, mirrors /api/secrets/env/keys' shape.
     env_path = profile_dir / ".env"
@@ -260,6 +293,7 @@ def _agent_detail_hermes(profile_name: str) -> dict:
         "sessions": {
             "index_path": str(profile_dir / "sessions"),
             "count": session_count,
+            "message_count": message_count,
             "session_ids": [],
         },
         "openclaw_global_auth": {},
@@ -465,6 +499,8 @@ async def create_agent(body: CreateAgentBody):
         return _agent_info_hermes(agent_id)
 
     # OpenClaw agent (default) — dispatches through the adapter (Phase 5).
+    # The adapter's create_agent carries dev fix 651f060 (per-agent
+    # workspace-<id> folder via resolve_agent_workspace_dir).
     from services.cowork_agent.dispatcher import AgentDispatcher
     try:
         return await AgentDispatcher("openclaw").create_agent(body.model_dump())

@@ -50,9 +50,6 @@ class AgentDispatcher:
     async def list_messages(self, session_id: str) -> list[dict[str, Any]]:
         return await self.adapter.list_messages(session_id)
 
-    async def aggregate_usage(self, days: int = 30) -> dict[str, Any]:
-        return await self.adapter.aggregate_usage(days)
-
     # ── Write-side proxies ────────────────────────────────────────────────────
 
     async def create_agent(self, body: dict[str, Any]) -> dict[str, Any]:

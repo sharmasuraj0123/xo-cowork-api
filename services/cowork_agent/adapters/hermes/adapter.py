@@ -41,10 +41,16 @@ class HermesAdapter(BaseAgentAdapter):
     ) -> dict[str, Any]:
         """Non-streaming chat: post once, return collected message + native id."""
         from services.cowork_agent.adapters.hermes.streaming import run_collected
+        from services.cowork_agent.adapters.hermes.sessionslist import write_session_row
 
         gateway_base = self._resolve_gateway_base(kwargs.get("agent_id"), session_id)
         response_text, native_session_id = await run_collected(
             question, session_id, gateway_base=gateway_base,
+        )
+        write_session_row(
+            agent_id=kwargs.get("agent_id"),
+            our_session_id=kwargs.get("our_session_id") or session_id,
+            native_session_id=native_session_id,
         )
         return {"message": response_text, "native_session_id": native_session_id}
 
@@ -70,12 +76,14 @@ class HermesAdapter(BaseAgentAdapter):
         default profile keeps using the hermes.sh-managed gateway on 8642.
         """
         from services.cowork_agent.adapters.hermes.streaming import stream_to_normalized
+        from services.cowork_agent.adapters.hermes.sessionslist import write_session_row
         from services.cowork_agent.hermes_state_db import register_inflight_exchange
         from services.cowork_agent.settings import HERMES_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
+        our_session_id = kwargs.get("our_session_id")
         if not session_id:
-            session_id = kwargs.get("our_session_id")
+            session_id = our_session_id
 
         gateway_base = self._resolve_gateway_base(kwargs.get("agent_id"), session_id)
         is_fresh_session = not session_id
@@ -101,6 +109,14 @@ class HermesAdapter(BaseAgentAdapter):
                         assistant_text="".join(accumulated),
                         model=HERMES_MODEL,
                     )
+                # Upsert the per-project sessionslist row so the xo-coworker
+                # dashboard sees this hermes session. No-op when no agent_id
+                # was supplied (agent-only chat with no project selected).
+                write_session_row(
+                    agent_id=kwargs.get("agent_id"),
+                    our_session_id=our_session_id or session_id,
+                    native_session_id=native_id,
+                )
                 # Surface the resolved id for the dispatcher's session-created
                 # event whenever this was a brand-new session.
                 if is_fresh_session and native_id:

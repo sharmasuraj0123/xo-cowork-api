@@ -265,17 +265,6 @@ class OpenclawAdapter(BaseAgentAdapter):
             return []
         return convert_messages(session_id, records)
 
-    async def aggregate_usage(self, days: int = 30) -> dict[str, Any]:
-        """Return the OpenClaw portion of the usage rollup.
-
-        Same response shape as ``GET /api/usage`` — totals, by_day,
-        by_model, by_session, response_time — populated from OpenClaw
-        sessions only. Phase 5/6's shared route will merge per-adapter
-        contributions.
-        """
-        from .usage_api import aggregate_openclaw_usage
-        return aggregate_openclaw_usage(days)
-
     def extra_routers(self) -> list[Any]:
         """Return the OpenClaw-specific APIRouters registered with the
         ``routers/cowork_agent/openclaw/`` subpackage."""

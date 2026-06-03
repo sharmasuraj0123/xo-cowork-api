@@ -19,6 +19,7 @@ async def get_providers_status() -> dict[str, Any]:
         "claude_code",
         anthropic_key_present=lambda: bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip()),
         openai_key_present=lambda: bool((os.environ.get("OPENAI_API_KEY") or "").strip()),
+        openrouter_key_present=lambda: bool((os.environ.get("OPENROUTER_API_KEY") or "").strip()),
     )
 
 

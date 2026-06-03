@@ -7,6 +7,10 @@ main.tf
 
 .claude/
 
+# Ad-hoc smoke tests, debugging scripts, exploratory work — anything
+# that runs but isn't part of the shipped product. Not committed.
+experiments/
+
 # Python
 __pycache__/
 *.py[cod]

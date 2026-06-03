@@ -7,6 +7,7 @@ import asyncio
 import os
 import json
 import datetime
+import subprocess
 import uuid
 import shutil
 from pathlib import Path
@@ -354,9 +355,60 @@ async def startup_warmup_request() -> None:
 # FastAPI Application
 # =============================================================================
 
+def _run_agent_setup() -> None:
+    """Run config/agents/<AGENT_NAME>/setup.sh once at boot.
+
+    Dispatches by the AGENT_NAME env var (e.g. AGENT_NAME=openclaw → runs
+    config/agents/openclaw/setup.sh). Idempotent — re-runs on every boot
+    but each step (apt install, node install, openclaw CLI install,
+    gateway start) is gated on its own "already installed?" check.
+    Non-fatal: a failure here logs and returns so the API still comes
+    up for debugging.
+    """
+    agent = (os.getenv("AGENT_NAME", "") or "").strip()
+    if not agent:
+        print("🔧 AGENT_NAME unset — skipping agent bootstrap")
+        return
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(repo_root, "config", "agents", agent, "setup.sh")
+    if not os.path.isfile(script):
+        print(f"⚠️ No setup.sh for AGENT_NAME={agent} (expected at {script}) — skipping")
+        return
+
+    print(f"🔧 Running agent setup for AGENT_NAME={agent}...")
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+
+    try:
+        # 15-minute ceiling covers a cold first-time install (apt + Node + npm
+        # + OpenClaw CLI). Steady-state re-runs finish in seconds.
+        result = subprocess.run(
+            ["bash", script],
+            cwd=repo_root,
+            check=False,
+            timeout=900,
+        )
+        if result.returncode == 0:
+            print(f"✅ Agent setup ({agent}) completed")
+        else:
+            print(f"⚠️ Agent setup ({agent}) exited with code {result.returncode} (non-fatal — server will still start)")
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Agent setup ({agent}) timed out after 15min (non-fatal)")
+    except Exception as e:
+        print(f"⚠️ Agent setup ({agent}) failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
+    # Done synchronously so the API doesn't accept requests until the
+    # agent it's meant to drive is installed and configured.
+    _run_agent_setup()
+
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
     _tok = get_auth_token()
