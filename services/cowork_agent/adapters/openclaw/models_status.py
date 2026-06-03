@@ -8,67 +8,34 @@ expiry, and unusableProfiles.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from services.cowork_agent.adapters.cli_status import (
+    CliStatusError as OpenclawStatusError,
+    resolve_binary,
+    run_cli,
+)
 
 OPENCLAW_BIN_ENV = "OPENCLAW_BIN"
 DEFAULT_BIN = "openclaw"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
-class OpenclawStatusError(Exception):
-    """CLI invocation/parse failure. `code` maps to an HTTP status in the router."""
-
-    def __init__(self, message: str, *, code: str, detail: Optional[str] = None):
-        super().__init__(message)
-        self.code = code  # binary_not_found | timeout | execution_failed | invalid_json
-        self.detail = detail
-
-
-def _resolve_binary() -> str:
-    configured = (os.getenv(OPENCLAW_BIN_ENV, "") or "").strip()
-    return configured or shutil.which(DEFAULT_BIN) or DEFAULT_BIN
-
-
 async def fetch_raw_status(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Dict[str, Any]:
-    binary = _resolve_binary()
-    if os.path.isabs(binary) and not os.path.isfile(binary):
-        raise OpenclawStatusError(
-            f"openclaw binary not found at {binary}", code="binary_not_found", detail=binary
-        )
+    binary = resolve_binary(OPENCLAW_BIN_ENV, DEFAULT_BIN)
+    result = await run_cli(
+        binary, ("models", "status", "--json"), timeout=timeout, label="openclaw"
+    )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "models", "status", "--json",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-    except (FileNotFoundError, PermissionError) as e:
+    if result.returncode != 0:
         raise OpenclawStatusError(
-            f"openclaw binary unavailable: {binary}", code="binary_not_found", detail=str(e)
-        )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.communicate()
-        except Exception:
-            pass
-        raise OpenclawStatusError(f"openclaw timed out after {timeout}s", code="timeout")
-
-    if proc.returncode != 0:
-        err = (stderr or b"").decode("utf-8", errors="replace").strip()
-        raise OpenclawStatusError(
-            f"openclaw exited with code {proc.returncode}",
+            f"openclaw exited with code {result.returncode}",
             code="execution_failed",
-            detail=err or None,
+            detail=result.stderr or None,
         )
 
-    text = (stdout or b"").decode("utf-8", errors="replace").strip()
+    text = result.stdout
     try:
         parsed = json.loads(text) if text else None
     except json.JSONDecodeError as e:
