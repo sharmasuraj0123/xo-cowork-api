@@ -78,21 +78,33 @@ class Source:
         # Native session id → True. Seeded lazily; used to emit
         # exactly one SessionFirstSeen per session.
         self._sessions_seen: set[str] = set()
-        # (native_session_id, tool_use_id) → pending TaskCreate.
+        # (native_session_id, tool_use_id) → pending TaskCreate, when the
+        # TaskCreate tool_use was observed before its "Task #N created"
+        # tool_result.
         self._pending_creates: dict[tuple[str, str], TaskCreateObserved] = {}
+        # (native_session_id, tool_use_id) → parsed task id, for the
+        # reverse order: Claude occasionally writes the tool_result line
+        # BEFORE the tool_use that produced it. We stash ONLY the parsed
+        # integer id (never the result text — it may carry PII) until the
+        # matching TaskCreate arrives. Symmetric with _pending_creates.
+        self._pending_results: dict[tuple[str, str], str] = {}
         # native_session_id → ts of the last MessageObserved(role="user").
         # Used to attach latency_ms on the matching UsageObserved.
         # Cleared on attachment so a single user message contributes
         # at most one latency sample.
         self._last_user_ts: dict[str, str] = {}
         # Claude Code's jsonl emits MULTIPLE records per actual assistant
-        # turn (streaming chunks + final), each carrying the same
-        # ``message.id`` (the Anthropic ``msg_*`` id) and the same
-        # ``usage`` block. Summing across these duplicates over-counts
-        # tokens by 3-7×. We dedupe by ``(native_session_id, message.id)``
-        # at line-read time so every downstream Event (MessageObserved,
-        # UsageObserved, ToolUseObserved, TaskCreateObserved) is emitted
-        # exactly once per real turn.
+        # turn, all sharing one ``message.id`` (the Anthropic ``msg_*`` id).
+        # The ``usage`` block is repeated IDENTICALLY on every record
+        # (summing it over-counts tokens 3-7×), but the CONTENT blocks
+        # DIFFER per record — ``thinking`` on one line, ``text`` on the
+        # next, a ``tool_use`` on a third. So we dedupe at the EVENT level,
+        # not the line level: the first record for a ``(session, msg.id)``
+        # contributes its usage + assistant-turn count; later records
+        # contribute only their distinct tool events (TaskCreate /
+        # TaskUpdate / Edit / Bash …). Skipping whole lines here used to
+        # drop those tool events — see
+        # docs/claude-code-multiline-message-dedup-investigation-2026-06-03.md.
         self._seen_anthropic_message_ids: set[tuple[str, str]] = set()
 
     # ── Public protocol ─────────────────────────────────────────────────
@@ -238,27 +250,45 @@ class Source:
             if not isinstance(raw, dict):
                 continue
 
-            # Dedup duplicate assistant streaming records by the Anthropic
-            # message id. Without this, summed token counts in stats.json
-            # over-count by the number of streaming chunks per turn (3-7×
-            # in practice).
-            if raw.get("type") == "assistant":
-                msg = raw.get("message") if isinstance(raw.get("message"), dict) else None
-                anth_mid = msg.get("id") if msg else None
-                if isinstance(anth_mid, str) and anth_mid:
-                    sid = raw.get("sessionId")
-                    if isinstance(sid, str) and sid:
-                        key = (sid, anth_mid)
-                        if key in self._seen_anthropic_message_ids:
-                            continue  # duplicate streaming chunk — skip whole line
-                        self._seen_anthropic_message_ids.add(key)
+            # Note this line's Anthropic message id. A repeat means this is
+            # a continuation record of a turn we've already counted — its
+            # duplicated usage/turn events must be suppressed, but its
+            # (distinct) tool events must still flow. See the constructor
+            # note and the 2026-06-03 investigation doc.
+            usage_already_counted = self._note_assistant_line(raw)
 
             cwd = raw.get("cwd") if isinstance(raw, dict) else None
             for ev in pii_filter.normalize_event(raw, runtime=self.name):
+                if usage_already_counted and _is_duplicate_turn_event(ev):
+                    continue
                 # Back-fill project_id on every event (the filter is
                 # stateless; the source is the only place that knows).
                 ev = dataclasses.replace(ev, project_id=project_id)
                 yield from self._post_process(ev, cwd=cwd, fallback_project_id=project_id)
+
+    def _note_assistant_line(self, raw: dict) -> bool:
+        """Record the Anthropic ``message.id`` of an assistant line.
+
+        Returns ``True`` when we've already seen a record for this
+        ``(sessionId, message.id)`` — i.e. this line is a continuation
+        chunk of a turn whose usage/turn-count was already emitted, so
+        those events must be suppressed (its tool events still pass).
+        Non-assistant lines, or lines without a usable id, return
+        ``False`` (nothing to dedupe).
+        """
+        if raw.get("type") != "assistant":
+            return False
+        msg = raw.get("message") if isinstance(raw.get("message"), dict) else None
+        anth_mid = msg.get("id") if msg else None
+        sid = raw.get("sessionId")
+        if not (isinstance(anth_mid, str) and anth_mid
+                and isinstance(sid, str) and sid):
+            return False
+        key = (sid, anth_mid)
+        if key in self._seen_anthropic_message_ids:
+            return True
+        self._seen_anthropic_message_ids.add(key)
+        return False
 
     def _post_process(
         self,
@@ -293,11 +323,13 @@ class Source:
                 if latency is not None:
                     ev = dataclasses.replace(ev, latency_ms=latency)
 
-        # 3) Task pairing — buffer creates, emit finals on results.
+        # 3) Task pairing — symmetric. A TaskCreate tool_use and its
+        # "Task #N created" tool_result can appear in EITHER order in the
+        # jsonl; we buffer whichever arrives first and emit the final
+        # TaskCreated once both are in hand.
         if isinstance(ev, TaskCreateObserved):
-            key = (nsid, ev.tool_use_id)
-            self._pending_creates[key] = ev
-            return  # don't yield to sinks yet
+            yield from self._pair_task_create(ev)
+            return  # internal-only until paired
 
         if isinstance(ev, ToolResultObserved):
             yield from self._pair_task_result(ev)
@@ -311,28 +343,55 @@ class Source:
         # 5) Everything else passes straight to the sinks.
         yield ev
 
-    def _pair_task_result(self, ev: ToolResultObserved) -> Iterator[TaskCreated]:
+    def _pair_task_create(self, ev: TaskCreateObserved) -> Iterator[TaskCreated]:
+        """Handle a TaskCreate tool_use. If we've already seen its
+        ``Task #N created`` result (out-of-order lines), emit the final
+        :class:`TaskCreated` now; otherwise buffer the create until the
+        result arrives.
+        """
         key = (ev.native_session_id, ev.tool_use_id)
-        pending = self._pending_creates.pop(key, None)
-        if pending is None:
-            # Result for a non-Task tool — drop entirely. The result
-            # text may contain PII (Bash output, file contents) so we
-            # must NOT leak it onward.
-            return
+        task_id = self._pending_results.pop(key, None)
+        if task_id is None:
+            self._pending_creates[key] = ev
+            return  # result not seen yet — wait for it
+        yield self._build_task_created(ev, task_id)
+
+    def _pair_task_result(self, ev: ToolResultObserved) -> Iterator[TaskCreated]:
+        """Handle a tool_result. Only ``Task #N created`` results carry
+        anything we keep — every other result is dropped (its text may
+        contain PII: Bash output, file contents, fetched HTML).
+
+        Pairs with a buffered TaskCreate when one exists; otherwise
+        stashes the parsed id for an out-of-order TaskCreate still to
+        come.
+        """
+        key = (ev.native_session_id, ev.tool_use_id)
         m = _TASK_RESULT_RE.match(ev.content_text or "")
         if not m:
-            # Couldn't recover the task id — drop. The TaskUpdate
-            # events still reference the id directly, so the todos
-            # sink can fall back to those if it tracks creations by
-            # subject text. For v1 we accept the loss; rare in
-            # practice (Claude's result text is stable).
-            logger.warning(
-                "Claude source: TaskCreate result missing 'Task #N' prefix; "
-                "tool_use_id=%s", ev.tool_use_id,
-            )
+            # Not a recoverable Task result. If a TaskCreate was waiting
+            # on this id, its result text didn't carry "Task #N" — drop
+            # the create (we can't recover its id). Otherwise it's just a
+            # non-Task tool_result — drop silently, never buffer the text.
+            pending = self._pending_creates.pop(key, None)
+            if pending is not None:
+                logger.warning(
+                    "Claude source: TaskCreate result missing 'Task #N' prefix; "
+                    "tool_use_id=%s", ev.tool_use_id,
+                )
             return
         task_id = m.group(1)
-        yield TaskCreated(
+        pending = self._pending_creates.pop(key, None)
+        if pending is None:
+            # Out-of-order: result arrived before its TaskCreate. Stash
+            # only the parsed integer id — never the result text.
+            self._pending_results[key] = task_id
+            return
+        yield self._build_task_created(pending, task_id)
+
+    def _build_task_created(
+        self, pending: TaskCreateObserved, task_id: str
+    ) -> TaskCreated:
+        return TaskCreated(
             ts=pending.ts,
             native_session_id=pending.native_session_id,
             runtime=pending.runtime,
@@ -371,6 +430,24 @@ class Source:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _is_duplicate_turn_event(ev: Event) -> bool:
+    """True for events that represent the assistant TURN itself — token
+    usage and the assistant message count — which Claude repeats on every
+    record of a multi-line message. Suppressed on continuation chunks so
+    they're counted exactly once per turn.
+
+    Tool events (:class:`ToolUseObserved`, :class:`TaskCreateObserved`,
+    :class:`TaskStatusChanged`, :class:`FileTouched`/``FileTouchPending``,
+    :class:`ToolResultObserved`) are NOT duplicates — each rides a distinct
+    record — so they always pass through.
+    """
+    if isinstance(ev, UsageObserved):
+        return True
+    if isinstance(ev, MessageObserved) and ev.role == "assistant":
+        return True
+    return False
 
 
 def _pid_alive(pid: int) -> bool:
