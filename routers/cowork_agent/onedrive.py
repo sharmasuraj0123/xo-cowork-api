@@ -14,7 +14,7 @@ import logging
 import re
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from services.cowork_agent.onedrive_rclone import (
@@ -102,14 +102,14 @@ async def poll_onedrive_session(session_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 @router.delete("/api/connectors/onedrive/remotes/{name}")
-async def remove_onedrive_remote(name: str) -> JSONResponse:
+async def remove_onedrive_remote(name: str) -> Response:
     if not await rclone_available():
         raise HTTPException(503, detail="Could not reach rclone daemon.")
     try:
         await delete_remote(name)
     except Exception as exc:
         raise HTTPException(500, detail=str(exc)) from exc
-    return JSONResponse(None, status_code=204)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

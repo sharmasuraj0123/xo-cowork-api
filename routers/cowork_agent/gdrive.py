@@ -12,7 +12,7 @@ Exposes:
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from services.cowork_agent.gdrive_rclone import (
@@ -110,14 +110,14 @@ async def poll_gdrive_session(session_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 @router.delete("/api/connectors/gdrive/remotes/{name}")
-async def remove_gdrive_remote(name: str) -> JSONResponse:
+async def remove_gdrive_remote(name: str) -> Response:
     if not await rclone_available():
         raise HTTPException(503, detail="Could not reach rclone daemon.")
     try:
         await delete_remote(name)
     except Exception as exc:
         raise HTTPException(500, detail=str(exc)) from exc
-    return JSONResponse(None, status_code=204)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
