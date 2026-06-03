@@ -7,49 +7,28 @@ We store it in mcp-tokens.json and validate via task.list.
 Token file: <project_root>/mcp-tokens.json  (.gitignored)
 """
 
-import json
 import logging
-import os
-from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
+from .token_store import TOKEN_FILE, delete_entry, get_entry, set_entry
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Paths & URLs
+# URLs
 # ---------------------------------------------------------------------------
-
-_PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
 
 MANUS_API = "https://api.manus.ai/v2"
 
 # ---------------------------------------------------------------------------
-# Token storage (shared via mcp-tokens.json)
+# Token storage (provider key "manus" in mcp-tokens.json, owned by token_store)
 # ---------------------------------------------------------------------------
-
-def _read_tokens() -> dict[str, Any]:
-    if not TOKEN_FILE.exists():
-        return {}
-    try:
-        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Could not read %s: %s", TOKEN_FILE, exc)
-        return {}
-
-
-def _write_tokens(data: dict[str, Any]) -> None:
-    TOKEN_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
 
 def get_manus_key() -> str | None:
     """Return the stored Manus API key, or None."""
-    entry = _read_tokens().get("manus")
+    entry = get_entry("manus")
     if not entry:
         return None
     return entry.get("api_key") or None
@@ -57,21 +36,17 @@ def get_manus_key() -> str | None:
 
 def save_manus_key(api_key: str) -> None:
     """Save a Manus API key to mcp-tokens.json."""
-    data = _read_tokens()
-    data["manus"] = {
+    set_entry("manus", {
         "api_key": api_key,
         "expires_at": 0,
         "token_type": "api_key",
-    }
-    _write_tokens(data)
+    })
     log.info("Manus API key saved to %s", TOKEN_FILE)
 
 
 def delete_manus_key() -> None:
     """Remove the Manus entry from mcp-tokens.json."""
-    data = _read_tokens()
-    data.pop("manus", None)
-    _write_tokens(data)
+    delete_entry("manus")
     log.info("Manus API key removed from %s", TOKEN_FILE)
 
 

@@ -10,21 +10,17 @@ Token file: <project_root>/mcp-tokens.json  (.gitignored)
 
 import base64
 import hashlib
-import json
 import logging
-import os
 import secrets
 import time
-from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
 
-log = logging.getLogger(__name__)
+from .token_store import TOKEN_FILE, delete_entry, get_entry, set_entry
 
-_PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
+log = logging.getLogger(__name__)
 
 VERCEL_USER_URL = "https://api.vercel.com/v2/user"
 VERCEL_OAUTH_AUTHORIZE_URL = "https://vercel.com/oauth/authorize"
@@ -49,29 +45,12 @@ def _generate_code_challenge(verifier: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Token storage
+# Token storage (provider keys "vercel" + "vercel_client", owned by token_store)
 # ---------------------------------------------------------------------------
-
-def _read_tokens() -> dict[str, Any]:
-    if not TOKEN_FILE.exists():
-        return {}
-    try:
-        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Could not read %s: %s", TOKEN_FILE, exc)
-        return {}
-
-
-def _write_tokens(data: dict[str, Any]) -> None:
-    TOKEN_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
 
 def get_oauth_client() -> dict[str, Any] | None:
     """Return the registered OAuth client credentials from mcp-tokens.json, or None."""
-    return _read_tokens().get("vercel_client")
+    return get_entry("vercel_client")
 
 
 async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
@@ -127,9 +106,7 @@ async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
     if registered.get("client_secret"):
         entry["client_secret"] = registered["client_secret"]
 
-    data = _read_tokens()
-    data["vercel_client"] = entry
-    _write_tokens(data)
+    set_entry("vercel_client", entry)
     log.info("Registered new Vercel OAuth client (client_id=%s)", client_id)
     return entry
 
@@ -147,7 +124,7 @@ async def ensure_oauth_client(redirect_uri: str) -> dict[str, Any]:
 
 def get_vercel_token() -> str | None:
     """Return the stored access_token (API token or OAuth), or None."""
-    entry = _read_tokens().get("vercel")
+    entry = get_entry("vercel")
     if not entry:
         return None
     return entry.get("access_token") or None
@@ -155,15 +132,13 @@ def get_vercel_token() -> str | None:
 
 def save_vercel_token(token: str, username: str = "", name: str = "") -> None:
     """Save a manually-provided API token (no expiry, no refresh_token)."""
-    data = _read_tokens()
-    data["vercel"] = {
+    set_entry("vercel", {
         "access_token": token,
         "token_type": "Bearer",
         "auth_method": "api_token",
         "username": username,
         "name": name,
-    }
-    _write_tokens(data)
+    })
     log.info("Vercel API token saved to %s", TOKEN_FILE)
 
 
@@ -175,8 +150,7 @@ def save_oauth_tokens(
     name: str = "",
 ) -> None:
     """Persist OAuth 2.1 access + refresh tokens."""
-    data = _read_tokens()
-    data["vercel"] = {
+    set_entry("vercel", {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expires_at": int(time.time()) + expires_in,
@@ -184,16 +158,13 @@ def save_oauth_tokens(
         "auth_method": "oauth",
         "username": username,
         "name": name,
-    }
-    _write_tokens(data)
+    })
     log.info("Vercel OAuth tokens saved to %s", TOKEN_FILE)
 
 
 def delete_vercel_token() -> None:
     """Remove the user's Vercel tokens. Preserves the vercel_client OAuth registration."""
-    data = _read_tokens()
-    data.pop("vercel", None)
-    _write_tokens(data)
+    delete_entry("vercel")
     log.info("Vercel token removed from %s", TOKEN_FILE)
 
 
@@ -337,8 +308,7 @@ async def refresh_oauth_token() -> str | None:
     Updates mcp-tokens.json in-place on success.
     Returns the new access_token, or None if refresh is not possible.
     """
-    data = _read_tokens()
-    entry = data.get("vercel", {})
+    entry = get_entry("vercel") or {}
     refresh_token = entry.get("refresh_token")
     if not refresh_token:
         return None
@@ -374,8 +344,7 @@ async def refresh_oauth_token() -> str | None:
         entry["expires_at"] = int(time.time()) + tokens.get("expires_in", 3600)
         if tokens.get("refresh_token"):
             entry["refresh_token"] = tokens["refresh_token"]
-        data["vercel"] = entry
-        _write_tokens(data)
+        set_entry("vercel", entry)
         log.info("Vercel OAuth token refreshed successfully")
         return new_access_token
 
@@ -391,8 +360,7 @@ async def get_valid_access_token() -> str | None:
     For API tokens (no expires_at) the stored token is returned as-is.
     Returns None if no token is stored or refresh fails.
     """
-    data = _read_tokens()
-    entry = data.get("vercel", {})
+    entry = get_entry("vercel") or {}
     access_token = entry.get("access_token")
     if not access_token:
         return None
@@ -443,8 +411,7 @@ async def validate_token(token: str) -> dict[str, Any]:
 
 
 async def get_status() -> dict[str, Any]:
-    data = _read_tokens()
-    entry = data.get("vercel", {})
+    entry = get_entry("vercel") or {}
 
     # OAuth tokens are MCP-scoped and can't be validated via /v2/user.
     # Trust the stored entry as long as the token exists and hasn't expired.

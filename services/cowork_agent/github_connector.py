@@ -7,51 +7,24 @@ PAT on GitHub, pastes it into the UI, and we store it in a local JSON file.
 Token file: <project_root>/mcp-tokens.json  (.gitignored)
 """
 
-import json
 import logging
-import os
-from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
+from .token_store import TOKEN_FILE, delete_entry, get_entry, set_entry
+
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-_PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
 
 GITHUB_API = "https://api.github.com"
 
 # ---------------------------------------------------------------------------
-# Token storage
+# Token storage (provider key "github" in mcp-tokens.json, owned by token_store)
 # ---------------------------------------------------------------------------
-
-def _read_tokens() -> dict[str, Any]:
-    """Read the full mcp-tokens.json file."""
-    if not TOKEN_FILE.exists():
-        return {}
-    try:
-        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Could not read %s: %s", TOKEN_FILE, exc)
-        return {}
-
-
-def _write_tokens(data: dict[str, Any]) -> None:
-    """Write the full mcp-tokens.json file."""
-    TOKEN_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
 
 def get_github_token() -> str | None:
     """Return the stored GitHub access token, or None."""
-    entry = _read_tokens().get("github")
+    entry = get_entry("github")
     if not entry:
         return None
     return entry.get("access_token") or None
@@ -59,7 +32,7 @@ def get_github_token() -> str | None:
 
 def get_github_auth_method() -> str | None:
     """Return the auth method used for the stored token: "pat", "cli", or None."""
-    entry = _read_tokens().get("github")
+    entry = get_entry("github")
     if not entry:
         return None
     # Pre-existing tokens (no auth_method field) are PATs.
@@ -71,24 +44,20 @@ def save_github_token(token: str, *, auth_method: str = "pat") -> None:
 
     auth_method is "pat" (user-pasted PAT) or "cli" (from `gh auth login`).
     """
-    data = _read_tokens()
-    data["github"] = {
+    set_entry("github", {
         "access_token": token,
         "refresh_token": None,
         "expires_at": 0,
         "token_type": "Bearer",
         "scope": "",
         "auth_method": auth_method,
-    }
-    _write_tokens(data)
+    })
     log.info("GitHub token saved to %s (method=%s)", TOKEN_FILE, auth_method)
 
 
 def delete_github_token() -> None:
     """Remove the GitHub entry from mcp-tokens.json."""
-    data = _read_tokens()
-    data.pop("github", None)
-    _write_tokens(data)
+    delete_entry("github")
     log.info("GitHub token removed from %s", TOKEN_FILE)
 
 
