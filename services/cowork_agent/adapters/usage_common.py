@@ -21,8 +21,7 @@ An **entry** is one normalized usage record:
 
 An adapter wires its discovery + parser into a :class:`Source` and binds the
 view functions below to its module surface (see claude_code/openclaw usage.py).
-Output is byte-for-byte what the per-adapter copies produced before extraction;
-the ``tests/usage_golden.py`` harness guards that.
+Output is byte-for-byte what the per-adapter copies produced before extraction.
 
 Note: hermes does NOT use this module — it reads rolled-up session rows from
 SQLite and synthesizes its own views (no per-message entries exist).
