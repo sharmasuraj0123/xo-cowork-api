@@ -43,7 +43,7 @@ from pydantic import BaseModel, Field
 from services.cowork_agent.agent_registry import get_agent
 from services.cowork_agent.adapters.hermes import gateway_pool
 from services.cowork_agent.helpers import _mask_sensitive
-from services.cowork_agent.hermes_profile_env import (
+from services.cowork_agent.adapters.hermes.profile_env import (
     EnvEntry,
     delete_env_entry,
     list_env_keys,
