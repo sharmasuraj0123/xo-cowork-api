@@ -31,7 +31,6 @@ from services.cowork_agent.helpers import (
     parse_jsonl,
 )
 from services.cowork_agent.hermes_state_db import (
-    find_hermes_profile,
     list_hermes_sessions,
 )
 from services.cowork_agent.project_layout import xo_projects_root
@@ -344,17 +343,17 @@ def find_session_backend(session_id: str) -> str | None:
                     if tag:
                         return tag
 
-    # OpenClaw native sessions.
-    if AGENTS_DIR.exists():
-        for agent_dir in AGENTS_DIR.iterdir():
-            if not agent_dir.is_dir():
-                continue
-            if (agent_dir / "sessions" / f"{session_id}.jsonl").exists():
-                return "openclaw"
+    # Not project-tagged: ask each adapter whether it owns this session via
+    # its sessions capability (openclaw scans its native dir, hermes checks
+    # state.db, etc.). No backend is named here.
+    from services.cowork_agent.adapter_registry import list_adapters
+    from services.cowork_agent.adapters.loader import try_load_capability
 
-    # Hermes sessions (SQLite-backed, scanned across every profile).
-    if find_hermes_profile(session_id) is not None:
-        return "hermes"
+    for name in list_adapters():
+        mod = try_load_capability("sessions", agent=name)
+        owns = getattr(mod, "owns_session", None) if mod else None
+        if owns is not None and owns(session_id):
+            return name
 
     return None
 
