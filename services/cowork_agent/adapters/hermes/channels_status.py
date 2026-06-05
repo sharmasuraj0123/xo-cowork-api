@@ -16,12 +16,14 @@ gateway state.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from services.cowork_agent.adapters.hermes.dump import (
     HermesStatusError,
     fetch_dump,
 )
+from services.cowork_agent.settings import HERMES_DIR
 
 
 def _gateway_running(features: dict[str, Any]) -> bool:
@@ -71,4 +73,48 @@ async def get_channels_status(timeout: float | None = None) -> dict[str, Any]:
     return build_status_view(dump)
 
 
-__all__ = ["HermesStatusError", "build_status_view", "get_channels_status"]
+def list_channels() -> dict[str, Any]:
+    """Connected-channels view for ``GET /api/channels``.
+
+    Reads ``~/.hermes/gateway_state.json`` and returns the uniform shape
+    ``{"channels": {id: {...}}, "gateway_running": bool}``. The shape is kept
+    stable so the frontend can index ``data.channels[id]`` without runtime
+    guards; agents without a connected-channels source return an empty map.
+    """
+    state_file = HERMES_DIR / "gateway_state.json"
+    if not state_file.is_file():
+        return {"channels": {}, "gateway_running": False}
+    try:
+        state = json.loads(state_file.read_text())
+    except Exception:
+        return {"channels": {}, "gateway_running": False}
+
+    platforms = state.get("platforms") or {}
+    channels: dict[str, dict] = {}
+    for platform_id, info in platforms.items():
+        if not isinstance(info, dict):
+            continue
+        # The gateway lists api_server too — that's the hermes API itself,
+        # not a user-facing messaging channel. Hide it from the UI list.
+        if platform_id == "api_server":
+            continue
+        channels[platform_id] = {
+            "id": platform_id,
+            "name": platform_id,
+            "type": platform_id,
+            "status": info.get("state") or "unknown",
+            "account": info.get("error_message") or None,
+        }
+
+    return {
+        "channels": channels,
+        "gateway_running": (state.get("gateway_state") == "running"),
+    }
+
+
+__all__ = [
+    "HermesStatusError",
+    "build_status_view",
+    "get_channels_status",
+    "list_channels",
+]
