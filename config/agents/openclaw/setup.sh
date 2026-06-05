@@ -32,7 +32,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-OPENCLAW_SH="$REPO_ROOT/openclaw.sh"
+OPENCLAW_SH="$SCRIPT_DIR/agent.sh"
 ENV_FILE="$REPO_ROOT/.env"
 
 RED='\033[0;31m'

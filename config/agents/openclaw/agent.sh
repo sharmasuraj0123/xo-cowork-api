@@ -28,6 +28,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script lives at config/agents/openclaw/agent.sh; the repo root (where
+# the shared .env is materialised by setup.sh) is three levels up.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 OPENCLAW_DIR="${HOME}/.openclaw"
 CONFIG_FILE="${OPENCLAW_DIR}/openclaw.json"
 PID_FILE="/tmp/openclaw-gateway.pid"
@@ -57,7 +60,7 @@ load_env() {
     fi
 }
 
-load_env "$SCRIPT_DIR/.env"
+load_env "$REPO_ROOT/.env"
 load_env "$OPENCLAW_DIR/.env"
 
 # --- Settings ---
@@ -196,12 +199,12 @@ validate_env() {
 install_env() {
     log "Installing .env to ${OPENCLAW_DIR}/.env..."
     mkdir -p "$OPENCLAW_DIR"
-    if [ -f "$SCRIPT_DIR/.env" ]; then
-        cp "$SCRIPT_DIR/.env" "$OPENCLAW_DIR/.env"
+    if [ -f "$REPO_ROOT/.env" ]; then
+        cp "$REPO_ROOT/.env" "$OPENCLAW_DIR/.env"
         chmod 600 "$OPENCLAW_DIR/.env"
         log_success ".env copied to ${OPENCLAW_DIR}/.env (mode 600)"
     else
-        log_error "No .env found in $SCRIPT_DIR"
+        log_error "No .env found in $REPO_ROOT"
         exit 1
     fi
 }
@@ -840,11 +843,11 @@ openclaw() {
         echo "⚠  Do not run 'openclaw gateway run' directly."
         echo "   Use the managed gateway instead:"
         echo ""
-        echo "     ${setup_dir}/openclaw.sh start    # start gateway"
-        echo "     ${setup_dir}/openclaw.sh stop     # stop gateway"
-        echo "     ${setup_dir}/openclaw.sh restart  # restart gateway"
-        echo "     ${setup_dir}/openclaw.sh status   # check status"
-        echo "     ${setup_dir}/openclaw.sh logs     # tail logs"
+        echo "     ${setup_dir}/agent.sh start    # start gateway"
+        echo "     ${setup_dir}/agent.sh stop     # stop gateway"
+        echo "     ${setup_dir}/agent.sh restart  # restart gateway"
+        echo "     ${setup_dir}/agent.sh status   # check status"
+        echo "     ${setup_dir}/agent.sh logs     # tail logs"
         echo ""
         echo "   This ensures PID tracking, auto-restart, and log rotation."
         return 1

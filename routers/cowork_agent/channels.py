@@ -356,7 +356,7 @@ import json as _json
 from pathlib import Path as _Path
 from urllib.parse import urlparse as _urlparse
 
-_HERMES_SH = _Path(__file__).resolve().parents[2] / "hermes.sh"
+_HERMES_SH = _Path(__file__).resolve().parents[2] / "config" / "agents" / "hermes" / "agent.sh"
 _HERMES_GATEWAY_STATE_FILE = _HERMES.home_dir / "gateway_state.json"
 
 

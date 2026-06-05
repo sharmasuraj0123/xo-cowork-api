@@ -29,6 +29,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script lives at config/agents/hermes/agent.sh; the repo root (where
+# the shared .env is materialised by setup.sh) is three levels up.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 HERMES_DIR="${HOME}/.hermes"
 HERMES_REPO="${HERMES_DIR}/hermes-agent"
 CONFIG_FILE="${HERMES_DIR}/config.yaml"
@@ -74,7 +77,7 @@ load_env() {
     fi
 }
 
-load_env "$SCRIPT_DIR/.env"
+load_env "$REPO_ROOT/.env"
 load_env "$ENV_FILE"
 
 # --- Settings ---
@@ -250,12 +253,12 @@ validate_env() {
 install_env() {
     log "Installing .env to ${HERMES_DIR}/.env..."
     mkdir -p "$HERMES_DIR"
-    if [ -f "$SCRIPT_DIR/.env" ]; then
-        cp "$SCRIPT_DIR/.env" "$ENV_FILE"
+    if [ -f "$REPO_ROOT/.env" ]; then
+        cp "$REPO_ROOT/.env" "$ENV_FILE"
         chmod 600 "$ENV_FILE"
         log_success ".env copied to ${ENV_FILE} (mode 600)"
     else
-        log_warn "No .env found in $SCRIPT_DIR — Hermes will use existing config or defaults"
+        log_warn "No .env found in $REPO_ROOT — Hermes will use existing config or defaults"
     fi
 }
 
@@ -570,11 +573,11 @@ hermes() {
         echo "⚠  Do not run 'hermes gateway $2' directly (no systemd in this container)."
         echo "   Use the managed gateway instead:"
         echo ""
-        echo "     ${setup_dir}/hermes.sh start    # start gateway + dashboard"
-        echo "     ${setup_dir}/hermes.sh stop     # stop everything"
-        echo "     ${setup_dir}/hermes.sh restart  # restart everything"
-        echo "     ${setup_dir}/hermes.sh status   # check status"
-        echo "     ${setup_dir}/hermes.sh logs     # tail gateway logs"
+        echo "     ${setup_dir}/agent.sh start    # start gateway + dashboard"
+        echo "     ${setup_dir}/agent.sh stop     # stop everything"
+        echo "     ${setup_dir}/agent.sh restart  # restart everything"
+        echo "     ${setup_dir}/agent.sh status   # check status"
+        echo "     ${setup_dir}/agent.sh logs     # tail gateway logs"
         echo ""
         echo "   This ensures PID tracking, auto-restart, and log rotation."
         return 1

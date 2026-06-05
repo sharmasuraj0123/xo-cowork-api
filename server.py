@@ -638,7 +638,7 @@ async def delete_session(project_id: str):
 async def gateway_restart():
     """Restart the OpenClaw gateway."""
     import subprocess
-    script = Path(os.path.expanduser("~/xo-cowork-api/openclaw.sh")).resolve()
+    script = (Path(__file__).resolve().parent / "config" / "agents" / "openclaw" / "agent.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="Gateway script not found")
     try:
