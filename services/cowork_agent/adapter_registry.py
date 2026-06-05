@@ -1,29 +1,47 @@
+"""
+Adapter resolution — no hardcoded agent list.
+
+An adapter for agent ``<name>`` is the class exposed as ``Adapter`` in
+``services.cowork_agent.adapters.<name>.adapter``. Both lookups go through the
+dynamic ``load_capability`` seam, so adding an agent is "drop
+``services/cowork_agent/adapters/<name>/adapter.py`` (exposing ``Adapter``)"
+— this file never changes.
+"""
 from __future__ import annotations
-from typing import TYPE_CHECKING
+
+from pathlib import Path
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
-from services.cowork_agent.adapters.openclaw.adapter import OpenclawAdapter
-from services.cowork_agent.adapters.claude_code.adapter import ClaudeCodeAdapter
-from services.cowork_agent.adapters.hermes.adapter import HermesAdapter
+from services.cowork_agent.adapters.loader import load_capability
 
-_REGISTRY: dict[str, type[BaseAgentAdapter]] = {
-    "openclaw":    OpenclawAdapter,
-    "claude_code": ClaudeCodeAdapter,
-    "hermes":      HermesAdapter,
-}
+_ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
 
 
 def get_adapter(name: str, config: dict) -> BaseAgentAdapter:
-    cls = _REGISTRY.get(name)
-    if cls is None:
-        registered = list(_REGISTRY.keys())
+    """Instantiate the adapter for ``name`` from its ``adapter`` module."""
+    try:
+        module = load_capability("adapter", agent=name)
+    except ModuleNotFoundError as exc:
         raise ValueError(
-            f"Unknown agent adapter: {name!r}. Registered adapters: {registered}"
+            f"Unknown agent adapter: {name!r}. Available adapters: {list_adapters()}"
+        ) from exc
+
+    adapter_cls = getattr(module, "Adapter", None)
+    if adapter_cls is None:
+        raise ValueError(
+            f"adapter module for {name!r} does not expose an `Adapter` class "
+            f"(expected `Adapter = <YourAdapter>` in "
+            f"services/cowork_agent/adapters/{name}/adapter.py)"
         )
-    return cls(config)
+    return adapter_cls(config)
 
 
 def list_adapters() -> list[str]:
-    return list(_REGISTRY.keys())
-
-
+    """Discover adapters by scanning for ``adapters/<name>/adapter.py``."""
+    if not _ADAPTERS_DIR.exists():
+        return []
+    return sorted(
+        p.name
+        for p in _ADAPTERS_DIR.iterdir()
+        if p.is_dir() and (p / "adapter.py").exists()
+    )

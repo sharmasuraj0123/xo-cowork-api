@@ -196,3 +196,9 @@ class OpenclawAdapter(BaseAgentAdapter):
                 return {"ok": ok, "gateway": "up" if ok else f"http_{resp.status_code}"}
         except Exception as exc:
             return {"ok": False, "gateway": str(exc)}
+
+
+# Stable discovery alias — the dynamic loader resolves
+# services.cowork_agent.adapters.<AGENT_NAME>.adapter.Adapter, so every
+# adapter module exposes its class under this name.
+Adapter = OpenclawAdapter
