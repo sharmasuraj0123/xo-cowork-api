@@ -5,7 +5,7 @@ The onboarding "Channels" step (and later the Settings → Channels tab) POSTs
 a platform id + bot tokens here. This module:
 
 1. Upserts the platform's tokens into the active agent's env file
-   (line-level, comment-preserving) via `openclaw_env.upsert_env_entry`.
+   (line-level, comment-preserving) via `agent_env.upsert_env_entry`.
 2. Schedules the manifest's `config_set_batch` (followed by any entries in
    `post_commands`) as a **background task** — the handler does not wait
    on the CLI. This mirrors the provider-key flow and keeps the UI
@@ -29,7 +29,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from services.cowork_agent.agent_registry import get_active_agent
-from services.cowork_agent.openclaw_env import upsert_env_entry
+from services.cowork_agent.agent_env import upsert_env_entry
 
 router = APIRouter()
 

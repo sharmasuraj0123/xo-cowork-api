@@ -1,22 +1,23 @@
-import warnings
-warnings.warn(
-    "openclaw_env.py is deprecated. Use AgentDispatcher from dispatcher.py.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 """
-Helpers for `~/.openclaw/.env`.
+Helpers for the **active agent's** ``.env`` file.
+
+The target file is resolved from ``get_active_agent().env_file``, so the same
+code writes ``~/.openclaw/.env``, ``~/.hermes/.env``, etc. depending purely on
+``AGENT_NAME`` — no module here names a specific backend.
 
 Two access patterns live on top of this file:
 
-* `routes/secrets.py` — whole-file read/write (the Settings → Env Vars UI).
-  Uses `load_env_entries` / `save_env_entries`, which operate on a
-  `[{key, value}, ...]` view and do NOT preserve comments or blank lines
-  (the UI has no representation for them).
-* `routes/config_routes.py` — single-key upsert (the onboarding "Save Key"
-  flow). Uses `upsert_env_entry`, a line-level edit that preserves
-  comments, blank lines, and every other entry untouched.
+* ``routers/cowork_agent/secrets.py`` — whole-file read/write (the
+  Settings → Env Vars UI). Uses ``load_env_entries`` / ``save_env_entries``,
+  which operate on a ``[{key, value}, ...]`` view and do NOT preserve comments
+  or blank lines (the UI has no representation for them).
+* The onboarding "Save Key" / "Add Channel" flows — single-key upsert via
+  ``upsert_env_entry``, a line-level edit that preserves comments, blank lines,
+  and every other entry untouched.
+
+Agent-pinned routes (e.g. the hermes profile/config routes) live in that
+agent's adapter, where ``get_active_agent()`` already resolves to that agent —
+so they share this one helper instead of duplicating the upsert logic.
 """
 
 import re

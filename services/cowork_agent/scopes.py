@@ -22,7 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Union
 
-from services.cowork_agent import openclaw_env, project_layout
+from services.cowork_agent import agent_env, project_layout
 from services.cowork_agent.helpers import normalize_agent_id
 from services.cowork_agent.visualizer import reader as visualizer_reader
 
@@ -32,7 +32,7 @@ class ScopeNotFound(Exception):
 
 
 class SecretsScope:
-    """Handle exposing the secret store via openclaw_env helpers only.
+    """Handle exposing the secret store via agent_env helpers only.
 
     The BFF route only ever sees this object — never a raw Path — so it
     cannot accidentally read or write the underlying .env file
@@ -42,24 +42,24 @@ class SecretsScope:
 
     def load(self) -> list[dict]:
         """Return current entries as [{key, value}, ...]."""
-        return openclaw_env.load_env_entries()
+        return agent_env.load_env_entries()
 
     def save(self, items: list[dict]) -> None:
         """Bulk-replace the entire store."""
-        openclaw_env.save_env_entries(items)
+        agent_env.save_env_entries(items)
 
     def upsert(self, key: str, value: str) -> None:
         """Insert or update a single key (preserves comments/ordering)."""
-        openclaw_env.upsert_env_entry(key, value)
+        agent_env.upsert_env_entry(key, value)
 
     def delete(self, key: str) -> bool:
         """Remove a single key. Returns True if it was present."""
-        entries = openclaw_env.load_env_entries()
+        entries = agent_env.load_env_entries()
         before = len(entries)
         kept = [e for e in entries if e.get("key") != key]
         if len(kept) == before:
             return False
-        openclaw_env.save_env_entries(kept)
+        agent_env.save_env_entries(kept)
         return True
 
 
