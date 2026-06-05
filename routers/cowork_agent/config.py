@@ -19,13 +19,13 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.settings import AGENTS_DIR, CLAUDE_COWORK_DIR, OPENCLAW_MODEL_CAPABILITIES, load_agent_config
 from services.cowork_agent.agent_registry import get_agent, get_active_agent
-from services.cowork_agent.helpers import _mask_sensitive, normalize_agent_id
-from services.cowork_agent.openclaw_env import upsert_env_entry
+from services.cowork_agent.helpers import _mask_sensitive
+from services.cowork_agent.agent_env import upsert_env_entry
 from services.cowork_agent.hermes_env import upsert_hermes_env_entry
-from services.cowork_agent.openclaw_store import list_agent_entries, load_openclaw_config
+from services.cowork_agent.openclaw_store import load_openclaw_config
 from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.adapters.loader import try_load_capability
 
 router = APIRouter()
 
@@ -205,105 +205,19 @@ async def save_hermes_provider_key(provider_id: str, request: Request):
 # ── Model listing ────────────────────────────────────────────────────────────
 
 
-def list_openclaw_models() -> list[dict]:
-    """One model row per agent entry so the UI can target `<prefix>/<agentId>`."""
-    cfg = load_openclaw_config()
-    entries_by_id = {
-        normalize_agent_id(str(e.get("id", ""))): e
-        for e in list_agent_entries(cfg)
-        if e.get("id")
-    }
-    models: list[dict] = []
-    seen: set[str] = set()
-    prefix = _AGENT.model_prefix
-
-    if AGENTS_DIR.exists():
-        for agent_dir in sorted(AGENTS_DIR.iterdir()):
-            if not agent_dir.is_dir():
-                continue
-            aid = normalize_agent_id(agent_dir.name)
-            seen.add(aid)
-            meta = entries_by_id.get(aid, {})
-            display = meta.get("name") if isinstance(meta.get("name"), str) else None
-            label = (display or "").strip() or aid
-            models.append(
-                {
-                    "id": f"{prefix}/{aid}",
-                    "name": label,
-                    "provider_id": _AGENT.name,
-                    "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
-                    "pricing": {"prompt": 0, "completion": 0},
-                    "metadata": {"openclaw_agent_id": aid},
-                }
-            )
-
-    if not models:
-        models.append(
-            {
-                "id": f"{prefix}/main",
-                "name": "main",
-                "provider_id": _AGENT.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
-                "pricing": {"prompt": 0, "completion": 0},
-                "metadata": {"openclaw_agent_id": "main"},
-            }
-        )
-
-    return models
-
-
-def list_hermes_models() -> list[dict]:
-    """One model row per hermes profile under ``~/.hermes/profiles/``.
-
-    Mirrors :func:`list_openclaw_models` but reads from the hermes
-    state-db helper rather than scanning openclaw's agents dir — those
-    two layouts are independent and listing the openclaw dir under
-    hermes was producing 2 stale model rows for 4 real hermes profiles.
-    """
-    from services.cowork_agent.hermes_state_db import list_all_profile_names
-
-    prefix = _HERMES.model_prefix
-    models: list[dict] = []
-    for profile_name in list_all_profile_names():
-        models.append(
-            {
-                "id": f"{prefix}/{profile_name}",
-                "name": profile_name,
-                "provider_id": _HERMES.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
-                "pricing": {"prompt": 0, "completion": 0},
-                "metadata": {"hermes_profile": profile_name},
-            }
-        )
-    if not models:
-        # Fresh install — surface at least one row so the dropdown isn't
-        # blank before the user creates a profile.
-        models.append(
-            {
-                "id": f"{prefix}/default",
-                "name": "default",
-                "provider_id": _HERMES.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
-                "pricing": {"prompt": 0, "completion": 0},
-                "metadata": {"hermes_profile": "default"},
-            }
-        )
-    return models
-
-
 @router.get("/api/models")
 def list_models():
     """Return one model row per agent/profile under the active backend.
 
-    Backend dispatch:
-    - ``AGENT_NAME=hermes`` → :func:`list_hermes_models` (scans
-      ``~/.hermes/profiles/``).
-    - everything else → :func:`list_openclaw_models` (scans
-      ``~/.openclaw/agents/``, also covers claude_code).
+    Dispatch is resolved through the active agent's ``models`` capability
+    (``adapters/<AGENT_NAME>/models.py`` → ``list_models()``): hermes scans
+    ``~/.hermes/profiles/``; openclaw (and claude_code, which re-exports it)
+    scans ``~/.openclaw/agents/``. No core code names a specific backend.
     """
-    if os.getenv("AGENT_NAME", "openclaw") == "hermes":
-        return list_hermes_models()
-    return list_openclaw_models()
+    mod = try_load_capability("models")
+    if mod is None or not hasattr(mod, "list_models"):
+        return []
+    return mod.list_models()
 
 
 # ── /api/config/* routes ─────────────────────────────────────────────────────
