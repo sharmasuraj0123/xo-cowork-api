@@ -33,8 +33,6 @@ from typing import Any
 from services.cowork_agent.project_layout import xo_projects_root
 
 
-DEFAULT_AGENT = "openclaw"
-KNOWN_AGENTS = ("openclaw", "claude_code", "hermes")
 
 
 def _all_data_true() -> dict:
@@ -150,15 +148,26 @@ def build_static_manifest(agent: str) -> dict:
     """Return a fresh manifest dict for `agent` with cascade applied and
     the `agent` field set. Caller owns the returned dict."""
     if agent not in DEFAULTS:
-        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(KNOWN_AGENTS)})")
+        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(sorted(DEFAULTS))})")
     manifest: dict[str, Any] = {"agent": agent}
     manifest.update(copy.deepcopy(DEFAULTS[agent]))
     return _apply_cascade(manifest)
 
 
 def resolve_agent_name() -> str:
-    """Read AGENT_NAME from env. Empty/missing → DEFAULT_AGENT."""
-    return (os.getenv("AGENT_NAME", "") or "").strip() or DEFAULT_AGENT
+    """The active agent name — the single resolver used across core code.
+
+    ``AGENT_NAME`` (if set) wins and is returned verbatim, even if it names no
+    manifest (callers map that to a 501). When unset, the default is resolved
+    by the registry (``DEFAULT_AGENT`` env → single-manifest → documented
+    ``openclaw`` fallback). The agent-name default literal lives only there —
+    no core file hardcodes an agent name.
+    """
+    explicit = (os.getenv("AGENT_NAME", "") or "").strip()
+    if explicit:
+        return explicit
+    from services.cowork_agent.agent_registry import get_active_agent
+    return get_active_agent().name
 
 
 async def _write_atomic(manifest: dict) -> Path:
@@ -181,7 +190,7 @@ async def write_static_manifest() -> None:
     if agent not in DEFAULTS:
         print(
             f"⚠️ xo.json: AGENT_NAME='{agent}' is not a known agent "
-            f"(valid: {', '.join(KNOWN_AGENTS)}) — skipping"
+            f"(valid: {', '.join(sorted(DEFAULTS))}) — skipping"
         )
         return
 

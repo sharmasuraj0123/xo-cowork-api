@@ -91,8 +91,8 @@ def load_all_sessions() -> list[dict]:
     De-duplicated via ``sessionId`` so a session that is both project-tee'd
     and natively present surfaces only once (project-tied wins).
     """
-    import os
-    active_backend = os.getenv("AGENT_NAME", "openclaw")
+    from services.xo_manifest import resolve_agent_name
+    active_backend = resolve_agent_name()
 
     sessions = []
     seen_ids: set[str] = set()
