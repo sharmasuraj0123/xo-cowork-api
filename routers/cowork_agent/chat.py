@@ -1,31 +1,29 @@
 """
 Chat prompt / streaming / abort routes.
 
-OpenClaw: direct streaming path (chat_prompt prefetches new-session bootstrap,
-chat_stream dispatches to emit_prefetched_sse for new sessions or
-stream_openclaw_to_sse for existing ones). All other agents go through
-AgentDispatcher → adapter.stream() via _dispatcher_sse.
+The router is backend-agnostic. An agent may contribute a ``chat`` capability
+(``services/cowork_agent/adapters/<name>/chat.py``):
+  - ``handle_prompt(...)`` — fully owns POST /api/chat/prompt (e.g. openclaw's
+    direct prefetch path). When absent, the prompt goes through AgentDispatcher.
+  - ``get_sse_generator(stream_id, stream_info)`` — the SSE generator for a
+    stream that handler registered.
+  - ``resolve_agent_id(body)`` — resolve an agent_id/profile from the prompt
+    body (e.g. hermes ``model: "hermes/<profile>"``).
+All agents without a custom handler stream through AgentDispatcher via
+_dispatcher_sse. No backend is named in this file.
 """
 
 import asyncio
 import json
-import os
 import time
 import uuid
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from services.cowork_agent.adapters.loader import try_load_capability
 from services.cowork_agent.chat_state import active_streams
-from services.cowork_agent.sessions_io import find_session_key
-from services.cowork_agent.streaming import (
-    create_new_session,
-    emit_prefetched_sse,
-    find_session_id_by_key,
-    hermes_profile_from_prompt_body,
-    openclaw_agent_id_from_prompt_body,
-    stream_openclaw_to_sse,
-)
+from services.xo_manifest import resolve_agent_name
 
 # Tracks recently-started streams so a fast reconnect (e.g. navigation-caused
 # double-mount) gets a graceful done event rather than "Stream not found".
@@ -35,13 +33,28 @@ _RECENTLY_STARTED_TTL = 600  # seconds — must outlast SSE_HEARTBEAT_TIMEOUT (4
 
 router = APIRouter()
 
-_AGENT_NAME = os.getenv("AGENT_NAME", "openclaw")
-
 
 def _resolve_backend_for_session(session_id: str) -> str | None:
     """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default)."""
     from services.cowork_agent.sessions_io import find_session_backend
     return find_session_backend(session_id)
+
+
+def _adapter_sse_generator(stream_info: dict, stream_id: str):
+    """Return an adapter-owned SSE generator for this stream, or None.
+
+    A stream registered by an agent's ``chat.handle_prompt`` is tagged with
+    ``backend``; that adapter's ``get_sse_generator`` produces the stream. The
+    router stays backend-agnostic.
+    """
+    backend = stream_info.get("backend")
+    if not backend:
+        return None
+    chat_mod = try_load_capability("chat", agent=backend)
+    factory = getattr(chat_mod, "get_sse_generator", None) if chat_mod else None
+    if factory is None:
+        return None
+    return factory(stream_id, stream_info)
 
 
 _KEEPALIVE_INTERVAL = 20  # seconds of silence before emitting an SSE keepalive comment
@@ -172,7 +185,7 @@ async def chat_prompt(request: Request):
             session_id = None
 
     if not agent_name:
-        agent_name = _AGENT_NAME
+        agent_name = resolve_agent_name()
 
     print(f"[chat] routing → agent_name={agent_name!r} agent_id={body.get('agent_id')!r} session_id={session_id!r} workspace={body.get('workspace')!r}")
 
@@ -197,54 +210,29 @@ async def chat_prompt(request: Request):
             except Exception:
                 pass
 
-    # Hermes profile selection mirrors openclaw's pattern: the picker sends
-    # ``model: "hermes/<profile>"`` and we parse the profile name out here.
-    # Only fires when the FE didn't already supply ``agent_id`` (explicit
-    # selection from the sidebar takes precedence over the model string).
-    if agent_name == "hermes" and not agent_id:
-        parsed_profile = hermes_profile_from_prompt_body(body)
-        if parsed_profile:
-            agent_id = parsed_profile
+    # Optional adapter hook: resolve an agent_id/profile from the prompt body
+    # (e.g. hermes ``model: "hermes/<profile>"``). Explicit agent_id wins.
+    if not agent_id:
+        chat_mod = try_load_capability("chat", agent=agent_name)
+        resolver = getattr(chat_mod, "resolve_agent_id", None) if chat_mod else None
+        if resolver:
+            agent_id = resolver(body)
 
-    # OpenClaw: direct streaming path (dev-branch behavior).
-    if agent_name == "openclaw":
-        if is_new_session:
-            oc_agent = openclaw_agent_id_from_prompt_body(body)
-            session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
-            task = asyncio.create_task(
-                create_new_session(text, session_key=session_key, xo_agent_id=agent_id)
-            )
+    # Optional adapter hook: an agent may fully own the prompt path (e.g.
+    # openclaw's direct prefetch/streaming). When present it returns the
+    # response; otherwise we fall through to the shared dispatcher path.
+    chat_mod = try_load_capability("chat", agent=agent_name)
+    handle_prompt = getattr(chat_mod, "handle_prompt", None) if chat_mod else None
+    if handle_prompt:
+        return await handle_prompt(
+            body=body,
+            text=text,
+            session_id=session_id,
+            agent_id=agent_id,
+            is_new_session=is_new_session,
+        )
 
-            new_session_id = None
-            for _ in range(20):
-                await asyncio.sleep(1.0)
-                new_session_id = find_session_id_by_key(session_key)
-                if new_session_id:
-                    break
-
-            stream_id = str(uuid.uuid4())
-            active_streams[stream_id] = {
-                "task": task,
-                "prefetched": True,
-                "agent_id": agent_id,
-            }
-            return {"stream_id": stream_id, "session_id": new_session_id}
-
-        # Existing openclaw session: look up the session key and stream directly
-        session_key = find_session_key(session_id)
-        if not session_key:
-            return JSONResponse(status_code=404, content={"detail": "Session not found"})
-
-        stream_id = str(uuid.uuid4())
-        active_streams[stream_id] = {
-            "session_id": session_id,
-            "text": text,
-            "session_key": session_key,
-            "agent_id": agent_id,
-        }
-        return {"stream_id": stream_id, "session_id": session_id}
-
-    # Non-openclaw agents: route through AgentDispatcher.
+    # Default: route through AgentDispatcher.
     our_session_id = str(uuid.uuid4()) if is_new_session else session_id
     stream_id = str(uuid.uuid4())
     active_streams[stream_id] = {
@@ -268,6 +256,7 @@ async def chat_stream(stream_id: str):
         _recently_started.pop(k, None)
 
     stream_info = active_streams.get(stream_id)
+    adapter_gen = _adapter_sse_generator(stream_info, stream_id) if stream_info else None
     if not stream_info:
         # Reconnect after double-mount: wait for the original stream to finish,
         # then send done so the client refetches messages from DB.
@@ -289,14 +278,11 @@ async def chat_stream(stream_id: str):
             async def not_found():
                 yield f"id: 1\nevent: error\ndata: {json.dumps({'error_message': 'Stream not found'})}\n\n"
             generator = not_found()
-    elif stream_info.get("prefetched"):
-        # OpenClaw new session — replay the bootstrap response as fake SSE.
-        generator = emit_prefetched_sse(stream_id)
-    elif stream_info.get("session_key"):
-        # OpenClaw existing session — live stream from the gateway.
-        generator = stream_openclaw_to_sse(stream_id)
+    elif adapter_gen is not None:
+        # Adapter-owned stream (e.g. openclaw prefetch / live gateway stream).
+        generator = adapter_gen
     elif stream_info.get("agent_name"):
-        # Non-openclaw agents — dispatcher path with reconnect signal.
+        # Shared dispatcher path with reconnect signal.
         active_streams.pop(stream_id, None)
         done_event = asyncio.Event()
         _recently_started[stream_id] = {
