@@ -1,5 +1,5 @@
 """
-GitHub access: token resolution, repo existence/creation, git operations on the staging clone.
+GitHub access: token resolution, repo existence/creation, git operations on ephemeral clones.
 
 Auth model — `resolve_auth()`:
   1. Try `github_connector.get_github_token()`. This covers users who
@@ -8,16 +8,20 @@ Auth model — `resolve_auth()`:
   2. Fall back to `os.environ["GITHUB_PAT"]` (loaded from
      `xo-cowork-api/.env` via dotenv at process start, kept fresh by
      `config.upsert_env`).
-  3. Return None if neither path produces a token. Callers turn this
-     into a 401 with explicit setup instructions for the user.
+  3. Raise AuthMissingError if neither path produces a token. Callers
+     turn this into a 401 with explicit setup instructions for the user.
 
 Repo creation prefers the `gh` CLI when available + authenticated,
 falls back to REST `POST /user/repos`. The user must never have to
 open GitHub manually — this is non-negotiable per product decision.
 
 Git ops use a per-command extraheader injection rather than embedding
-the token in the remote URL, so `.git/config` in the staging clone
-never persists the credential.
+the token in the remote URL, so `.git/config` in any clone never
+persists the credential.
+
+Staging model: every operation creates its own ephemeral `--depth=1`
+clone in a tempdir and deletes it on completion. There is no
+persistent staging directory.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ import httpx
 
 from services.cowork_agent import github_connector
 
-from .config import ENV_GITHUB_PAT, LOCAL_STAGING_DIR
+from .config import BACKUP_REPO_PREFIX, ENV_GITHUB_PAT
 
 
 GITHUB_API = "https://api.github.com"
@@ -127,7 +131,8 @@ async def create_repo(owner: str, name: str, *, auth: GitHubAuth) -> str:
         proc = await asyncio.create_subprocess_exec(
             "gh", "repo", "create", f"{owner}/{name}",
             "--private",
-            "--description", "Encrypted xo-projects backups (auto-managed by xo-cowork-api).",
+            "--add-readme",
+            "--description", "Encrypted xo-project backup (auto-managed by xo-cowork-api).",
             "--confirm",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -147,7 +152,7 @@ async def create_repo(owner: str, name: str, *, auth: GitHubAuth) -> str:
         "name": name,
         "private": True,
         "auto_init": True,
-        "description": "Encrypted xo-projects backups (auto-managed by xo-cowork-api).",
+        "description": "Encrypted xo-project backup (auto-managed by xo-cowork-api).",
     })
     clone_url = data.get("clone_url")
     if not isinstance(clone_url, str):
@@ -155,55 +160,77 @@ async def create_repo(owner: str, name: str, *, auth: GitHubAuth) -> str:
     return clone_url
 
 
-# ── Git operations on the staging clone ──────────────────────────────────────
+# ── Discovery: list the user's xo-project backup repos ──────────────────────
 
 
-def staging_path() -> Path:
-    """Where the staging clone lives. Created on first use."""
-    return LOCAL_STAGING_DIR
+async def list_xo_project_repos(auth: GitHubAuth) -> list[str]:
+    """Return the project_ids of every `xo-project-*` repo the user owns.
 
+    Paginates `GET /user/repos?per_page=100&type=owner` with a simple
+    page loop. The prefix filter happens client-side; GitHub doesn't
+    offer a server-side name-prefix filter on this endpoint.
 
-async def ensure_clone(repo_url: str, *, auth: GitHubAuth, path: Path | None = None) -> Path:
-    """Clone the repo into the staging dir if missing, else `git pull --ff-only`.
-
-    Returns the path of the staging clone (caller may need it).
+    Returns project_ids (repo name with the prefix stripped), sorted
+    alphabetically for deterministic output.
     """
-    target = path or staging_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if (target / ".git").is_dir():
-        await _git(["fetch", "--prune", "origin"], cwd=target, auth=auth)
-        await _git(["pull", "--ff-only", "origin"], cwd=target, auth=auth)
-        return target
+    project_ids: list[str] = []
+    page = 1
+    while True:
+        path = f"/user/repos?per_page=100&page={page}&type=owner&sort=full_name"
+        batch = await _get_list(auth, path)
+        if not batch:
+            break
+        for repo in batch:
+            name = repo.get("name") if isinstance(repo, dict) else None
+            if isinstance(name, str) and name.startswith(BACKUP_REPO_PREFIX):
+                project_id = name[len(BACKUP_REPO_PREFIX):]
+                if project_id:
+                    project_ids.append(project_id)
+        if len(batch) < 100:
+            break
+        page += 1
+    project_ids.sort()
+    return project_ids
 
-    # First-time clone. Use the bare HTTPS URL — the credential is
-    # passed via http.extraheader so it isn't written to .git/config.
-    await _git(["clone", repo_url, str(target)], cwd=target.parent, auth=auth)
-    # Configure identity locally so future commits don't depend on a
-    # global git config that may be missing in container deployments.
-    await _git(["config", "user.email", "xo-cowork-api@xo.local"], cwd=target, auth=None)
-    await _git(["config", "user.name", "xo-cowork-api"], cwd=target, auth=None)
-    return target
+
+# ── Git operations on ephemeral clones ───────────────────────────────────────
 
 
-async def commit_and_push(message: str, *, auth: GitHubAuth, path: Path | None = None) -> bool:
-    """Stage all changes in the clone, commit if anything changed, push.
+async def shallow_clone(repo_url: str, dest: Path, *, auth: GitHubAuth) -> None:
+    """`git clone --depth=1 <repo_url> <dest>` with the token via extraheader.
+
+    Also configures a local user.email / user.name so subsequent commits
+    don't depend on a global git config that may be missing in container
+    deployments.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    await _git(
+        ["clone", "--depth=1", repo_url, str(dest)],
+        cwd=dest.parent,
+        auth=auth,
+    )
+    await _git(["config", "user.email", "xo-cowork-api@xo.local"], cwd=dest, auth=None)
+    await _git(["config", "user.name", "xo-cowork-api"], cwd=dest, auth=None)
+
+
+async def commit_and_push_in(path: Path, message: str, *, auth: GitHubAuth) -> bool:
+    """Stage all changes in ``path``, commit if anything changed, push.
 
     Returns True if a commit was created (and pushed), False if there
-    was nothing to commit (caller may want to log a warning).
+    was nothing to commit. ``path`` must be an existing git clone.
     """
-    target = path or staging_path()
-    await _git(["add", "-A"], cwd=target, auth=None)
+    await _git(["add", "-A"], cwd=path, auth=None)
     # `git status --porcelain` lists nothing iff working tree is clean.
     proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(target), "status", "--porcelain",
+        "git", "-C", str(path), "status", "--porcelain",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
     if not stdout.strip():
         return False
-    await _git(["commit", "-m", message], cwd=target, auth=None)
-    await _git(["push", "origin", "HEAD"], cwd=target, auth=auth)
+    await _git(["commit", "-m", message], cwd=path, auth=None)
+    await _git(["push", "origin", "HEAD"], cwd=path, auth=auth)
     return True
 
 
@@ -273,6 +300,25 @@ async def _get(auth: GitHubAuth, path: str) -> dict[str, Any]:
     if resp.status_code >= 400:
         raise GitHubAPIError(resp.status_code, _short_error(resp))
     return resp.json()
+
+
+async def _get_list(auth: GitHubAuth, path: str) -> list[Any]:
+    """Same as `_get` but expects a JSON array response (e.g. /user/repos)."""
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        resp = await client.get(
+            f"{GITHUB_API}{path}",
+            headers={
+                "Authorization": _auth_header(auth),
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+    if resp.status_code >= 400:
+        raise GitHubAPIError(resp.status_code, _short_error(resp))
+    data = resp.json()
+    if not isinstance(data, list):
+        raise GitHubAPIError(502, f"expected JSON array from {path}, got {type(data).__name__}")
+    return data
 
 
 async def _post(auth: GitHubAuth, path: str, payload: dict[str, Any]) -> dict[str, Any]:
