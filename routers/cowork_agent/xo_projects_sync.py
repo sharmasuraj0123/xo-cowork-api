@@ -44,6 +44,14 @@ router = APIRouter(prefix="/api/xo-projects-sync", tags=["xo-projects-sync"])
 class SetupBody(BaseModel):
     passphrase: str = Field(..., min_length=1,
                              description="Symmetric encryption passphrase. Required to restore on any machine.")
+    confirm_rotation: bool = Field(
+        False,
+        description=(
+            "Required to be true when overwriting an existing, different "
+            "passphrase. Rotating the passphrase makes every previously-"
+            "encrypted snapshot permanently unrecoverable."
+        ),
+    )
 
 
 class BackupBody(BaseModel):
@@ -122,6 +130,33 @@ async def setup(body: SetupBody) -> JSONResponse:
         crypto.check_gpg_available()
     except crypto.GpgUnavailableError as exc:
         raise HTTPException(500, detail={"error": "gpg_missing", "detail": str(exc)})
+
+    # Rotation guardrail: if a passphrase is already set and the caller
+    # is trying to replace it with a *different* one, refuse unless the
+    # body explicitly confirms. Setting the same passphrase twice is a
+    # safe no-op and is allowed without confirmation.
+    existing = cfg_mod.load_config()
+    if (
+        existing.configured
+        and existing.passphrase != body.passphrase
+        and not body.confirm_rotation
+    ):
+        raise HTTPException(409, detail={
+            "error": "passphrase_already_set",
+            "detail": (
+                "A backup passphrase is already configured. Re-running "
+                "/setup with a different passphrase rotates it — every "
+                "existing snapshot was encrypted with the old passphrase "
+                "and will be permanently unrecoverable after rotation."
+            ),
+            "suggestion": (
+                "If the user has explicitly confirmed they don't need to "
+                "restore from existing snapshots, re-send with "
+                "`confirm_rotation: true`. To keep old backups restorable, "
+                "restore them under the current passphrase first, then "
+                "rotate, then back up again."
+            ),
+        })
 
     try:
         auth = await github.resolve_auth()

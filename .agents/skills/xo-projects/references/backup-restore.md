@@ -100,12 +100,20 @@ POST /api/xo-projects-sync/setup
 
 Setup persists `BACKUP_PASSWORD` into `xo-cowork-api/.env`, verifies that gpg is installed and the GitHub token resolves, and confirms which account is configured (via `repo_owner`). It does **not** create any GitHub repos — those are created lazily on first backup of each project.
 
-> **Guardrail — re-running `/setup` is destructive.**
-> If `status.configured` is already `true`, do **not** call `/setup` again unless the user has explicitly asked to rotate the backup passphrase. `/setup` *replaces* the configured passphrase; every existing snapshot was encrypted with the previous one and becomes permanently unrecoverable. This is the same shape as the `force: true` confirmation on restore — and strictly more dangerous, because there's no preview. Before re-running:
+> **Guardrail — re-running `/setup` is destructive, and the API enforces it.**
+> If a passphrase is already configured and the request carries a *different* one, the endpoint returns **409 `passphrase_already_set`** unless the body includes `"confirm_rotation": true`. Sending the *same* passphrase is a safe no-op and does not require the flag. The reason is hard: every existing snapshot was encrypted with the previous passphrase and becomes permanently unrecoverable after rotation. This is the same shape as the `force: true` confirmation on restore — strictly more dangerous, because there's no preview.
+>
+> Before retrying with `confirm_rotation: true`:
 > 1. Tell the user, plainly: *"This will make every existing backup unrecoverable. Snapshots can't be re-decrypted with the new passphrase."*
 > 2. Ask them to confirm they don't need to restore anything from existing snapshots.
-> 3. Only then proceed.
-> If they want to rotate the passphrase *and* keep their old backups available, the answer is: restore everything first under the current passphrase, then re-setup, then back up again.
+> 3. Only then re-send the request with the flag set.
+>
+> If they want to rotate *and* keep their old backups available, the answer is: restore everything first under the current passphrase, then rotate, then back up again.
+>
+> ```json
+> POST /api/xo-projects-sync/setup
+> { "passphrase": "<new>", "confirm_rotation": true }
+> ```
 
 ## Token resolution
 
@@ -245,6 +253,7 @@ Every backup / restore / list operation uses an **ephemeral shallow clone** in a
 | 404 `project_not_found` | Local project doesn't exist (backup) | The project hasn't been created yet — list projects or scaffold first |
 | 404 `snapshot_not_found` | No `xo-project-<id>` repo on GitHub, OR repo exists but has no valid manifests, OR pinned `snapshot_id` is wrong | Check `GET /projects` for valid ids |
 | 409 `project_exists` | Restore target exists locally | Ask user to confirm overwrite, then retry with `force: true` |
+| 409 `passphrase_already_set` | `/setup` called with a different passphrase than the one already configured | Read the rotation guardrail above. Only retry with `confirm_rotation: true` after the user explicitly accepts that existing backups become unrecoverable |
 | 500 `gpg_missing` | `gpg` not installed on host | Run `sudo apt-get install -y gnupg` (host responsibility, not user-fixable from chat) |
 | 502 `verify_failed` | Snapshot sha256 doesn't match manifest | Snapshot is corrupted; try a different snapshot id |
 | 502 `repo_create_failed` | Token lacks `repo` scope or GitHub rejected | Regenerate PAT with `repo` scope |
