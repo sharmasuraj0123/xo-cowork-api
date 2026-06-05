@@ -3,9 +3,9 @@ Runtime + .env config for xo-projects-sync.
 
 Two responsibilities:
 
-1. Read the live runtime config (`BACKUP_REPO_NAME`, `BACKUP_PASSWORD`,
-   `GITHUB_PAT`) from `os.environ`. These are populated by dotenv at
-   process start and may be live-updated by `upsert_env`.
+1. Read the live runtime config (`BACKUP_PASSWORD`, `GITHUB_PAT`) from
+   `os.environ`. These are populated by dotenv at process start and may
+   be live-updated by `upsert_env`.
 2. Write new values to the project's `.env` file with surgical
    line-level upsert so existing lines, formatting, and comments are
    preserved. Also reflect writes into `os.environ` so the current
@@ -29,14 +29,14 @@ _DEFAULT_ENV_PATH = _REPO_ROOT / ".env"
 
 # Env var names — single source of truth so the router and skill docs
 # don't drift from the storage code.
-ENV_REPO_NAME = "BACKUP_REPO_NAME"
 ENV_PASSPHRASE = "BACKUP_PASSWORD"
 ENV_GITHUB_PAT = "GITHUB_PAT"
 
-# Local staging clone — git operations happen here. Lives outside
-# ~/xo-projects so a backup or restore can't accidentally touch the
-# live project tree.
-LOCAL_STAGING_DIR = Path.home() / ".xo-projects-backup"
+# Per-project backup repos are named `<BACKUP_REPO_PREFIX><project_id>`
+# on the user's GitHub account. The prefix is what lets us discover
+# our repos via `GET /user/repos` without colliding with the user's
+# unrelated repositories.
+BACKUP_REPO_PREFIX = "xo-project-"
 
 # How many timestamped snapshots to keep per project before pruning.
 MAX_VERSIONS_PER_PROJECT = 10
@@ -45,34 +45,35 @@ MAX_VERSIONS_PER_PROJECT = 10
 # per file; we go a touch under so a manifest + part fits comfortably.
 CHUNK_SIZE_BYTES = 95 * 1024 * 1024
 
-# Default repo name when the caller didn't pick one at /setup.
-DEFAULT_REPO_NAME = "xo-projects-backup"
-
 
 @dataclass(frozen=True)
 class SyncConfig:
     """Snapshot of the runtime config read fresh from os.environ.
 
-    `configured` is true iff both repo_name and passphrase are present.
-    Token source ("connector" / "env" / "missing") is the responsibility
-    of the github module — kept out of this snapshot so SyncConfig
-    stays purely about persisted settings.
+    `configured` is true iff the passphrase is present. The repo name is
+    derived per-project (see `repo_name_for`); there is no shared repo
+    name to persist anymore. Token source ("connector" / "env" /
+    "missing") is the responsibility of the github module — kept out of
+    this snapshot so SyncConfig stays purely about persisted settings.
     """
 
-    repo_name: str | None
     passphrase: str | None
 
     @property
     def configured(self) -> bool:
-        return bool(self.repo_name) and bool(self.passphrase)
+        return bool(self.passphrase)
 
 
 def load_config() -> SyncConfig:
     """Read the current config from process env. Re-callable; no caching."""
     return SyncConfig(
-        repo_name=(os.environ.get(ENV_REPO_NAME) or "").strip() or None,
         passphrase=(os.environ.get(ENV_PASSPHRASE) or "").strip() or None,
     )
+
+
+def repo_name_for(project_id: str) -> str:
+    """GitHub repo name for a given xo-project id."""
+    return f"{BACKUP_REPO_PREFIX}{project_id}"
 
 
 # Matches a KEY=... assignment at start of line (ignoring leading whitespace).
