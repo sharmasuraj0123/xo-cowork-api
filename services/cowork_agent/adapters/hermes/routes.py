@@ -53,7 +53,12 @@ from services.cowork_agent.adapters.hermes.profile_env import (
     save_env_entries,
     upsert_env_entry,
 )
-from services.cowork_agent.hermes_env import upsert_hermes_env_entry
+# Default (non-profile) ~/.hermes/.env writes go through the shared
+# AGENT_NAME-resolved helper. These routes mount only when hermes is the
+# active agent, so get_active_agent().env_file is ~/.hermes/.env — no
+# hermes-pinned env module needed. Aliased to avoid colliding with the
+# profile-scoped upsert_env_entry imported above.
+from services.cowork_agent.agent_env import upsert_env_entry as upsert_default_env_entry
 from services.cowork_agent.hermes_state_db import list_all_profile_names
 from services.cowork_agent.settings import HERMES_DIR
 
@@ -1623,7 +1628,7 @@ async def add_hermes_channel(request: Request):
 
     try:
         for env_key, value in to_upsert:
-            upsert_hermes_env_entry(env_key, value)
+            upsert_default_env_entry(env_key, value)
     except Exception as e:  # noqa: BLE001 — surface the real reason
         return JSONResponse(
             status_code=500,
@@ -1767,3 +1772,121 @@ async def hermes_restart():
     """
     rc, output = await _run_hermes_sh("restart", timeout_s=90.0)
     return {"ok": rc == 0, "status": "restarted" if rc == 0 else "error", "output": output}
+
+
+# ── Hermes config + provider keys ────────────────────────────────────────────
+#
+# The agent-agnostic /api/config/* routes (routers/cowork_agent/config.py)
+# already target the active agent. These hermes-scoped variants live here so
+# they mount only when hermes is active — at which point get_active_agent() is
+# hermes, so the shared agent_env helper writes ~/.hermes/.env. No core code
+# names hermes and no hermes-pinned env module is needed.
+
+
+@router.get("/api/config/hermes")
+def get_hermes_config():
+    """Return ``~/.hermes/config.yaml`` parsed to JSON with sensitive fields masked.
+
+    Returns 404 if the file doesn't exist yet (fresh install before
+    ``hermes setup`` runs).
+    """
+    config_path = _HERMES.config_file
+    if not config_path.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"{config_path.name} not found at {config_path}"},
+        )
+
+    try:
+        raw = yaml.safe_load(config_path.read_text()) or {}
+    except yaml.YAMLError as e:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Failed to parse {config_path.name}: {e}"},
+        )
+
+    if not isinstance(raw, dict):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Unexpected top-level shape in {config_path.name}: {type(raw).__name__}"},
+        )
+
+    return _mask_sensitive(raw)
+
+
+async def _run_provider_provisioning(provider_id: str, argvs: list[list[str]]) -> None:
+    """Run hermes's CLI chain for a provider, appending output to the
+    provisioning log. Argvs are pre-rendered from the manifest's command
+    templates — no user input is interpolated. Chain aborts on the first
+    non-zero exit so a broken ``models set`` doesn't leave later aliases
+    pointing at nothing.
+    """
+    log_path = _HERMES.provisioning_log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).isoformat()
+    with log_path.open("a") as log:
+        log.write(f"\n=== {ts} provisioning: {provider_id} ===\n")
+        for argv in argvs:
+            log.write(f"$ {' '.join(argv)}\n")
+            log.flush()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=str(_HERMES.cwd),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await proc.communicate()
+                log.write(stdout.decode(errors="replace"))
+                log.write(f"[exit {proc.returncode}]\n")
+                if proc.returncode != 0:
+                    log.write("[chain aborted]\n")
+                    return
+            except Exception as e:  # noqa: BLE001 — log every failure, keep going
+                log.write(f"[exception] {e}\n[chain aborted]\n")
+                return
+        log.write("[chain ok]\n")
+
+
+@router.post("/api/config/hermes/providers/{provider_id}/key")
+async def save_hermes_provider_key(provider_id: str, request: Request):
+    """Persist a provider API key into ``~/.hermes/.env`` and (optionally) kick
+    off the hermes CLI follow-up chain declared in the manifest. Provider list
+    lives in ``config/agents/hermes/commands.json`` → ``providers.*``.
+
+    Returns 200 once the key is written; any CLI follow-up runs in the
+    background and is logged to ``~/.hermes/provisioning.log``.
+    """
+    recipe = _HERMES.providers.get(provider_id)
+    if recipe is None:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Unsupported hermes provider: {provider_id}"},
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    api_key = (body.get("api_key") or "").strip() if isinstance(body, dict) else ""
+    if not api_key:
+        return JSONResponse(status_code=400, content={"detail": "api_key is required"})
+
+    try:
+        upsert_default_env_entry(recipe["env_key"], api_key)
+    except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
+        return JSONResponse(status_code=500, content={"detail": f"Failed to save key: {e}"})
+
+    try:
+        argvs = _HERMES.render_recipe_commands(recipe.get("commands") or [])
+    except (KeyError, ValueError) as e:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Invalid hermes provider recipe for '{provider_id}': {e}"},
+        )
+
+    if argvs:
+        asyncio.create_task(_run_provider_provisioning(provider_id, argvs))
+
+    return {"ok": True, "provider": provider_id, "env_key": recipe["env_key"], "provisioning": "started" if argvs else "skipped"}
