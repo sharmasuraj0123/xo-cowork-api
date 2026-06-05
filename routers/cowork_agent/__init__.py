@@ -29,6 +29,7 @@ from .vercel import router as vercel_router
 from .workspace_memory import router as workspace_memory_router
 from .bff import bff_routers
 from .xo_projects_sync import router as xo_projects_sync_router
+from .relay import router as relay_router
 
 all_routers: list[APIRouter] = [
     sessions_router,
@@ -51,4 +52,5 @@ all_routers: list[APIRouter] = [
     manus_router,
     *bff_routers,
     xo_projects_sync_router,
+    relay_router,
 ]

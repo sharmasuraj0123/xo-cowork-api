@@ -504,6 +504,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Watcher failed to start (non-fatal): {e}")
 
+    # Commit relay — scans watched git repos and forwards commit hashes to paired workspaces.
+    _scanner_task = None
+    try:
+        from services.cowork_agent.commit_relay.scanner import start_commit_scanner
+        _scanner_task = asyncio.create_task(start_commit_scanner())
+        print("   CommitScanner: background task started")
+    except Exception as e:
+        print(f"⚠️ CommitScanner failed to start (non-fatal): {e}")
+
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
     yield
@@ -527,6 +536,13 @@ async def lifespan(app: FastAPI):
         _watcher_task.cancel()
         try:
             await _watcher_task
+        except asyncio.CancelledError:
+            pass
+
+    if _scanner_task:
+        _scanner_task.cancel()
+        try:
+            await _scanner_task
         except asyncio.CancelledError:
             pass
 
