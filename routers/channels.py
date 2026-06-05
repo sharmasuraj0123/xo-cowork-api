@@ -15,6 +15,8 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 
+from services.cowork_agent.adapters.cli_status import CliStatusError
+from services.cowork_agent.adapters.loader import load_capability
 from services.xo_manifest import patch_status, resolve_agent_name
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -34,22 +36,11 @@ async def channels_status():
     """Return per-agent channel status. Dispatches on AGENT_NAME."""
     agent = resolve_agent_name()
 
-    if agent == "openclaw":
-        from services.cowork_agent.adapters.openclaw.channels_status import (
-            OpenclawStatusError as _StatusError,
-            get_channels_status,
-        )
-    elif agent == "hermes":
-        from services.cowork_agent.adapters.hermes.channels_status import (
-            HermesStatusError as _StatusError,
-            get_channels_status,
-        )
-    elif agent == "claude_code":
-        from services.cowork_agent.adapters.claude_code.channels_status import (
-            ClaudeCodeStatusError as _StatusError,
-            get_channels_status,
-        )
-    else:
+    # Resolve the active agent's channels-status module by AGENT_NAME — no
+    # if/elif over agent names. Missing module → 501.
+    try:
+        mod = load_capability("channels_status", agent=agent)
+    except ModuleNotFoundError:
         raise HTTPException(
             status_code=501,
             detail={
@@ -60,11 +51,11 @@ async def channels_status():
         )
 
     try:
-        result = await get_channels_status()
+        result = await mod.get_channels_status()
         # Mirror into xo.json without delaying the response.
         asyncio.create_task(patch_status("channels", result))
         return result
-    except _StatusError as e:
+    except CliStatusError as e:
         raise HTTPException(
             status_code=_ERROR_STATUS.get(e.code, 502),
             detail={

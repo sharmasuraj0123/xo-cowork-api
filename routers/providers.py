@@ -18,6 +18,7 @@ runs ``claude auth login``, edits .env, etc.), so we keep it live-only.
 
 from fastapi import APIRouter, HTTPException
 
+from services.cowork_agent.adapters.loader import load_capability
 from services.xo_manifest import resolve_agent_name
 
 router = APIRouter(prefix="/providers", tags=["providers"])
@@ -28,22 +29,11 @@ async def providers_status():
     """Return per-agent provider connection status."""
     agent = resolve_agent_name()
 
-    if agent == "openclaw":
-        from services.cowork_agent.adapters.openclaw.providers_status import (
-            get_providers_status,
-        )
-    elif agent == "hermes":
-        from services.cowork_agent.adapters.hermes.providers_status import (
-            get_providers_status,
-        )
-    elif agent == "claude_code":
-        from services.cowork_agent.adapters.claude_code.providers_status import (
-            get_providers_status,
-        )
-    else:
-        # Future agent without a wired adapter. 501 distinguishes
-        # "no source yet" from "agent unknown" — same convention as
-        # the models / channels routers.
+    # Resolve the active agent's providers-status module by AGENT_NAME — no
+    # if/elif over agent names. Missing module → 501.
+    try:
+        mod = load_capability("providers_status", agent=agent)
+    except ModuleNotFoundError:
         raise HTTPException(
             status_code=501,
             detail={
@@ -54,7 +44,7 @@ async def providers_status():
         )
 
     try:
-        return await get_providers_status()
+        return await mod.get_providers_status()
     except Exception as e:
         raise HTTPException(
             status_code=500,

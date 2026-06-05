@@ -13,19 +13,20 @@ No if/elif dispatcher. Single resolver, single source of truth.
 """
 from __future__ import annotations
 
-import importlib
 from types import ModuleType
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.adapters.loader import load_capability
 
 
 def load_usage_module() -> ModuleType:
     """Return the active agent's usage module.
+
+    Thin alias over :func:`services.cowork_agent.adapters.loader.load_capability`
+    (``capability="usage"``) — kept for the existing call sites.
 
     Raises:
         ModuleNotFoundError: if the active agent has no
             ``services/cowork_agent/adapters/<name>/usage.py``. The error
             names the path we tried to import so the fix is obvious.
     """
-    name = get_active_agent().name
-    return importlib.import_module(f"services.cowork_agent.adapters.{name}.usage")
+    return load_capability("usage")

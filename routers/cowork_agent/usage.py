@@ -25,7 +25,7 @@ def _load_or_501():
     except ModuleNotFoundError as e:
         raise HTTPException(
             status_code=501,
-            detail=f"no usage module for active agent (tried config.agents.<name>.usage.usage): {e}",
+            detail=f"no usage module for active agent (tried services.cowork_agent.adapters.<AGENT_NAME>.usage): {e}",
         )
 
 
