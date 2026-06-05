@@ -9,6 +9,8 @@ is intentionally not migrated (xo-cowork-api's existing /health stays).
 
 from fastapi import APIRouter
 
+from services.cowork_agent.adapters.loader import try_load_capability
+
 from .agents import router as agents_router
 from .channels import router as channels_router
 from .chat import router as chat_router
@@ -17,7 +19,6 @@ from .files import router as files_router
 from .fts import router as fts_router
 from .gdrive import router as gdrive_router
 from .github import router as github_router
-from .hermes_profile import router as hermes_profile_router
 from .manus import router as manus_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
@@ -30,13 +31,27 @@ from .workspace_memory import router as workspace_memory_router
 from .bff import bff_routers
 from .xo_projects_sync import router as xo_projects_sync_router
 
+
+def _active_agent_routes() -> list[APIRouter]:
+    """Mount the active agent's own routes, resolved by AGENT_NAME.
+
+    Agent-specific endpoint surfaces (e.g. hermes profile management) live at
+    ``services/cowork_agent/adapters/<AGENT_NAME>/routes.py``. They are mounted
+    only when that agent is active — no core code names a specific agent, and
+    an agent without a ``routes`` module simply contributes nothing.
+    """
+    mod = try_load_capability("routes")
+    router = getattr(mod, "router", None) if mod else None
+    return [router] if router is not None else []
+
+
 all_routers: list[APIRouter] = [
     sessions_router,
     chat_router,
     agents_router,
     config_router,
     channels_router,
-    hermes_profile_router,
+    *_active_agent_routes(),
     files_router,
     workspace_memory_router,
     secrets_router,
