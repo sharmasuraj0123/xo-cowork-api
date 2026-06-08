@@ -19,8 +19,8 @@ This module owns only the invocation half:
 output — each adapter keeps its own short tail for that, preserving its exact
 error code and detail string.
 
-``label`` is the binary's display noun (``"openclaw"``/``"claude"``/``"hermes"``)
-and is used only to keep error *messages* identical to the pre-extraction text.
+``label`` is the binary's display noun (the agent's CLI command name) and is
+used only to keep error *messages* identical to the pre-extraction text.
 """
 from __future__ import annotations
 
