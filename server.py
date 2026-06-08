@@ -21,8 +21,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
 import uvicorn
-from config.models.claude_code_client import ClaudeCodeClient
-from config.models.codex_code_client import CodexCodeClient
+from config.models.claude_code import ClaudeCodeClient
+from config.models.codex import CodexCodeClient
 
 # Load environment variables
 load_dotenv()
