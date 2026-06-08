@@ -636,9 +636,15 @@ async def delete_session(project_id: str):
 
 @app.post("/gateway/restart")
 async def gateway_restart():
-    """Restart the OpenClaw gateway."""
+    """Restart the active agent's gateway via its ``config/agents/<agent>/agent.sh``.
+
+    Resolves the script from the active ``AGENT_NAME`` rather than hardcoding a
+    backend; agents without an ``agent.sh`` (e.g. claude_code) return 404.
+    """
     import subprocess
-    script = (Path(__file__).resolve().parent / "config" / "agents" / "openclaw" / "agent.sh").resolve()
+    from services.xo_manifest import resolve_agent_name
+    agent = resolve_agent_name()
+    script = (Path(__file__).resolve().parent / "config" / "agents" / agent / "agent.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="Gateway script not found")
     try:
