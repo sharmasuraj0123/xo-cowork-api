@@ -230,3 +230,15 @@ def get_agent(name: str) -> AgentManifest:
         available = ", ".join(sorted(_MANIFESTS))
         raise KeyError(f"unknown agent '{name}'. Available: {available}")
     return _MANIFESTS[name]
+
+
+def all_agents() -> list[AgentManifest]:
+    """Every discovered agent manifest.
+
+    For host-level bootstraps that target all installed agents (e.g. the
+    bundled-skill installer), so they iterate manifests instead of hardcoding
+    backend names or home-dir paths.
+    """
+    _ensure_loaded()
+    assert _MANIFESTS is not None
+    return list(_MANIFESTS.values())

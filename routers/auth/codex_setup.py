@@ -65,8 +65,11 @@ def _project_env_path() -> str:
     return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _openclaw_env_path() -> str:
-    return str(Path.home() / ".openclaw" / ".env")
+def _agent_env_path() -> str:
+    """The active agent's ``.env`` (resolved from its manifest — e.g. the
+    openclaw gateway's ``~/.openclaw/.env``)."""
+    from services.cowork_agent.registry.agent_registry import get_active_agent
+    return str(get_active_agent().env_file)
 
 
 def _upsert_env_key(env_path: str, key: str, value: str) -> None:
@@ -92,8 +95,9 @@ def _upsert_env_key(env_path: str, key: str, value: str) -> None:
 
 
 def _persist_token_to_env_files(token: str) -> None:
-    """Write OPENAI_CODEX_ACCESS_TOKEN to project .env and ~/.openclaw/.env."""
-    for env_path in [_project_env_path(), _openclaw_env_path()]:
+    """Write OPENAI_CODEX_ACCESS_TOKEN to the project .env and the active
+    agent's .env (resolved from its manifest)."""
+    for env_path in [_project_env_path(), _agent_env_path()]:
         for key in _TOKEN_ENV_KEYS:
             try:
                 _upsert_env_key(env_path, key, token)
@@ -194,6 +198,12 @@ def _read_codex_credentials() -> Optional[dict]:
     return None
 
 
+# NOTE: codex is a legacy Plane-A model client (no adapter). The two writes
+# below target the openclaw gateway's own credential store — openclaw.json and
+# the main agent's auth-profiles.json — whose schemas are openclaw-specific.
+# They are intentionally NOT routed through the active-agent manifest (that
+# would write openclaw-shaped keys into another agent's config). Old but needed;
+# allowlisted in scripts/check_agent_modularity.py.
 def _openclaw_config_path() -> str:
     return str(Path.home() / ".openclaw" / "openclaw.json")
 

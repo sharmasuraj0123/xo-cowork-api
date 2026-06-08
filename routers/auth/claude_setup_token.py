@@ -75,9 +75,12 @@ def _project_env_path() -> str:
     return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _openclaw_env_path() -> str:
-    """~/.openclaw/.env used by the openclaw gateway."""
-    return str(Path.home() / ".openclaw" / ".env")
+def _agent_env_path() -> str:
+    """The active agent's ``.env`` (resolved from its manifest — e.g. the
+    openclaw gateway's ``~/.openclaw/.env``). The Claude OAuth token is mirrored
+    here so the active agent's runtime can read it."""
+    from services.cowork_agent.registry.agent_registry import get_active_agent
+    return str(get_active_agent().env_file)
 
 
 def _read_token_from_cli_credentials() -> Optional[str]:
@@ -141,9 +144,9 @@ def _persist_token_to_env_files(token: str) -> None:
     """
     Write CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY to:
       1. Project .env  (xo-cowork-api/.env)
-      2. OpenClaw .env  (~/.openclaw/.env)
+      2. The active agent's .env (resolved from its manifest)
     """
-    env_paths = [_project_env_path(), _openclaw_env_path()]
+    env_paths = [_project_env_path(), _agent_env_path()]
     for env_path in env_paths:
         for key in _TOKEN_ENV_KEYS:
             try:
