@@ -483,6 +483,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ xo.json: setup failed (non-fatal): {exc}")
 
+    # Start the cross-workspace commit relay subscriber (SSE, no polling).
+    # Only when RELAY_URL is configured; non-fatal otherwise. On each ping it
+    # git-fetches the project repo so the commit is locally available.
+    _relay_task = None
+    if os.getenv("RELAY_URL", "").strip():
+        try:
+            from services.cowork_agent.relay import run_relay_subscriber
+            _relay_task = asyncio.create_task(run_relay_subscriber())
+            print("   relay: subscriber started (SSE, no polling)")
+        except Exception as exc:
+            print(f"⚠️ relay subscriber failed to start (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
@@ -534,6 +546,13 @@ async def lifespan(app: FastAPI):
         _xo_status_task.cancel()
         try:
             await _xo_status_task
+        except asyncio.CancelledError:
+            pass
+
+    if _relay_task and not _relay_task.done():
+        _relay_task.cancel()
+        try:
+            await _relay_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")
