@@ -8,16 +8,17 @@ to render.
 
 Two layers live in the file:
 
-1. Static capability flags — hand-tuned per agent in `DEFAULTS`. Written
-   once at server startup, overwriting any prior file.
+1. Static capability flags — sourced per agent from
+   `config/agents/<agent>/capabilities.json`. Written once at server
+   startup, overwriting any prior file.
 2. Live status (openclaw only, for now) — the full response from
    `/openclaw/models/status` and `/openclaw/channels/status`, embedded
    under a `status` key in the corresponding section. Refreshed in a
    background task at startup and on every endpoint hit. Deferred for
    claude_code and hermes until they have their own status sources.
 
-The defaults table is the source of truth; cascade rule (parent
-`enabled=false` → children false) is applied at build time so future
+Each agent's `capabilities.json` is the source of truth; the cascade rule
+(parent `enabled=false` → children false) is applied at build time so future
 toggle changes propagate without hand-editing leaves.
 """
 
@@ -35,81 +36,40 @@ from services.cowork_agent.project_layout import xo_projects_root
 
 
 
-def _all_data_true() -> dict:
-    return {
-        "enabled": True,
-        "google_drive": {"enabled": True},
-        "one_drive":    {"enabled": True},
-        "github":       {"enabled": True},
-        "vercel":       {"enabled": True},
-    }
+_AGENTS_DIR = Path(__file__).resolve().parents[1] / "config" / "agents"
 
 
-def _channels(enabled: bool, telegram: bool, slack: bool) -> dict:
-    return {
-        "enabled": enabled,
-        "telegram": {"enabled": telegram},
-        "slack":    {"enabled": slack},
-    }
+def _capabilities_path(agent: str) -> Path:
+    """``config/agents/<agent>/capabilities.json`` — the per-agent static
+    capability flags (Models / Data / Channels / Secrets and their leaves).
+
+    Sourced from the agent's own config dir, not a hardcoded table, so adding
+    a backend is "drop a folder" and no core file names an agent.
+    """
+    return _AGENTS_DIR / agent / "capabilities.json"
 
 
-DEFAULTS: dict[str, dict] = {
-    "openclaw": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": False},
-                "codex":       {"enabled": True},
-            },
-            "api_keys": {
-                "enabled":    True,
-                "anthropic":  {"enabled": True},
-                "openai":     {"enabled": True},
-                "openrouter": {"enabled": True},
-            },
-        },
-        "data": _all_data_true(),
-        "channels": _channels(enabled=True, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-    "claude_code": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": True},
-                "codex":       {"enabled": False},
-            },
-            "api_keys": {
-                "enabled":    True,
-                "anthropic":  {"enabled": True},
-                "openai":     {"enabled": False},
-                "openrouter": {"enabled": True},
-            },
-        },
-        "data": _all_data_true(),
-        # channels.enabled is false; the cascade rule zeros out the children.
-        "channels": _channels(enabled=False, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-    "hermes": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": False},
-                "codex":       {"enabled": False},
-            },
-            "api_keys": {
-                "enabled":    True,
-                "anthropic":  {"enabled": True},
-                "openai":     {"enabled": True},
-                "openrouter": {"enabled": True},
-            },
-        },
-        "data": _all_data_true(),
-        "channels": _channels(enabled=True, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-}
+def _load_capabilities(agent: str) -> dict | None:
+    """Return the parsed capabilities dict for ``agent``, or None if the agent
+    has no ``capabilities.json`` (unknown / not installed / malformed)."""
+    path = _capabilities_path(agent)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _known_agents() -> list[str]:
+    """Agents that ship a ``capabilities.json`` (for valid-list messages)."""
+    if not _AGENTS_DIR.is_dir():
+        return []
+    return sorted(
+        d.name for d in _AGENTS_DIR.iterdir()
+        if d.is_dir() and (d / "capabilities.json").is_file()
+    )
 
 
 _LOCK = asyncio.Lock()
@@ -147,10 +107,11 @@ def _apply_cascade(manifest: dict) -> dict:
 def build_static_manifest(agent: str) -> dict:
     """Return a fresh manifest dict for `agent` with cascade applied and
     the `agent` field set. Caller owns the returned dict."""
-    if agent not in DEFAULTS:
-        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(sorted(DEFAULTS))})")
+    capabilities = _load_capabilities(agent)
+    if capabilities is None:
+        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(_known_agents())})")
     manifest: dict[str, Any] = {"agent": agent}
-    manifest.update(copy.deepcopy(DEFAULTS[agent]))
+    manifest.update(copy.deepcopy(capabilities))
     return _apply_cascade(manifest)
 
 
@@ -187,10 +148,10 @@ async def write_static_manifest() -> None:
     means we deliberately do NOT touch any existing file.
     """
     agent = resolve_agent_name()
-    if agent not in DEFAULTS:
+    if _load_capabilities(agent) is None:
         print(
             f"⚠️ xo.json: AGENT_NAME='{agent}' is not a known agent "
-            f"(valid: {', '.join(sorted(DEFAULTS))}) — skipping"
+            f"(valid: {', '.join(_known_agents())}) — skipping"
         )
         return
 
