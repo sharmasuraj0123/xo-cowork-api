@@ -240,8 +240,3 @@ async def seed_agent_status() -> None:
         _seed("channels", fetch_channels),
         return_exceptions=True,
     )
-
-
-# Backwards-compat alias for the earlier openclaw-only name. Safe to remove
-# once no callers reference it.
-seed_openclaw_status = seed_agent_status
