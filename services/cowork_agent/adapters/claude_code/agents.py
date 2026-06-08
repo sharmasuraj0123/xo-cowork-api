@@ -29,7 +29,7 @@ from services.cowork_agent.project_layout import (
     xo_dir,
     xo_projects_root,
 )
-from services.cowork_agent.settings import CLAUDE_COWORK_DIR
+from services.cowork_agent.registry.settings import CLAUDE_COWORK_DIR
 
 
 # ── On-disk record helpers ────────────────────────────────────────────────────

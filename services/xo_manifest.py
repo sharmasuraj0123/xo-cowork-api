@@ -127,7 +127,7 @@ def resolve_agent_name() -> str:
     explicit = (os.getenv("AGENT_NAME", "") or "").strip()
     if explicit:
         return explicit
-    from services.cowork_agent.agent_registry import get_active_agent
+    from services.cowork_agent.registry.agent_registry import get_active_agent
     return get_active_agent().name
 
 

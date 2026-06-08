@@ -42,7 +42,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from services.cowork_agent.agent_registry import get_agent
+from services.cowork_agent.registry.agent_registry import get_agent
 from services.cowork_agent.adapters.hermes import gateway_pool
 from services.cowork_agent.helpers import _mask_sensitive
 from services.cowork_agent.adapters.hermes.profile_env import (
@@ -58,7 +58,7 @@ from services.cowork_agent.adapters.hermes.profile_env import (
 # active agent, so get_active_agent().env_file is ~/.hermes/.env — no
 # hermes-pinned env module needed. Aliased to avoid colliding with the
 # profile-scoped upsert_env_entry imported above.
-from services.cowork_agent.agent_env import upsert_env_entry as upsert_default_env_entry
+from services.cowork_agent.registry.agent_env import upsert_env_entry as upsert_default_env_entry
 from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
 from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 

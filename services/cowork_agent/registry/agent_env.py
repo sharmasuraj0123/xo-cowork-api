@@ -23,7 +23,7 @@ so they share this one helper instead of duplicating the upsert logic.
 import re
 from pathlib import Path
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 ENV_FILE: Path = get_active_agent().env_file
 

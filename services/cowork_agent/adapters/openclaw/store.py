@@ -17,7 +17,7 @@ from services.cowork_agent.adapters.openclaw.paths import (
     OPENCLAW_DIR,
     OPENCLAW_JSON,
 )
-from services.cowork_agent.settings import _WORKSPACE_SEED_FILES
+from services.cowork_agent.registry.settings import _WORKSPACE_SEED_FILES
 from services.cowork_agent.helpers import normalize_agent_id
 
 

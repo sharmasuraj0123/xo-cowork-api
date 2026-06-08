@@ -19,9 +19,9 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.agent_registry import get_agent, get_active_agent
+from services.cowork_agent.registry.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive
-from services.cowork_agent.agent_env import upsert_env_entry
+from services.cowork_agent.registry.agent_env import upsert_env_entry
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.adapters.loader import try_load_capability
 
@@ -238,7 +238,7 @@ def get_workspace_config():
         "default": "<active_backend>"
       }
     """
-    from services.cowork_agent.agent_registry import _discover_manifests
+    from services.cowork_agent.registry.agent_registry import _discover_manifests
 
     projects_root = str(xo_projects_root())
     default_backend = os.getenv("AGENT_NAME", _AGENT.name)

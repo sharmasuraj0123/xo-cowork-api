@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.agent_registry import get_active_agent
-from services.cowork_agent.agent_env import upsert_env_entry
+from services.cowork_agent.registry.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_env import upsert_env_entry
 
 router = APIRouter()
 

@@ -9,7 +9,7 @@ capability, so it doesn't special-case hermes.
 """
 from __future__ import annotations
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 
 def resolve_agent_id(body: dict) -> str | None:

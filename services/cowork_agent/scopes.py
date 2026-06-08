@@ -22,7 +22,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Union
 
-from services.cowork_agent import agent_env, project_layout
+from services.cowork_agent import project_layout
+from services.cowork_agent.registry import agent_env
 from services.cowork_agent.helpers import normalize_agent_id
 from services.cowork_agent.visualizer import reader as visualizer_reader
 

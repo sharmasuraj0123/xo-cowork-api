@@ -10,7 +10,7 @@ CLI or anything else — has a single, consistent entry point with:
 * optional append-to-log-file for background provisioning flows,
 * structured `CommandResult` return type (no bare ints floating around).
 
-Designed to pair with `services.cowork_agent.agent_registry.AgentManifest.command`,
+Designed to pair with `services.cowork_agent.registry.agent_registry.AgentManifest.command`,
 which renders templated argvs from the manifest — those argvs go directly
 into `run` / `run_sync` here.
 
@@ -18,7 +18,7 @@ Examples
 --------
     # Async (inside a route handler or background task):
     from utils.commands import run
-    from services.cowork_agent.agent_registry import get_active_agent
+    from services.cowork_agent.registry.agent_registry import get_active_agent
 
     agent = get_active_agent()
     argv = agent.command("models_set", model="anthropic/claude-opus-4.6")

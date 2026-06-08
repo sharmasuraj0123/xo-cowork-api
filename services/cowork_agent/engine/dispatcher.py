@@ -1,8 +1,8 @@
 from __future__ import annotations
 from typing import Any, AsyncIterator
 
-from services.cowork_agent.adapter_registry import get_adapter
-from services.cowork_agent.settings import load_agent_config
+from services.cowork_agent.registry.adapter_registry import get_adapter
+from services.cowork_agent.registry.settings import load_agent_config
 
 
 class AgentDispatcher:

@@ -18,7 +18,7 @@ from services.cowork_agent.adapters.openclaw.paths import (
     OPENCLAW_GATEWAY_TOKEN,
     OPENCLAW_MODEL,
 )
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 
 def _session_header() -> str:

@@ -21,7 +21,7 @@ from __future__ import annotations
 import importlib
 from types import ModuleType
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 
 def load_capability(capability: str, *, agent: str | None = None) -> ModuleType:

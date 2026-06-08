@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # registry/ → cowork_agent/ → services/ → repo root
 _MANIFEST_DIR = _REPO_ROOT / "config" / "agents"
 
 

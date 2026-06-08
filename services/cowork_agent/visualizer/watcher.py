@@ -18,7 +18,7 @@ import logging
 from collections import defaultdict
 from typing import Optional
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 from services.cowork_agent.project_layout import xo_dir
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import UsageObserved

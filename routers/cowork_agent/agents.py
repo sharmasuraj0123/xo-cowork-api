@@ -19,8 +19,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.cowork_agent.agent_registry import get_active_agent
-from services.cowork_agent.adapter_registry import list_adapters
+from services.cowork_agent.registry.agent_registry import get_active_agent
+from services.cowork_agent.registry.adapter_registry import list_adapters
 from services.cowork_agent.adapters.loader import try_load_capability
 from services.cowork_agent.helpers import normalize_agent_id
 

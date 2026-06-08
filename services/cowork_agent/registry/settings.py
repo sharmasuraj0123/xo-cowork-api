@@ -75,7 +75,7 @@ def load_agent_config(agent_name: str) -> dict:
     Example: "cli_path_env": "CLAUDE_CLI_PATH" → also sets "cli_path": <env value>.
     Raises FileNotFoundError if the settings file is absent.
     """
-    settings_path = _Path(__file__).resolve().parents[2] / "config" / "agents" / agent_name / "settings.json"
+    settings_path = _Path(__file__).resolve().parents[3] / "config" / "agents" / agent_name / "settings.json"
     if not settings_path.exists():
         raise FileNotFoundError(
             f"No settings file for agent '{agent_name}': expected {settings_path}. "

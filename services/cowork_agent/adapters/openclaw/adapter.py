@@ -37,7 +37,7 @@ class OpenclawAdapter(BaseAgentAdapter):
             OPENCLAW_GATEWAY_TOKEN,
             OPENCLAW_MODEL,
         )
-        from services.cowork_agent.agent_registry import get_active_agent
+        from services.cowork_agent.registry.agent_registry import get_active_agent
         from services.cowork_agent.adapters.openclaw.sessions import find_session_key
 
         if not session_id:

@@ -9,7 +9,7 @@ stale model rows for the real hermes profiles.
 
 from __future__ import annotations
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
 from services.cowork_agent.adapters.hermes.paths import HERMES_MODEL_CAPABILITIES
 

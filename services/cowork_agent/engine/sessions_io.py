@@ -211,7 +211,7 @@ def find_session_file(session_id: str) -> Path | None:
     # Native (non-project) sessions: ask each adapter to resolve the file by id
     # alone (used when no project was selected at chat time) — generic, each
     # backend resolves from its own native store or returns None.
-    from services.cowork_agent.adapter_registry import list_adapters
+    from services.cowork_agent.registry.adapter_registry import list_adapters
 
     for name in list_adapters():
         bmod = _sessions_capability(name)
@@ -248,7 +248,7 @@ def find_session_backend(session_id: str) -> str | None:
     # Not project-tagged: ask each adapter whether it owns this session via
     # its sessions capability (each backend scans its own native store).
     # No backend is named here.
-    from services.cowork_agent.adapter_registry import list_adapters
+    from services.cowork_agent.registry.adapter_registry import list_adapters
     from services.cowork_agent.adapters.loader import try_load_capability
 
     for name in list_adapters():

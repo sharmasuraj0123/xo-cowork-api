@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import services.cowork_agent.adapters as _adapters_pkg
 from services.cowork_agent.adapters.base import BaseAgentAdapter
 from services.cowork_agent.adapters.loader import load_capability
 
-_ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
+# Resolve from the adapters package itself, so this is independent of where
+# adapter_registry.py lives.
+_ADAPTERS_DIR = Path(_adapters_pkg.__file__).resolve().parent
 
 
 def get_adapter(name: str, config: dict) -> BaseAgentAdapter:

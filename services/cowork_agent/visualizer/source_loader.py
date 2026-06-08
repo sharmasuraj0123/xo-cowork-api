@@ -3,7 +3,7 @@ Dynamic loader for the active agent's visualizer source module.
 
 Mirrors :mod:`services.cowork_agent.engine.usage_loader`. The active agent is
 resolved from ``AGENT_NAME`` (via
-``services.cowork_agent.agent_registry.get_active_agent``); the
+``services.cowork_agent.registry.agent_registry.get_active_agent``); the
 corresponding source module is imported at
 ``services.cowork_agent.adapters.<name>.visualizer_source``.
 
@@ -22,7 +22,7 @@ import logging
 from types import ModuleType
 from typing import Optional
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 logger = logging.getLogger(__name__)
 

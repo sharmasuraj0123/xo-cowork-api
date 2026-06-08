@@ -48,7 +48,7 @@ import threading
 import time
 from pathlib import Path
 
-from services.cowork_agent.agent_registry import get_agent
+from services.cowork_agent.registry.agent_registry import get_agent
 
 log = logging.getLogger(__name__)
 

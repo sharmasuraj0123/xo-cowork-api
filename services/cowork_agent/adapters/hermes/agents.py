@@ -22,7 +22,7 @@ from pathlib import Path
 
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.agent_registry import get_agent
+from services.cowork_agent.registry.agent_registry import get_agent
 from services.cowork_agent.helpers import normalize_agent_id
 
 

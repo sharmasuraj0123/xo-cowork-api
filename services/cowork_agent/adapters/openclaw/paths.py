@@ -2,7 +2,7 @@
 OpenClaw on-disk layout + API config constants, sourced from the openclaw
 manifest (``get_agent("openclaw")``).
 
-These were historically defined in ``services.cowork_agent.settings`` as
+These were historically defined in ``services.cowork_agent.registry.settings`` as
 ``OPENCLAW_*`` / ``AGENTS_DIR``; they live here now so the agent-specific
 resolution sits in the openclaw adapter, not in core. ``settings`` re-exports
 the same names for backward compatibility, so existing
@@ -15,7 +15,7 @@ calls ``get_active_agent()``.
 """
 from __future__ import annotations
 
-from services.cowork_agent.agent_registry import get_agent
+from services.cowork_agent.registry.agent_registry import get_agent
 
 _OPENCLAW = get_agent("openclaw")
 

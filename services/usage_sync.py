@@ -24,7 +24,7 @@ from collections import defaultdict
 
 import httpx
 
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 from services.cowork_agent.engine.usage_loader import load_usage_module
 
 # ---------------------------------------------------------------------------

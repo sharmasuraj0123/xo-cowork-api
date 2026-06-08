@@ -198,7 +198,7 @@ async def chat_prompt(request: Request):
         workspace_hint = body.get("workspace", "")
         if workspace_hint:
             from services.cowork_agent.project_layout import xo_projects_root
-            from services.cowork_agent.settings import CLAUDE_COWORK_DIR
+            from services.cowork_agent.registry.settings import CLAUDE_COWORK_DIR
             try:
                 ws_path = __import__("pathlib").Path(workspace_hint).expanduser().resolve()
                 xo_root = xo_projects_root().resolve()

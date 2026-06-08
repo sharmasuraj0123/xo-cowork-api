@@ -10,7 +10,7 @@ share the same format and target the same file.
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.agent_env import load_env_entries, save_env_entries
+from services.cowork_agent.registry.agent_env import load_env_entries, save_env_entries
 
 router = APIRouter()
 

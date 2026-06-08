@@ -2,7 +2,7 @@
 Hermes on-disk layout + API config constants, sourced from the hermes manifest
 (``get_agent("hermes")``).
 
-These were historically defined in ``services.cowork_agent.settings`` as
+These were historically defined in ``services.cowork_agent.registry.settings`` as
 ``HERMES_*``; they live here now so the agent-specific resolution sits in the
 hermes adapter, not in core. ``settings`` re-exports the same names for
 backward compatibility.
@@ -13,7 +13,7 @@ consumer is hermes-specific and must always see hermes paths regardless of
 """
 from __future__ import annotations
 
-from services.cowork_agent.agent_registry import get_agent
+from services.cowork_agent.registry.agent_registry import get_agent
 
 _HERMES = get_agent("hermes")
 

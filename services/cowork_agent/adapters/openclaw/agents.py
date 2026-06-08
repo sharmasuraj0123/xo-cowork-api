@@ -39,7 +39,7 @@ from services.cowork_agent.adapters.openclaw.store import (
     write_openclaw_config,
 )
 from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR
-from services.cowork_agent.settings import _WORKSPACE_DOC_FILES
+from services.cowork_agent.registry.settings import _WORKSPACE_DOC_FILES
 
 
 def _agent_info_for_id(cfg: dict, agent_id: str, display_name: str | None, description: str) -> dict:
