@@ -1,50 +1,25 @@
 """
 Environment, paths, and constants for the cowork_agent subsystem.
 
-The agent-specific path/API constants live in their adapters
-(``adapters/openclaw/paths.py`` and ``adapters/hermes/paths.py``) and are
-re-exported here for backward compatibility, so no core file names a backend
-to build them. Each is anchored to its own manifest specifically (NOT the
-active agent): every consumer is backend-specific and must always see that
-backend's paths regardless of ``AGENT_NAME`` (e.g. an openclaw-shaped write
-must never land in ``~/.hermes`` when ``AGENT_NAME=hermes``).
-
-Code that needs the *active* agent's manifest must call ``get_active_agent()``
-explicitly.
+This module holds only **agent-agnostic** config. Each backend's own
+path/API constants live in its adapter (``adapters/<name>/paths.py``),
+anchored to that backend's manifest; core never builds or re-exports them, so
+no core file names a backend. Code that needs the *active* agent's manifest
+calls ``get_active_agent()`` explicitly.
 """
 
 import re
 
 from dotenv import load_dotenv
 
-# Load .env BEFORE the adapter paths import below: those modules resolve each
-# manifest's API config (url/token/model) from the environment at import time,
-# so the .env values must already be present.
+# Load .env so consumers (and each adapter's paths module) see configured
+# values at import time.
 load_dotenv()
 
-# Re-exported from the adapters that own these names (where the backend is
-# resolved). Imported eagerly so ``from ...settings import AGENTS_DIR`` etc.
-# keep working unchanged.
-from services.cowork_agent.adapters.openclaw.paths import (  # noqa: E402,F401
-    AGENTS_DIR,
-    DEFAULT_OPENCLAW_WORKSPACE,
-    OPENCLAW_API_URL,
-    OPENCLAW_DIR,
-    OPENCLAW_GATEWAY_TOKEN,
-    OPENCLAW_JSON,
-    OPENCLAW_MODEL,
-    OPENCLAW_MODEL_CAPABILITIES,
-)
-from services.cowork_agent.adapters.hermes.paths import (  # noqa: E402,F401
-    HERMES_API_TOKEN,
-    HERMES_API_URL,
-    HERMES_CONFIG_FILE,
-    HERMES_DIR,
-    HERMES_MODEL,
-    HERMES_MODEL_CAPABILITIES,
-    HERMES_PROFILES_DIR,
-    HERMES_SESSION_HEADER,
-)
+# Agent-specific path/API constants are NOT defined or re-exported here. Each
+# adapter owns its own under adapters/<name>/paths.py; importing them through
+# core is what the modularity guard forbids. settings.py holds only the
+# agent-agnostic config below.
 
 # ── Agent id normalization regexes ───────────────────────────────────────────
 
