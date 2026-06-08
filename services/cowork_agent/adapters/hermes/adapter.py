@@ -78,7 +78,7 @@ class HermesAdapter(BaseAgentAdapter):
         from services.cowork_agent.adapters.hermes.streaming import stream_to_normalized
         from services.cowork_agent.adapters.hermes.sessionslist import write_session_row
         from services.cowork_agent.adapters.hermes.state_db import register_inflight_exchange
-        from services.cowork_agent.settings import HERMES_MODEL
+        from services.cowork_agent.adapters.hermes.paths import HERMES_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
         our_session_id = kwargs.get("our_session_id")
@@ -176,7 +176,7 @@ class HermesAdapter(BaseAgentAdapter):
     async def health(self) -> dict[str, Any]:
         """Ping the hermes gateway's ``/v1/models`` to determine liveness."""
         import httpx
-        from services.cowork_agent.settings import HERMES_API_TOKEN, HERMES_API_URL
+        from services.cowork_agent.adapters.hermes.paths import HERMES_API_TOKEN, HERMES_API_URL
 
         if not HERMES_API_TOKEN:
             return {"ok": False, "gateway": "API_SERVER_KEY not set"}

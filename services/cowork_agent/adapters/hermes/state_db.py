@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from services.cowork_agent.helpers import iso_now
-from services.cowork_agent.settings import HERMES_DIR, HERMES_PROFILES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR, HERMES_PROFILES_DIR
 
 
 _DEFAULT_PROFILE = "default"

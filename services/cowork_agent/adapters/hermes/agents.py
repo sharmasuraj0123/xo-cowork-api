@@ -40,7 +40,7 @@ def _agent_info(profile_name: str) -> dict:
     count without falling back to "loaded so far" pagination grouping
     (which under-counts and bucks everything unknown under "default").
     """
-    from services.cowork_agent.settings import HERMES_DIR
+    from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
     hermes_manifest = get_agent("hermes")
     profile_dir = HERMES_DIR if profile_name == "default" else hermes_manifest.agents_dir / profile_name
@@ -84,7 +84,7 @@ def _detail(profile_name: str) -> dict:
     ``/api/agents/hermes/{profile}/...`` so the FE can fetch what it needs.
     """
     from services.cowork_agent.adapters.hermes import gateway_pool
-    from services.cowork_agent.settings import HERMES_DIR
+    from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
     hermes_manifest = get_agent("hermes")
     # ``default`` profile lives at HERMES_DIR (~/.hermes/) itself, not under

@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-from services.cowork_agent.settings import HERMES_DIR, HERMES_PROFILES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR, HERMES_PROFILES_DIR
 from services.cowork_agent.visualizer.discovery import iter_sessionslist_rows
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import (

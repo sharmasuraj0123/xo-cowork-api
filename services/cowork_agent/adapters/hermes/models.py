@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
-from services.cowork_agent.settings import OPENCLAW_MODEL_CAPABILITIES
+from services.cowork_agent.adapters.hermes.paths import HERMES_MODEL_CAPABILITIES
 
 _HERMES = get_active_agent()
 
@@ -26,7 +26,7 @@ def list_models() -> list[dict]:
                 "id": f"{prefix}/{profile_name}",
                 "name": profile_name,
                 "provider_id": _HERMES.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
+                "capabilities": dict(HERMES_MODEL_CAPABILITIES),
                 "pricing": {"prompt": 0, "completion": 0},
                 "metadata": {"hermes_profile": profile_name},
             }
@@ -39,7 +39,7 @@ def list_models() -> list[dict]:
                 "id": f"{prefix}/default",
                 "name": "default",
                 "provider_id": _HERMES.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
+                "capabilities": dict(HERMES_MODEL_CAPABILITIES),
                 "pricing": {"prompt": 0, "completion": 0},
                 "metadata": {"hermes_profile": "default"},
             }

@@ -20,7 +20,7 @@ from pathlib import Path
 from services.cowork_agent.helpers import derive_title, iso_now, ms_to_iso, parse_jsonl
 from services.cowork_agent.messages import convert_messages
 from services.cowork_agent.sessions_io import find_session_file, update_session_directory
-from services.cowork_agent.settings import AGENTS_DIR
+from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR
 
 # openclaw tees project sessions into xo-projects AND keeps native sessions
 # under ~/.openclaw/agents/<a>/sessions/, so both scans apply.

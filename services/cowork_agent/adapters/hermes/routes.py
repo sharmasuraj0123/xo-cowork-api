@@ -60,7 +60,7 @@ from services.cowork_agent.adapters.hermes.profile_env import (
 # profile-scoped upsert_env_entry imported above.
 from services.cowork_agent.agent_env import upsert_env_entry as upsert_default_env_entry
 from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
-from services.cowork_agent.settings import HERMES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
 router = APIRouter()
 
@@ -1376,7 +1376,7 @@ async def hermes_profile_insights(profile: str, days: int = 30):
     """
     import sqlite3
     import time as _time
-    from services.cowork_agent.settings import HERMES_DIR
+    from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
     resolved = _resolve_profile(profile)
     if isinstance(resolved, JSONResponse):

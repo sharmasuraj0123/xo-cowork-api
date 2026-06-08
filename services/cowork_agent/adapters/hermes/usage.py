@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Optional
 
-from services.cowork_agent.settings import HERMES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
 
 def _resolve_tz(tz: str) -> tzinfo:

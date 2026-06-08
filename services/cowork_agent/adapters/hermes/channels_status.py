@@ -23,7 +23,7 @@ from services.cowork_agent.adapters.hermes.dump import (
     HermesStatusError,
     fetch_dump,
 )
-from services.cowork_agent.settings import HERMES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
 
 def _gateway_running(features: dict[str, Any]) -> bool:

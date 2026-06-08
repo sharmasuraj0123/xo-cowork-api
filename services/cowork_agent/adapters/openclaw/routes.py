@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.settings import OPENCLAW_API_URL, OPENCLAW_JSON
+from services.cowork_agent.adapters.openclaw.paths import OPENCLAW_API_URL, OPENCLAW_JSON
 from services.cowork_agent.helpers import _mask_sensitive
 from services.cowork_agent.adapters.openclaw.store import load_openclaw_config
 
