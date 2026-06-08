@@ -88,9 +88,9 @@ pip install -r requirements.txt
 cp .env.example .env       # then edit — see Configuration below
 
 # 4. Boot a runtime (pick at least one)
-claude /login              # Claude Code
+claude /login                                  # Claude Code
 # or
-bash openclaw.sh           # OpenClaw gateway on :18789
+bash config/agents/openclaw/agent.sh start     # OpenClaw gateway on :18789
 
 # 5. Run
 python server.py           # http://localhost:5002
@@ -158,7 +158,7 @@ Full event vocabulary, reconnect semantics, and TypeScript example: see the [Fro
 
 ## Pluggable runtimes
 
-Adapters live under `services/cowork_agent/adapters/`. Each one implements [`BaseAgentAdapter`](services/cowork_agent/adapters/base.py): `run`, `stream`, `sessions_root`, `adapter_name`, `health`.
+Adapters live under `services/cowork_agent/adapters/<name>/`. The dispatch class in `adapter.py` implements [`BaseAgentAdapter`](services/cowork_agent/adapters/base.py): `run`, `stream`, and the `adapter_name` property (`setup`/`health`/`load_commands` are overridable). Everything else an agent provides — usage, models, status, sessions, its own routes — is a separate **capability module** resolved by `AGENT_NAME`. See [DEVELOPING.md](DEVELOPING.md).
 
 | Runtime | Status | Storage root | Transport |
 |---|---|---|---|
@@ -166,9 +166,9 @@ Adapters live under `services/cowork_agent/adapters/`. Each one implements [`Bas
 | **OpenClaw** | ✅ first-class | `~/.openclaw/agents/<a>/sessions/<sid>.jsonl` | HTTP gateway on `:18789` (OpenAI-compatible SSE) |
 | **Hermes** | ✅ first-class | `~/.hermes/profiles/<name>/` (or `~/.hermes/` for `default`) | `hermes` CLI subprocess + profile-based provider routing |
 | **Codex** | 🟡 partial — auth + legacy chat | `~/.codex/...` | `codex` CLI subprocess (via `/ask_question*` legacy path) |
-| **Your runtime** | 🔧 fork friendly | wherever you like | implement `BaseAgentAdapter`, register in `_REGISTRY`, drop a `commands.json` |
+| **Your runtime** | 🔧 fork friendly | wherever you like | drop `config/agents/<name>/` + `adapters/<name>/adapter.py` — auto-discovered, zero core edits |
 
-The router layer (`routers/cowork_agent/chat.py`) doesn't know which adapter it's talking to. It picks based on either an explicit `agent_name` in the request, on-disk session-ownership detection (`find_session_backend`), or the `AGENT_NAME` env var fallback. Adding a new runtime is **one file** + a registry entry.
+The router layer (`routers/cowork_agent/chat.py`) doesn't know which adapter it's talking to. It picks based on either an explicit `agent_name` in the request, on-disk session-ownership detection (`find_session_backend`), or the `AGENT_NAME` env var. Adapters are **auto-discovered** — adding a runtime is dropping a folder, no registry edit and no core changes.
 
 Deep dive: [Claude Code vs OpenClaw](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Claude-Vs-Openclaw), [Streaming protocols compared](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Streaming-Claude-Vs-Openclaw).
 
@@ -269,7 +269,11 @@ Auth flow: if `XO_API_KEY` is set, it's used as Bearer for every outbound call. 
 
 ## Documentation
 
-The wiki is the canonical reference, kept in sync with the code:
+In-repo, start with **[DEVELOPING.md](DEVELOPING.md)** — the engineering guide:
+broker/adapter architecture, the two planes, the capability loader, adding a new
+agent, and the validation playbook.
+
+The wiki is the canonical reference for the API surface, kept in sync with the code:
 
 - 🏗️ [Architecture](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Architecture) — snapshot of the current state, route inventory, vision scorecard
 - 📑 [Frontend API index](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Api-Index) — start here for integration
@@ -304,43 +308,44 @@ Maturity, honestly assessed (full breakdown in the [Architecture scorecard](http
 
 ```
 xo-cowork-api/
-├── server.py                       FastAPI app — lifespan, CORS, router mounts
-├── routers/
-│   ├── auth.py                     /xo-auth/* — Clerk poll-token + token store
-│   ├── claude_setup_token.py       /claude/* — Claude CLI OAuth bootstrap
-│   ├── codex_setup.py              /codex/* — Codex device-auth
-│   ├── openclaw_usage.py           /openclaw/usage/* — analytics
+├── server.py                       FastAPI app — lifespan, CORS, router mounts, /ask_question (Plane A)
+├── config/
+│   ├── models/<name>/              Plane-A model clients (claude_code/, codex/) — selected by AI_PROVIDER
+│   └── agents/<name>/              per-agent config: manifest.json, settings.json, capabilities.json,
+│                                     setup.sh, agent.sh, troubleshoot.py
+├── routers/                        broker routes only — no agent branching
+│   ├── auth/                       auth.py, claude_setup_token.py, codex_setup.py
+│   ├── status/                     models.py, channels.py, providers.py  (dynamic dispatch)
 │   └── cowork_agent/               /api/* — the cowork frontend-facing surface
-│       ├── chat.py     sessions.py  agents.py  config.py  files.py
-│       ├── secrets.py  channels.py  workspace_memory.py   fts.py
-│       ├── usage.py    misc.py      onboarding.py
-│       ├── bff/        ←── projects + secrets BFF layer
-│       └── {gdrive,onedrive,github,vercel,manus}.py
+│       ├── chat.py  sessions.py  agents.py  config.py  channels.py  files.py
+│       ├── secrets.py  usage.py  workspace_memory.py  fts.py  misc.py  onboarding.py
+│       ├── connectors/            gdrive onedrive github vercel manus route modules
+│       ├── bff/                   projects + secrets + visualizer BFF layer
+│       └── legacy/                frozen URL aliases (openclaw_usage)
 ├── services/
 │   ├── cowork_agent/
-│   │   ├── dispatcher.py            AgentDispatcher — what routers import
-│   │   ├── adapter_registry.py      {"openclaw": …, "claude_code": …}
-│   │   ├── adapters/                pluggable runtime plug-ins
-│   │   │   ├── base.py              BaseAgentAdapter (abstract)
-│   │   │   ├── openclaw/{adapter,streaming,usage}.py
-│   │   │   ├── claude_code/{adapter,streaming,models_status,providers_status}.py
-│   │   │   └── hermes/{adapter,models_status,dump,…}.py
-│   │   ├── project_layout.py        ~/xo-projects/ layout + scaffold_project
-│   │   ├── project_template/        bundled scaffold tree (AGENTS.md, .xo/, memory/, …)
-│   │   ├── sessions_io.py           cross-runtime session lookup
-│   │   ├── streaming.py             OpenClaw direct-streaming bridge
-│   │   ├── *_connector.py           rclone, gh, GitHub, Vercel, Manus glue
-│   │   └── …                        helpers, settings, manifests
-│   └── usage_sync.py                daily background → /usage/report on swarm
-├── config/agents/{openclaw,claude_code}/{commands,settings}.json
-├── cowork-api.sh                    process manager (start|stop|restart|status|logs)
-├── cowork-update.sh                 git pull + restart in background
-├── openclaw.sh                      installs + launches OpenClaw gateway on :18789
-├── hermes.sh                        hermes config setup
-├── docs/                            local copies of every wiki page (gitignored)
+│   │   ├── adapters/              ── the agent extension surface (Plane B) ──
+│   │   │   ├── base.py            BaseAgentAdapter contract
+│   │   │   ├── loader.py          load_capability() — the single agent-resolution seam
+│   │   │   ├── cli_status.py usage_common.py   shared adapter helpers
+│   │   │   └── <name>/            adapter.py usage.py sessions.py chat.py routes.py models.py …
+│   │   ├── engine/               dispatcher messages sessions_io chat_state usage_loader
+│   │   ├── registry/             agent_registry adapter_registry settings agent_env (auto-discovery)
+│   │   ├── connectors/           rclone, GitHub, Vercel, Manus, token_store glue
+│   │   ├── visualizer/  xo_projects_sync/  project_template/
+│   │   └── helpers.py project_layout.py skill_installer.py providers_status_lib.py …
+│   ├── usage_sync.py             daily background → /usage/report on swarm
+│   └── xo_manifest.py            builds ~/xo-projects/.xo/xo.json (capabilities + live status)
+├── cowork-api.sh                   process manager (start|stop|restart|status|logs)
+├── cowork-update.sh                git pull + restart in background
+├── DEVELOPING.md                   engineering guide — architecture, adding an agent, validation
 ├── Dockerfile
 └── requirements.txt
 ```
+
+> Per-agent lifecycle scripts now live at `config/agents/<name>/agent.sh`
+> (was root `openclaw.sh` / `hermes.sh`). See **[DEVELOPING.md](DEVELOPING.md)**
+> for the full architecture and the "add a new agent" walkthrough.
 
 ---
 
@@ -351,7 +356,7 @@ Issues and PRs welcome on the [`development` branch](https://github.com/sharmasu
 Conventions:
 
 - **Endpoints live in `routers/`** (thin handlers). Logic lives in `services/`. Top-level `server.py` is the only file that imports both.
-- **Adapters subclass `BaseAgentAdapter`** and register in `services/cowork_agent/adapter_registry.py`. No router changes needed to add a runtime.
+- **Adapters are auto-discovered.** Drop `config/agents/<name>/` + `services/cowork_agent/adapters/<name>/adapter.py` — no registry edit, no router changes, and **no core file may name a specific agent** (enforced by `scripts/check_agent_modularity.py`). See [DEVELOPING.md](DEVELOPING.md).
 - **The project folder is sacred.** Don't write chat content, runtime credentials, or anything else that wouldn't survive a git push into `~/xo-projects/<id>/`.
 
 ---
