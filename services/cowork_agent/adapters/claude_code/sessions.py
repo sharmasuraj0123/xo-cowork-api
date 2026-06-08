@@ -5,12 +5,69 @@ Message reading and session-directory updates for claude_code sessions.
 Ownership is determined by the project ``sessionslist.json`` backend tag (read
 generically in ``find_session_backend``), so ``owns_session`` returns False
 here — there is no separate native-scan fallback for claude_code.
+
+The listing-side hooks (``enrich_project_session`` / ``resolve_native_file`` /
+``list_native_sessions`` / ``USES_PROJECT_SESSIONS``) are what the generic
+``sessions_io.load_all_sessions`` / ``find_session_file`` call instead of
+branching on ``backend == "claude_code"``.
 """
 from __future__ import annotations
 
-from services.cowork_agent.helpers import parse_jsonl
+from pathlib import Path
+
+from services.cowork_agent.helpers import derive_title_native_claude, parse_jsonl
 from services.cowork_agent.messages import convert_native_claude_messages
 from services.cowork_agent.sessions_io import find_session_file, update_claude_session_directory
+
+# claude_code stores its session metadata under xo-projects (.xo/sessions),
+# so the generic project-tied scan applies to it.
+USES_PROJECT_SESSIONS = True
+
+
+def _native_file(native_session_id: str, directory: str) -> Path | None:
+    """Path to a Claude Code native JSONL, or None if absent.
+
+    Claude Code names its project folders by replacing every ``/`` with ``-``
+    (``/home/coder/xo-projects/blackhole`` →
+    ``-home-coder-xo-projects-blackhole``); the session log lives at
+    ``~/.claude/projects/<encoded-dir>/<nativeSessionId>.jsonl``. This is the
+    lossless forward encoding (the lossy reverse lives in ``_project_encoding``).
+    """
+    if not native_session_id or not directory:
+        return None
+    encoded = directory.replace("/", "-")
+    path = Path.home() / ".claude" / "projects" / encoded / f"{native_session_id}.jsonl"
+    return path if path.exists() else None
+
+
+def enrich_project_session(meta: dict, key: str, default_agent: str):
+    """Return ``(time_created, title, effective_agent)`` for a project-tied
+    claude_code session by reading its native JSONL. Either override may be
+    None (caller keeps its defaults)."""
+    time_created = None
+    title = None
+    native_path = _native_file(meta.get("nativeSessionId", ""), meta.get("directory", ""))
+    if native_path:
+        try:
+            records = parse_jsonl(native_path)
+            if records:
+                ts = records[0].get("timestamp")
+                if ts:
+                    time_created = ts
+            title = derive_title_native_claude(records)
+        except Exception:
+            pass
+    return time_created, title, default_agent
+
+
+def resolve_native_file(meta: dict, session_id: str) -> Path | None:
+    """Locate the native message file for a project-tied claude_code session."""
+    return _native_file(meta.get("nativeSessionId", ""), meta.get("directory", ""))
+
+
+def list_native_sessions() -> list[dict]:
+    """claude_code has no non-project native session store."""
+    return []
 
 
 def owns_session(session_id: str) -> bool:
