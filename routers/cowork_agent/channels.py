@@ -149,7 +149,7 @@ async def add_channel(request: Request):
     # Fields not supplied in the body fall back to the manifest's ``defaults``
     # map so the FE form doesn't have to collect knobs like ``allowed_users``
     # (which the manifest defaults to ``*``). To restrict access, edit the
-    # default in the active agent's ``config/agents/<agent>/commands.json``.
+    # default in the active agent's ``config/agents/<agent>/manifest.json``.
     defaults = recipe.get("defaults") or {}
     to_upsert: list[tuple[str, str]] = []
     for field, env_key in (recipe.get("fields") or {}).items():

@@ -750,7 +750,7 @@ async def hermes_profile_providers_get(profile: str):
     render a "Providers" tab.
 
     Two classes are merged into the response:
-    - **API-key providers** declared in ``commands.json → providers.*``.
+    - **API-key providers** declared in ``manifest.json → providers.*``.
       ``configured`` flips to ``true`` when the declared env_key is set
       in ``<profile>/.env``.
     - **OAuth providers** (currently ``nous`` and ``openai-codex``) that
@@ -1610,7 +1610,7 @@ async def add_hermes_channel(request: Request):
     # half-populated env file. Fields not supplied in the body fall back to
     # the manifest's ``defaults`` map — keeps the FE form minimal (e.g. user
     # never has to type "allowed_users: *"). To restrict access, edit the
-    # default in ``config/agents/hermes/commands.json``.
+    # default in ``config/agents/hermes/manifest.json``.
     defaults = recipe.get("defaults") or {}
     to_upsert: list[tuple[str, str]] = []
     for field, env_key in (recipe.get("fields") or {}).items():
@@ -1852,7 +1852,7 @@ async def _run_provider_provisioning(provider_id: str, argvs: list[list[str]]) -
 async def save_hermes_provider_key(provider_id: str, request: Request):
     """Persist a provider API key into ``~/.hermes/.env`` and (optionally) kick
     off the hermes CLI follow-up chain declared in the manifest. Provider list
-    lives in ``config/agents/hermes/commands.json`` → ``providers.*``.
+    lives in ``config/agents/hermes/manifest.json`` → ``providers.*``.
 
     Returns 200 once the key is written; any CLI follow-up runs in the
     background and is logged to ``~/.hermes/provisioning.log``.

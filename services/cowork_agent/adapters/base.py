@@ -53,10 +53,13 @@ class BaseAgentAdapter(ABC):
         return {"ok": True}
 
     def load_commands(self) -> dict[str, Any]:
-        """Read config/agents/{adapter_name}/commands.json. Returns {} if absent."""
-        p = pathlib.Path("config/agents") / self.adapter_name / "commands.json"
-        if p.exists():
-            return json.loads(p.read_text())
+        """Read config/agents/{adapter_name}/manifest.json (legacy name
+        commands.json read as a one-cycle fallback). Returns {} if absent."""
+        base = pathlib.Path("config/agents") / self.adapter_name
+        for fname in ("manifest.json", "commands.json"):
+            p = base / fname
+            if p.exists():
+                return json.loads(p.read_text())
         return {}
 
     # ── Required class attribute ───────────────────────────────────────────────

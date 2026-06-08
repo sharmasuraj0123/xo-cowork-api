@@ -1,15 +1,14 @@
 """
 Agent manifest registry.
 
-Loads JSON manifests from `config/agents/<agent>/commands.json` — one
-subdirectory per supported agent tool (openclaw today, room for others
-later). Each manifest declares the binary name, filesystem layout, API
-env-var names, command templates, and provider/channel recipes. Call
-sites go through `get_active_agent()` so the binary, paths, and argv
-shapes are never hardcoded.
+Loads JSON manifests from `config/agents/<agent>/manifest.json` — one
+subdirectory per supported agent tool. Each manifest declares the binary
+name, filesystem layout, API env-var names, command templates, and
+provider/channel recipes. Call sites go through `get_active_agent()` so the
+binary, paths, and argv shapes are never hardcoded.
 
-The file is named `commands.json` (not `<agent>.json`) so it cannot be
-confused with the agent's own config file (e.g. `~/.openclaw/openclaw.json`).
+The file is named `manifest.json` (legacy name `commands.json` is still read
+as a fallback) so it cannot be confused with the agent's own config file.
 
 Which manifest is active is resolved in this order:
 
@@ -141,13 +140,16 @@ def _discover_manifests() -> dict[str, AgentManifest]:
     if not _MANIFEST_DIR.exists():
         raise FileNotFoundError(
             f"agent manifest directory not found: {_MANIFEST_DIR}. "
-            "Add a `config/agents/<name>/commands.json` describing the default agent tool."
+            "Add a `config/agents/<name>/manifest.json` describing the default agent tool."
         )
     manifests: dict[str, AgentManifest] = {}
-    # One subdir per agent, each containing a `commands.json` file.
+    # One subdir per agent, each containing a `manifest.json` file (legacy name
+    # `commands.json` still read as a one-cycle fallback).
     # Files that lack the `binary` field are adapter configs, not agent manifests — skip them.
     for subdir in sorted(p for p in _MANIFEST_DIR.iterdir() if p.is_dir()):
-        manifest_path = subdir / "commands.json"
+        manifest_path = subdir / "manifest.json"
+        if not manifest_path.exists():
+            manifest_path = subdir / "commands.json"
         if not manifest_path.exists():
             continue
         try:
@@ -163,7 +165,7 @@ def _discover_manifests() -> dict[str, AgentManifest]:
     if not manifests:
         raise FileNotFoundError(
             f"no agent manifests found in {_MANIFEST_DIR} "
-            "(expected `<agent>/commands.json` subdirectories)."
+            "(expected `<agent>/manifest.json` subdirectories)."
         )
     return manifests
 
