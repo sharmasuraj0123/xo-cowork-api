@@ -9,7 +9,7 @@ because hermes writes its real session state to SQLite, not JSONL.
 
 V1 limitation: ``usage`` is written as zeros. Hermes records token
 counts in ``~/.hermes/state.db`` / ``~/.hermes/profiles/<name>/state.db``
-on a 3–10 s delay (see :func:`hermes_state_db.register_inflight_exchange`).
+on a 3–10 s delay (see :func:`state_db.register_inflight_exchange`).
 A future enhancement can backfill the usage block from state.db once
 hermes commits; each subsequent turn already overwrites the row with
 a fresh ``updatedAt``, so the totals will catch up naturally once a

@@ -15,7 +15,7 @@ storage:
   claude_code → ~/.claude/projects/{encoded_dir}/{nativeSessionId}.jsonl
   openclaw    → ~/.openclaw/agents/{agent}/sessions/{sessionId}.jsonl
   hermes      → ~/.hermes/state.db (or ~/.hermes/profiles/<name>/state.db) — SQLite,
-                read-only via services.cowork_agent.hermes_state_db.
+                read-only via services.cowork_agent.adapters.hermes.state_db.
 """
 
 import json

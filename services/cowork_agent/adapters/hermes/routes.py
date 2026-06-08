@@ -59,7 +59,7 @@ from services.cowork_agent.adapters.hermes.profile_env import (
 # hermes-pinned env module needed. Aliased to avoid colliding with the
 # profile-scoped upsert_env_entry imported above.
 from services.cowork_agent.agent_env import upsert_env_entry as upsert_default_env_entry
-from services.cowork_agent.hermes_state_db import list_all_profile_names
+from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
 from services.cowork_agent.settings import HERMES_DIR
 
 router = APIRouter()

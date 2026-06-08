@@ -11,7 +11,7 @@ to continue, or omits it to start fresh. The hermes server derives a new id
 and returns it back in the same header on the response — that becomes the
 ``native_session_id`` we hand back to chat_prompt.
 
-Reads happen via ``services.cowork_agent.hermes_state_db`` (read-only) so
+Reads happen via ``services.cowork_agent.adapters.hermes.state_db`` (read-only) so
 the sidebar can list/transcript sessions without going through the API.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ class HermesAdapter(BaseAgentAdapter):
         """
         from services.cowork_agent.adapters.hermes.streaming import stream_to_normalized
         from services.cowork_agent.adapters.hermes.sessionslist import write_session_row
-        from services.cowork_agent.hermes_state_db import register_inflight_exchange
+        from services.cowork_agent.adapters.hermes.state_db import register_inflight_exchange
         from services.cowork_agent.settings import HERMES_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
@@ -152,7 +152,7 @@ class HermesAdapter(BaseAgentAdapter):
 
         if not agent_id and session_id:
             try:
-                from services.cowork_agent.hermes_state_db import find_hermes_profile
+                from services.cowork_agent.adapters.hermes.state_db import find_hermes_profile
                 resolved = find_hermes_profile(session_id)
                 if resolved and resolved != "default":
                     agent_id = resolved

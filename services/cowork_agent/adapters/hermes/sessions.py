@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from services.cowork_agent.hermes_state_db import (
+from services.cowork_agent.adapters.hermes.state_db import (
     find_hermes_profile,
     list_hermes_sessions,
     load_hermes_session_records,

@@ -118,7 +118,7 @@ def _detail(profile_name: str) -> dict:
             soul_preview = None
 
     # Session and message counts — read from this profile's state.db only
-    # (don't walk every profile; the global hermes_state_db helpers are
+    # (don't walk every profile; the global state_db helpers are
     # aggregate). A hermes session represents one continuing conversation;
     # message_count tracks turns within it, so surfacing both prevents the
     # "I chatted 7 times but it shows 1 session" confusion.
@@ -243,7 +243,7 @@ def _profile_dir(profile_id: str) -> Path:
 
 def list_agents() -> list[dict]:
     """Sidebar agents: one per hermes profile."""
-    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
     return [_agent_info(profile_name) for profile_name in list_all_profile_names()]
 
 
@@ -306,7 +306,7 @@ def create_agent(body) -> dict | JSONResponse:
 
 def get_detail(agent_id: str) -> dict | None:
     """Full hermes profile snapshot, or None if ``agent_id`` isn't a profile."""
-    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
     aid = normalize_agent_id(agent_id)
     # Profile name == agent_id (1:1 by design). Look up via the state-db helper
     # — the same code path that powers /api/agents listing — so GET /api/agents
@@ -322,7 +322,7 @@ def patch(agent_id: str, body) -> dict | JSONResponse | None:
     Only ``name`` is the rename target; ``workspace``/``model``/``identity_*``
     don't apply to hermes profiles. The ``default`` profile is not patchable
     here (falls through to other backends)."""
-    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
     aid = normalize_agent_id(agent_id)
 
     if aid not in list_all_profile_names() or aid == "default":
@@ -380,7 +380,7 @@ def delete(agent_id: str) -> dict | JSONResponse | None:
     The ``default`` profile is rejected (it's hermes's root). Returns None for
     ids that aren't hermes profiles so the router can try other backends.
     """
-    from services.cowork_agent.hermes_state_db import list_all_profile_names
+    from services.cowork_agent.adapters.hermes.state_db import list_all_profile_names
     aid = normalize_agent_id(agent_id)
 
     if aid == "default":
