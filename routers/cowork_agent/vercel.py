@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from services.cowork_agent.vercel_connector import (
+from services.cowork_agent.connectors.vercel_connector import (
     delete_vercel_token,
     ensure_oauth_client,
     exchange_code_for_tokens,

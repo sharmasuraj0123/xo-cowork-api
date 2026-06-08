@@ -2,7 +2,7 @@
 Google Drive connector via rclone (CLI mode — no daemon, no port).
 
 The generic rclone plumbing and the OAuth-flow engine live in
-:mod:`services.cowork_agent.rclone_connector`. This module supplies only the
+:mod:`services.cowork_agent.connectors.rclone_connector`. This module supplies only the
 Drive-specific descriptor (backend ``drive`` with ``drive.file`` scope, the
 Google auth-URL pattern, and the rclone.conf section shape) plus the Drive
 file operations (upload / mkdir / list / delete) that its router exposes.

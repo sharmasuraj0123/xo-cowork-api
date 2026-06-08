@@ -22,8 +22,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from services.cowork_agent import github_cli_auth
-from services.cowork_agent.github_connector import (
+from services.cowork_agent.connectors import github_cli_auth
+from services.cowork_agent.connectors.github_connector import (
     delete_github_token,
     get_github_token,
     get_status,

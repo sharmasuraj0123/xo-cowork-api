@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from services.cowork_agent import github_connector
+from services.cowork_agent.connectors import github_connector
 
 from .config import ENV_GITHUB_PAT, LOCAL_STAGING_DIR
 
