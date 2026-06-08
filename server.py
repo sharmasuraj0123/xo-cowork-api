@@ -504,6 +504,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Watcher failed to start (non-fatal): {e}")
 
+    # Commit watcher — detects this workspace's push to main and reports to swarm.
+    _commit_watcher_task = None
+    try:
+        from services.cowork_agent.commit_watcher.watcher import start_commit_watcher
+        _commit_watcher_task = asyncio.create_task(start_commit_watcher())
+        print("   Commit watcher: background task started")
+    except Exception as e:
+        print(f"⚠️ Commit watcher failed to start (non-fatal): {e}")
+
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
     yield
@@ -527,6 +536,13 @@ async def lifespan(app: FastAPI):
         _watcher_task.cancel()
         try:
             await _watcher_task
+        except asyncio.CancelledError:
+            pass
+
+    if _commit_watcher_task and not _commit_watcher_task.done():
+        _commit_watcher_task.cancel()
+        try:
+            await _commit_watcher_task
         except asyncio.CancelledError:
             pass
 
