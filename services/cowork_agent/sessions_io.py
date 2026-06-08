@@ -1,28 +1,24 @@
 """
-Session-file I/O: scan `~/xo-projects/*/.xo/sessions/` and
-`~/.openclaw/agents/*/sessions/` directories.
+Session-file I/O over the shared project layout
+(`~/xo-projects/*/.xo/sessions/`).
 
 Concerns:
-- listing sessions across agents and sorting by updated time
+- listing sessions across backends and sorting by updated time
 - finding the message file for a given session id
 - persisting a user-selected `directory` into the matching sessionslist.json entry
 
 Security model
 --------------
 The project folder (.xo/sessions/) holds only metadata (sessionslist.json).
-Chat messages are never written there. They live in the provider's own
-storage:
-  claude_code → ~/.claude/projects/{encoded_dir}/{nativeSessionId}.jsonl
-  openclaw    → ~/.openclaw/agents/{agent}/sessions/{sessionId}.jsonl
-  hermes      → ~/.hermes/state.db (or ~/.hermes/profiles/<name>/state.db) — SQLite,
-                read-only via services.cowork_agent.adapters.hermes.state_db.
+Chat messages are never written there. They live in each backend's own
+storage, reached only through that backend's ``sessions`` capability
+(``resolve_native_file`` / ``get_messages``); core never reads a backend's
+message store directly and names no backend here.
 """
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.settings import AGENTS_DIR
 from services.cowork_agent.helpers import iso_now, ms_to_iso
 from services.cowork_agent.project_layout import xo_projects_root
 
@@ -61,19 +57,19 @@ def _sessions_capability(agent: str):
 
 
 def load_all_sessions() -> list[dict]:
-    """Scan agents and build SessionResponse objects, filtered by active backend.
+    """Scan sessions and build SessionResponse objects, filtered by active backend.
 
-    Scan roots considered:
-    - ``~/xo-projects/<id>/.xo/sessions/`` — project-tied sessions
-      (claude_code + openclaw with a project workspace).
-    - ``~/.openclaw/agents/<id>/sessions/`` — openclaw native (no project).
-    - ``~/.hermes/state.db`` and per-profile state.dbs — hermes sessions.
+    Two scan roots are considered, both resolved through the active backend's
+    ``sessions`` capability (never by naming a backend here):
+    - ``~/xo-projects/<id>/.xo/sessions/`` — project-tied sessions, scanned
+      only when the active backend sets ``USES_PROJECT_SESSIONS``.
+    - the backend's own native store — supplied by
+      ``list_native_sessions()`` (e.g. a per-agent on-disk dir or a state db).
 
     Only sessions belonging to the active backend (``AGENT_NAME`` env) are
-    returned. When the user has switched to hermes, openclaw scan paths
-    aren't touched at all and openclaw sessions don't leak into the
-    sidebar — and vice versa. Per the user's mental model: ``AGENT_NAME``
-    decides which world we're in; the other backends stay invisible.
+    returned: the other backends' stores aren't touched at all, so their
+    sessions never leak into the sidebar. ``AGENT_NAME`` decides which world
+    we're in; the other backends stay invisible.
 
     De-duplicated via ``sessionId`` so a session that is both project-tee'd
     and natively present surfaces only once (project-tied wins).
@@ -159,9 +155,9 @@ def load_all_sessions() -> list[dict]:
                     continue
                 _ingest_project_sessions_dir(agent_dir / ".xo" / "sessions", agent_dir.name, agent_dir)
 
-    # Native (non-project) sessions from the active backend: openclaw's
-    # ~/.openclaw/agents/<a>/sessions/, hermes's state.db, etc. claude_code
-    # returns none. De-duplicated by id against the project-tied rows so the
+    # Native (non-project) sessions from the active backend's own store
+    # (a per-agent on-disk dir, a state db, etc.); backends without one return
+    # an empty list. De-duplicated by id against the project-tied rows so the
     # other backends stay invisible when they aren't active.
     lister = getattr(active_mod, "list_native_sessions", None) if active_mod else None
     if lister:
@@ -182,9 +178,10 @@ def load_all_sessions() -> list[dict]:
 def find_session_file(session_id: str) -> Path | None:
     """Find the JSONL messages file for a session.
 
-    For claude_code sessions: looks up nativeSessionId + directory from
-    sessionslist.json and returns the file from ~/.claude/projects/.
-    For openclaw sessions: returns the file from ~/.openclaw/agents/.
+    Resolves the native message file through the owning backend's ``sessions``
+    capability (``resolve_native_file``): a project-tied session is matched by
+    its sessionslist.json metadata, then handed to its backend; a non-project
+    session is resolved by id against each backend's native store.
     """
     # xo-projects: check sessionslist.json for metadata to find native file.
     projects_root = xo_projects_root()
@@ -203,8 +200,7 @@ def find_session_file(session_id: str) -> Path | None:
                 if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
                     continue
                 # Resolve the native message file via the session's OWN backend
-                # capability (claude_code → ~/.claude/projects, openclaw → its
-                # agents dir, hermes → none). No backend is named here.
+                # capability. No backend is named here.
                 bmod = _sessions_capability(meta.get("backend", ""))
                 resolver = getattr(bmod, "resolve_native_file", None) if bmod else None
                 if resolver:
@@ -213,9 +209,8 @@ def find_session_file(session_id: str) -> Path | None:
                         return path
 
     # Native (non-project) sessions: ask each adapter to resolve the file by id
-    # alone (used when no project was selected at chat time). Mirrors the old
-    # unconditional openclaw-dir scan, but generic — openclaw resolves from its
-    # agents dir; claude_code/hermes return None.
+    # alone (used when no project was selected at chat time) — generic, each
+    # backend resolves from its own native store or returns None.
     from services.cowork_agent.adapter_registry import list_adapters
 
     for name in list_adapters():
@@ -251,8 +246,8 @@ def find_session_backend(session_id: str) -> str | None:
                         return tag
 
     # Not project-tagged: ask each adapter whether it owns this session via
-    # its sessions capability (openclaw scans its native dir, hermes checks
-    # state.db, etc.). No backend is named here.
+    # its sessions capability (each backend scans its own native store).
+    # No backend is named here.
     from services.cowork_agent.adapter_registry import list_adapters
     from services.cowork_agent.adapters.loader import try_load_capability
 
@@ -263,123 +258,3 @@ def find_session_backend(session_id: str) -> str | None:
             return name
 
     return None
-
-
-def find_session_key(session_id: str) -> str | None:
-    """Look up the session key for a given session ID."""
-    # OpenClaw agents native
-    if AGENTS_DIR.exists():
-        for agent_dir in AGENTS_DIR.iterdir():
-            if not agent_dir.is_dir():
-                continue
-            index_path = agent_dir / "sessions" / "sessions.json"
-            if not index_path.exists():
-                continue
-            try:
-                with open(index_path, encoding="utf-8") as f:
-                    index_data = json.load(f)
-            except Exception:
-                continue
-            for key, meta in index_data.items():
-                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
-                    return key
-
-    # xo-projects (claude_code and tee'd openclaw sessions)
-    projects_root = xo_projects_root()
-    if projects_root.exists():
-        for agent_dir in projects_root.iterdir():
-            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
-                continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
-            if not idx_path:
-                continue
-            try:
-                with open(idx_path, encoding="utf-8") as f:
-                    index_data = json.load(f)
-            except Exception:
-                continue
-            for key, meta in index_data.items():
-                if isinstance(meta, dict) and meta.get("sessionId") == session_id:
-                    return key
-
-    return None
-
-
-# ── Directory update ──────────────────────────────────────────────────────────
-
-
-def update_session_directory(session_id: str, directory: str) -> bool:
-    """Persist selected workspace directory on the matching sessions.json entry (OpenClaw)."""
-    if not AGENTS_DIR.exists():
-        return False
-
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    for agent_dir in AGENTS_DIR.iterdir():
-        if not agent_dir.is_dir():
-            continue
-        index_path = agent_dir / "sessions" / "sessions.json"
-        if not index_path.exists():
-            continue
-        try:
-            with open(index_path, "r", encoding="utf-8") as f:
-                index_data = json.load(f)
-        except Exception:
-            continue
-
-        changed = False
-        for meta in index_data.values():
-            if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
-                continue
-            history = meta.get("directoryHistory")
-            if not isinstance(history, list):
-                history = []
-            history.append({"directory": directory, "selectedAt": now_ms})
-            meta["directoryHistory"] = history[-200:]
-            meta["directory"] = directory
-            meta["updatedAt"] = now_ms
-            changed = True
-            break
-
-        if changed:
-            index_path.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8")
-            return True
-
-    return False
-
-
-def update_claude_session_directory(session_id: str, directory: str) -> bool:
-    """Update the workspace directory for a Claude Code session (xo-projects only)."""
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    def _try_index(index_path: Path) -> bool:
-        if not index_path.exists():
-            return False
-        try:
-            with open(index_path, "r", encoding="utf-8") as f:
-                index_data = json.load(f)
-        except Exception:
-            return False
-        for meta in index_data.values():
-            if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
-                continue
-            history = meta.get("directoryHistory") or []
-            history.append({"directory": directory, "selectedAt": now_ms})
-            meta["directoryHistory"] = history[-200:]
-            meta["directory"] = directory
-            meta["updatedAt"] = now_ms
-            index_path.write_text(
-                json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            return True
-        return False
-
-    projects_root = xo_projects_root()
-    if projects_root.exists():
-        for agent_dir in projects_root.iterdir():
-            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
-                continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
-            if idx_path and _try_index(idx_path):
-                return True
-
-    return False

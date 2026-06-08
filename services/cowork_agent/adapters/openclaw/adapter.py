@@ -38,7 +38,7 @@ class OpenclawAdapter(BaseAgentAdapter):
             OPENCLAW_MODEL,
         )
         from services.cowork_agent.agent_registry import get_active_agent
-        from services.cowork_agent.sessions_io import find_session_key
+        from services.cowork_agent.adapters.openclaw.sessions import find_session_key
 
         if not session_id:
             from services.cowork_agent.adapters.openclaw.direct_stream import create_new_session
@@ -109,7 +109,7 @@ class OpenclawAdapter(BaseAgentAdapter):
         """
         from services.cowork_agent.adapters.openclaw.streaming import stream_to_normalized
         from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
-        from services.cowork_agent.sessions_io import find_session_key
+        from services.cowork_agent.adapters.openclaw.sessions import find_session_key
         from services.cowork_agent.adapters.openclaw.direct_stream import find_session_id_by_key
         from services.cowork_agent.adapters.openclaw.paths import OPENCLAW_MODEL
 
