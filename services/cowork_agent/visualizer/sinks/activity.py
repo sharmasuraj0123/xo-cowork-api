@@ -51,7 +51,7 @@ def _resolve_user_id() -> str:
     """Same lookup as :mod:`project_json`. Per docs/watcher-design.md
     §8.1: ``get_auth_state().get("user_id") or "local"``."""
     try:
-        from routers.auth import get_auth_state
+        from routers.auth.auth import get_auth_state
         return get_auth_state().get("user_id") or "local"
     except Exception:
         return "local"

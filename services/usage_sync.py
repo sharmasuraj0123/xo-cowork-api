@@ -126,7 +126,7 @@ def _empty_record(workspace_id: str, workspace_name, project_id, note: str,
 
 
 async def _post_records(records: list, daily: dict | None, state: dict) -> None:
-    from routers.auth import get_auth_token
+    from routers.auth.auth import get_auth_token
 
     token = get_auth_token()
     headers = {"Authorization": f"Bearer {token}"} if token else {}

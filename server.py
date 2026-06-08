@@ -27,19 +27,19 @@ from config.models.codex_code_client import CodexCodeClient
 # Load environment variables
 load_dotenv()
 
-from routers.auth import (
+from routers.auth.auth import (
     XO_API_KEY,
     consume_auth_flow,
     get_auth_token,
     get_auth_state,
     router as auth_router,
 )
-from routers.claude_setup_token import router as claude_setup_token_router
-from routers.codex_setup import router as codex_setup_router
-from routers.openclaw_usage import router as openclaw_usage_router
-from routers.models import router as models_router
-from routers.channels import router as channels_router
-from routers.providers import router as providers_router
+from routers.auth.claude_setup_token import router as claude_setup_token_router
+from routers.auth.codex_setup import router as codex_setup_router
+from routers.cowork_agent.legacy.openclaw_usage import router as openclaw_usage_router
+from routers.status.models import router as models_router
+from routers.status.channels import router as channels_router
+from routers.status.providers import router as providers_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
