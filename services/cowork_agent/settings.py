@@ -17,9 +17,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Agent-specific path/API constants are NOT defined or re-exported here. Each
-# adapter owns its own under adapters/<name>/paths.py; importing them through
-# core is what the modularity guard forbids. settings.py holds only the
-# agent-agnostic config below.
+# adapter owns its own under adapters/<name>/paths.py; routing them through core
+# would re-introduce the agent coupling this layout removes. settings.py holds
+# only the agent-agnostic config below.
 
 # ── Agent id normalization regexes ───────────────────────────────────────────
 
