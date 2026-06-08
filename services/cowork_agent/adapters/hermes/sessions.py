@@ -23,7 +23,7 @@ from services.cowork_agent.adapters.hermes.state_db import (
     list_hermes_sessions,
     load_hermes_session_records,
 )
-from services.cowork_agent.messages import convert_messages
+from services.cowork_agent.engine.messages import convert_messages
 
 # Hermes reads sessions from state.db, never from the xo-projects scan.
 USES_PROJECT_SESSIONS = False

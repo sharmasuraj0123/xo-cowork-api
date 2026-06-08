@@ -17,7 +17,7 @@ import uuid
 
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.chat_state import active_streams
+from services.cowork_agent.engine.chat_state import active_streams
 from services.cowork_agent.adapters.openclaw.sessions import find_session_key
 from services.cowork_agent.adapters.openclaw.direct_stream import (
     create_new_session,

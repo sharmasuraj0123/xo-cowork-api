@@ -22,7 +22,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.cowork_agent.adapters.loader import try_load_capability
-from services.cowork_agent.chat_state import active_streams
+from services.cowork_agent.engine.chat_state import active_streams
 from services.xo_manifest import resolve_agent_name
 
 # Tracks recently-started streams so a fast reconnect (e.g. navigation-caused
@@ -36,7 +36,7 @@ router = APIRouter()
 
 def _resolve_backend_for_session(session_id: str) -> str | None:
     """Return the adapter name that owns session_id, or None (caller uses AGENT_NAME default)."""
-    from services.cowork_agent.sessions_io import find_session_backend
+    from services.cowork_agent.engine.sessions_io import find_session_backend
     return find_session_backend(session_id)
 
 
@@ -83,7 +83,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     Adapters are responsible for all session tracking (session_key, native IDs,
     session persistence). This function is adapter-agnostic.
     """
-    from services.cowork_agent.dispatcher import AgentDispatcher
+    from services.cowork_agent.engine.dispatcher import AgentDispatcher
 
     agent_name = stream_info["agent_name"]
     question = stream_info["question"]

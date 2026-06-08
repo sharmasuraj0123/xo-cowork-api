@@ -1,7 +1,7 @@
 """
 Dynamic loader for the active agent's visualizer source module.
 
-Mirrors :mod:`services.cowork_agent.usage_loader`. The active agent is
+Mirrors :mod:`services.cowork_agent.engine.usage_loader`. The active agent is
 resolved from ``AGENT_NAME`` (via
 ``services.cowork_agent.agent_registry.get_active_agent``); the
 corresponding source module is imported at

@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.cowork_agent.helpers import derive_title_native_claude, parse_jsonl
-from services.cowork_agent.messages import convert_native_claude_messages
-from services.cowork_agent.sessions_io import find_session_file, _resolve_index_path
+from services.cowork_agent.engine.messages import convert_native_claude_messages
+from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
 from services.cowork_agent.project_layout import xo_projects_root
 
 # claude_code stores its session metadata under xo-projects (.xo/sessions),

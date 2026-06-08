@@ -1,7 +1,7 @@
 """
 OpenClaw usage — discovery + parser + dashboard aggregator.
 
-Loaded by ``services.cowork_agent.usage_loader.load_usage_module()`` when
+Loaded by ``services.cowork_agent.engine.usage_loader.load_usage_module()`` when
 ``AGENT_NAME=openclaw``. Public contract (also satisfied by claude_code/hermes):
 
     get_session_files(*, agent_id=None) -> list[str]

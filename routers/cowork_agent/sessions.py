@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from services.cowork_agent.adapter_registry import list_adapters
 from services.cowork_agent.adapters.loader import try_load_capability
-from services.cowork_agent.sessions_io import (
+from services.cowork_agent.engine.sessions_io import (
     find_session_backend,
     load_all_sessions,
 )

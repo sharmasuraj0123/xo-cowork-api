@@ -1,7 +1,7 @@
 """
 Claude Code usage — discovery + parser + dashboard aggregator.
 
-Loaded by ``services.cowork_agent.usage_loader.load_usage_module()`` when
+Loaded by ``services.cowork_agent.engine.usage_loader.load_usage_module()`` when
 ``AGENT_NAME=claude_code``. Same public contract as openclaw.
 
 Source: ``~/.claude/projects/<encoded>/*.jsonl`` — every Anthropic transcript
