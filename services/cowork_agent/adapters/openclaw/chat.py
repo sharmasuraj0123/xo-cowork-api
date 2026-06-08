@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from services.cowork_agent.chat_state import active_streams
 from services.cowork_agent.sessions_io import find_session_key
-from services.cowork_agent.streaming import (
+from services.cowork_agent.adapters.openclaw.direct_stream import (
     create_new_session,
     emit_prefetched_sse,
     find_session_id_by_key,

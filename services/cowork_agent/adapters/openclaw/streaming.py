@@ -100,9 +100,9 @@ async def create_session(question: str) -> tuple[str, str, str]:
     Create a new OpenClaw session by sending the first message.
     Returns (session_key, session_id, response_text).
 
-    Wraps services.cowork_agent.streaming.create_new_session.
+    Wraps services.cowork_agent.adapters.openclaw.direct_stream.create_new_session.
     """
-    from services.cowork_agent.streaming import create_new_session
+    from services.cowork_agent.adapters.openclaw.direct_stream import create_new_session
 
     agent = get_active_agent()
     oc_agent = "main"

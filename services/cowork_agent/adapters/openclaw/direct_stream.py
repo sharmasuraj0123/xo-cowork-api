@@ -1,6 +1,11 @@
 """
-Chat streaming — bridges OpenClaw's OpenAI-compatible API to xo-cowork's SSE
-event stream expected by the frontend.
+OpenClaw direct-SSE chat path — bridges OpenClaw's OpenAI-compatible API to
+the xo-cowork SSE event stream the frontend expects.
+
+This is the bespoke ``/api/chat/prompt`` flow driven by the openclaw chat
+capability (``chat.py``'s ``handle_prompt`` / ``get_sse_generator``), distinct
+from the normalized ``stream_to_normalized`` path in ``streaming.py`` used by
+the shared AgentDispatcher.
 
 Two code paths:
 
@@ -78,9 +83,6 @@ def openclaw_agent_id_from_prompt_body(body: dict) -> str:
     return "main"
 
 
-# DEPRECATED: OpenClaw-specific parsing logic has moved to
-# services/cowork_agent/adapters/openclaw/streaming.py.
-# This function is kept here so existing callers continue to work.
 async def create_new_session(text: str, session_key: str, xo_agent_id: str | None = None) -> tuple[str, str, str]:
     """
     Create a new OpenClaw session by sending the first message.
@@ -150,7 +152,6 @@ async def create_new_session(text: str, session_key: str, xo_agent_id: str | Non
     return session_key, session_id, response_text
 
 
-# DEPRECATED: moved to services/cowork_agent/adapters/openclaw/streaming.py.
 async def stream_openclaw_to_sse(stream_id: str):
     """
     Sends the user message to OpenClaw's OpenAI-compatible API using the
@@ -274,7 +275,6 @@ async def stream_openclaw_to_sse(stream_id: str):
             pass
 
 
-# DEPRECATED: moved to services/cowork_agent/adapters/openclaw/streaming.py.
 async def emit_prefetched_sse(stream_id: str):
     """
     Await the background create_new_session task, emitting keepalives every
