@@ -234,23 +234,18 @@ def _resolve_status_fetchers(agent: str):
     """Return (fetch_models, fetch_channels) for the active agent, or
     (None, None) if the agent has no live-status sources yet.
 
-    Imports lazily so a missing adapter module (e.g. early dev state) never
-    breaks the import graph for callers that don't need it.
+    Resolved through the ``models_status`` / ``channels_status`` capabilities so
+    no backend is named here; an agent missing either capability falls through
+    to a no-op. Loaded lazily so a missing adapter module never breaks the
+    import graph for callers that don't need it.
     """
-    if agent == "openclaw":
-        from services.cowork_agent.adapters.openclaw.models_status import get_models_status
-        from services.cowork_agent.adapters.openclaw.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    if agent == "hermes":
-        from services.cowork_agent.adapters.hermes.models_status import get_models_status
-        from services.cowork_agent.adapters.hermes.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    if agent == "claude_code":
-        from services.cowork_agent.adapters.claude_code.models_status import get_models_status
-        from services.cowork_agent.adapters.claude_code.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    # Any future name without a status source falls through to a no-op.
-    return None, None
+    from services.cowork_agent.adapters.loader import try_load_capability
+
+    ms = try_load_capability("models_status", agent=agent)
+    cs = try_load_capability("channels_status", agent=agent)
+    fetch_models = getattr(ms, "get_models_status", None) if ms else None
+    fetch_channels = getattr(cs, "get_channels_status", None) if cs else None
+    return fetch_models, fetch_channels
 
 
 async def seed_agent_status() -> None:
