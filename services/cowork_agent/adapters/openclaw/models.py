@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from services.cowork_agent.agent_registry import get_active_agent
 from services.cowork_agent.helpers import normalize_agent_id
-from services.cowork_agent.openclaw_store import list_agent_entries, load_openclaw_config
+from services.cowork_agent.adapters.openclaw.store import list_agent_entries, load_openclaw_config
 from services.cowork_agent.settings import AGENTS_DIR, OPENCLAW_MODEL_CAPABILITIES
 
 _AGENT = get_active_agent()

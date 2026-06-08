@@ -11,13 +11,13 @@ import json
 import shutil
 from pathlib import Path
 
-from services.cowork_agent.settings import (
+from services.cowork_agent.adapters.openclaw.paths import (
     AGENTS_DIR,
     DEFAULT_OPENCLAW_WORKSPACE,
     OPENCLAW_DIR,
     OPENCLAW_JSON,
-    _WORKSPACE_SEED_FILES,
 )
+from services.cowork_agent.settings import _WORKSPACE_SEED_FILES
 from services.cowork_agent.helpers import normalize_agent_id
 
 

@@ -16,10 +16,24 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from services.cowork_agent.settings import OPENCLAW_API_URL, OPENCLAW_JSON
+from services.cowork_agent.helpers import _mask_sensitive
+from services.cowork_agent.adapters.openclaw.store import load_openclaw_config
 
 router = APIRouter()
+
+
+@router.get("/api/config/openclaw")
+def get_openclaw_config():
+    """Return the full openclaw config file (openclaw.json) with sensitive
+    fields masked. Mounted only when openclaw is the active agent; the generic
+    cross-agent reader is ``GET /api/config/agents/{name}``."""
+    cfg = load_openclaw_config()
+    if not cfg:
+        return JSONResponse(status_code=404, content={"detail": f"{OPENCLAW_JSON.name} not found"})
+    return _mask_sensitive(cfg)
 
 
 @router.get("/api/channels/openclaw/status")

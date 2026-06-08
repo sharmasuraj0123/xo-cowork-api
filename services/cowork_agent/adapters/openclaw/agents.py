@@ -10,7 +10,7 @@ Implements the uniform agents contract (same surface every adapter exposes):
   delete(agent_id)           -> resp | None     # None if not ours
 
 OpenClaw agents live under ``~/.openclaw/agents/<id>/`` and are listed in
-``openclaw.json`` (mutated via ``openclaw_store``). The core router forwards
+``openclaw.json`` (mutated via the adapter ``store`` module). The core router forwards
 here via ``load_capability('agents', …)`` instead of branching on
 ``backend == "openclaw"``.
 """
@@ -28,7 +28,7 @@ from services.cowork_agent.helpers import (
     _summarize_auth_profiles,
     normalize_agent_id,
 )
-from services.cowork_agent.openclaw_store import (
+from services.cowork_agent.adapters.openclaw.store import (
     _agent_model_to_display,
     apply_agent_list_entry,
     ensure_openclaw_agent_disk,

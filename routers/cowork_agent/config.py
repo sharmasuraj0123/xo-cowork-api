@@ -22,7 +22,6 @@ from fastapi.responses import JSONResponse
 from services.cowork_agent.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive
 from services.cowork_agent.agent_env import upsert_env_entry
-from services.cowork_agent.openclaw_store import load_openclaw_config
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.adapters.loader import try_load_capability
 
@@ -158,15 +157,6 @@ def ollama_config():
 @router.get("/api/config/local")
 def local_provider():
     return {"available": False}
-
-
-@router.get("/api/config/openclaw")
-def get_openclaw_config():
-    """Return the full agent config file (e.g. openclaw.json) with sensitive fields masked."""
-    cfg = load_openclaw_config()
-    if not cfg:
-        return JSONResponse(status_code=404, content={"detail": f"{_AGENT.config_file.name} not found"})
-    return _mask_sensitive(cfg)
 
 
 @router.get("/api/config/agents/{name}")
