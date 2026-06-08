@@ -171,10 +171,10 @@ async def hermes_profile_detail(profile: str):
     resolved = _resolve_profile(profile)
     if isinstance(resolved, JSONResponse):
         return resolved
-    # Delegate to the existing detail builder so the response shape stays
-    # in lockstep with /api/agents/{id}.
-    from routers.cowork_agent.agents import _agent_detail_hermes
-    return _agent_detail_hermes(profile)
+    # Delegate to the agents-capability detail builder so the response shape
+    # stays in lockstep with /api/agents/{id}.
+    from services.cowork_agent.adapters.hermes.agents import _detail
+    return _detail(profile)
 
 
 # ── Gateway lifecycle ────────────────────────────────────────────────────────
