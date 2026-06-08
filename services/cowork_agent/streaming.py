@@ -78,36 +78,6 @@ def openclaw_agent_id_from_prompt_body(body: dict) -> str:
     return "main"
 
 
-_HERMES_MODEL_PREFIX = "hermes"
-
-
-def hermes_profile_from_prompt_body(body: dict) -> str | None:
-    """Resolve the hermes profile name from a chat request.
-
-    Mirrors :func:`openclaw_agent_id_from_prompt_body` so both backends
-    use the same model-string encoding (``<backend>/<name>``):
-
-      1. Explicit ``agent_id`` in the body — set when the user picks a
-         profile from the sidebar.
-      2. ``model`` field with the hermes prefix (e.g. ``hermes/aria``).
-
-    Returns ``None`` if neither source identifies a profile; the caller
-    then lets the hermes adapter pick its own default.
-    """
-    explicit_id = body.get("agent_id")
-    if isinstance(explicit_id, str) and explicit_id.strip():
-        return explicit_id.strip()
-
-    model = body.get("model")
-    if isinstance(model, str):
-        lowered = model.strip().lower()
-        if lowered.startswith(f"{_HERMES_MODEL_PREFIX}/"):
-            rest = model.split("/", 1)[1] if "/" in model else ""
-            stripped = rest.strip()
-            return stripped or None
-    return None
-
-
 # DEPRECATED: OpenClaw-specific parsing logic has moved to
 # services/cowork_agent/adapters/openclaw/streaming.py.
 # This function is kept here so existing callers continue to work.
