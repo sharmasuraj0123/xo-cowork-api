@@ -57,6 +57,29 @@ def _adapter_sse_generator(stream_info: dict, stream_id: str):
     return factory(stream_id, stream_info)
 
 
+def _session_id_from_sse(chunk: str) -> str | None:
+    """Best-effort extract a ``session_id`` from an SSE chunk's data payload.
+
+    Adapter-owned streams resolve their session id mid-stream (e.g. an
+    openclaw prefetch only learns it from the gateway, then emits it in a
+    ``session-created`` event). This keeps ``_recently_started``'s session_id
+    current so a post-``done`` reconnect can replay session-created + done.
+    Backend-agnostic: parses only the generic SSE wire shape.
+    """
+    for line in chunk.split("\n"):
+        if line.startswith("data: "):
+            try:
+                payload = json.loads(line[6:])
+            except (ValueError, TypeError):
+                return None
+            if isinstance(payload, dict):
+                sid = payload.get("session_id")
+                if isinstance(sid, str) and sid:
+                    return sid
+            return None
+    return None
+
+
 _KEEPALIVE_INTERVAL = 20  # seconds of silence before emitting an SSE keepalive comment
 
 _SENTINEL = object()  # marks end-of-stream in the keepalive queue
@@ -280,7 +303,29 @@ async def chat_stream(stream_id: str):
             generator = not_found()
     elif adapter_gen is not None:
         # Adapter-owned stream (e.g. openclaw prefetch / live gateway stream).
-        generator = adapter_gen
+        # Give it the same reconnect grace as the dispatcher path below: a native
+        # EventSource auto-reconnects the instant the server closes the
+        # connection after `done`, and that reconnect can land before the client
+        # calls .close(). Without a _recently_started record it would hit the
+        # not-found branch and surface a spurious "Stream not found" error even
+        # though the response completed. The adapter owns active_streams cleanup,
+        # so we only track completion + the resolved session_id here.
+        done_event = asyncio.Event()
+        _recently_started[stream_id] = {
+            "session_id": stream_info.get("session_id") or stream_info.get("our_session_id"),
+            "started_at": now,
+            "done_event": done_event,
+        }
+        async def _adapter_with_signal():
+            try:
+                async for chunk in adapter_gen:
+                    sid = _session_id_from_sse(chunk)
+                    if sid:
+                        _recently_started[stream_id]["session_id"] = sid
+                    yield chunk
+            finally:
+                done_event.set()
+        generator = _adapter_with_signal()
     elif stream_info.get("agent_name"):
         # Shared dispatcher path with reconnect signal.
         active_streams.pop(stream_id, None)
