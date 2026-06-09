@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Optional
 
 from services.cowork_agent.adapters import usage_common as _uc
+from services.cowork_agent.engine.messages import content_blocks
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,9 +344,9 @@ def aggregate_for_dashboard(*, days: int = 30, tz: str = "local") -> dict:
                 session_ids.add(session_id)
                 last_user_time = rt
                 if session_title is None:
-                    for block in msg.get("content", []):
+                    for block in content_blocks(msg):
                         if block.get("type") == "text":
-                            text = block["text"].strip()
+                            text = block.get("text", "").strip()
                             if text and not text.startswith("Read HEARTBEAT.md"):
                                 session_title = text[:80] + ("..." if len(text) > 80 else "")
                                 break

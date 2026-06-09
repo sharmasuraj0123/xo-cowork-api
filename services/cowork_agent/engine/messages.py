@@ -24,15 +24,19 @@ def _normalize_content(msg: dict) -> str:
     return ""
 
 
-def _content_blocks(msg: dict) -> list[dict]:
+def content_blocks(msg: dict) -> list[dict]:
     """Normalize a message's ``content`` into a list of typed block dicts.
 
     OpenClaw stores user messages with ``content`` as a plain string
-    (e.g. ``"hi"``) but assistant messages as a list of typed blocks. The
-    converters below iterate blocks uniformly, so coerce the string form into a
-    single text block and drop any non-dict entries defensively — otherwise a
-    string ``content`` is iterated character-by-character and ``str.get`` raises
-    ``AttributeError`` (the 500 on GET /api/messages for new sessions).
+    (e.g. ``"hi"``) but assistant messages as a list of typed blocks. Any code
+    that iterates content blocks should go through this so the string form is
+    coerced into a single text block and non-dict entries are dropped
+    defensively — otherwise a string ``content`` is iterated
+    character-by-character and ``str.get`` raises ``AttributeError`` (the 500 on
+    GET /api/messages, and the same crash in the openclaw usage dashboard).
+
+    Public because adapters reuse it (e.g. openclaw usage aggregation), the same
+    way they reuse ``convert_messages``.
     """
     content = msg.get("content", [])
     if isinstance(content, str):
@@ -110,7 +114,7 @@ def convert_messages(session_id: str, records: list[dict]) -> list[dict]:
 
 def _convert_user_parts(msg_id, session_id, timestamp, msg):
     parts = []
-    for block in _content_blocks(msg):
+    for block in content_blocks(msg):
         if block.get("type") == "text":
             # Strip the workspace-context preamble appended by the frontend
             # in project-scoped chats; the model reads it from the JSONL but
@@ -130,7 +134,7 @@ def _convert_user_parts(msg_id, session_id, timestamp, msg):
 
 def _convert_assistant_parts(msg_id, session_id, timestamp, msg):
     parts = []
-    for block in _content_blocks(msg):
+    for block in content_blocks(msg):
         btype = block.get("type")
 
         if btype == "text":
@@ -186,9 +190,8 @@ def _convert_assistant_parts(msg_id, session_id, timestamp, msg):
 
 def _attach_tool_result(messages, tool_result_msg):
     tool_call_id = tool_result_msg.get("toolCallId", "")
-    result_content = tool_result_msg.get("content", [])
     output_text = ""
-    for block in result_content:
+    for block in content_blocks(tool_result_msg):
         if block.get("type") == "text":
             output_text += block.get("text", "")
 
