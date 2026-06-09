@@ -1,6 +1,31 @@
 # Backup & restore (GitHub-backed)
 
-xo-cowork-api ships endpoints for encrypted, GitHub-backed backups of xo-projects. All routes are under `/api/xo-projects-sync/` on the same base URL as the rest of cowork-api (`http://${HOST:-localhost}:${PORT:-5002}`). **The user never needs to open GitHub manually** — the backend creates and manages the repo for them.
+> **Hard constraint — read this before anything else in this file.**
+> Backups and restores happen *only* through the `/api/xo-projects-sync/*` endpoints documented below. Never tar, zip, `cp`, `rsync`, or `git push` the project to satisfy a "back up" or "save" request. The API does gpg encryption, secret exclusion, manifest + sha256 generation, chunking under GitHub's 100 MB limit, and the GitHub push as one atomic operation — none of which a local archive replicates. A local archive also won't be picked up by `GET /projects` and can't be restored by `POST /restore`. If the user explicitly wants a tarball or local copy (not a backup), confirm it's a one-off and tell them it isn't a restorable backup.
+
+xo-cowork-api ships endpoints for encrypted, GitHub-backed backups of xo-projects. All routes are under `/api/xo-projects-sync/` on the same base URL as the rest of cowork-api (`http://${HOST:-localhost}:${PORT:-5002}`). **The user never needs to open GitHub manually** — the backend creates and manages each repo for them.
+
+## Repo model
+
+**One private GitHub repo per xo-project**, named `xo-project-<project_id>`. The prefix is fixed (`xo-project-`) and used both as a creation convention and as the discovery filter when listing what's backed up.
+
+Repos are created **lazily** — the first backup of a given project is what creates `xo-project-<project_id>`. `/setup` only persists the passphrase; it never creates repos.
+
+Inside each per-project repo, snapshots sit at the repo root:
+
+```
+<owner>/xo-project-<project_id>/        (private)
+├── 20260514-153000/
+│   ├── manifest.json
+│   ├── part-000.gpg
+│   └── part-001.gpg
+├── 20260514-090000/
+│   ├── manifest.json
+│   └── part-000.gpg
+└── ...
+```
+
+There is no shared `xo-projects-backup` repo anymore.
 
 ## Contents
 
@@ -53,7 +78,6 @@ Always start with `GET /api/xo-projects-sync/status`:
 GET /api/xo-projects-sync/status
 → {
     "configured": false,
-    "repo_name": null,
     "token_source": "connector" | "env" | null,
     "gpg_available": true
   }
@@ -61,24 +85,35 @@ GET /api/xo-projects-sync/status
 
 If `configured: false`:
 
-1. Ask the user for a **passphrase** they'll remember. Tell them: "Write this down. Without it, none of your backups can ever be restored — not even by me."
-2. Ask for a **repo name**, suggest the default `xo-projects-backup`.
-3. Call setup:
+1. Ask the user for a **passphrase** they'll remember. Tell them: "Write this down. Without it, none of your backups can ever be restored — not even by me." There is no repo name to ask for; per-project repos are auto-named `xo-project-<project_id>`.
+2. Call setup:
 
 ```json
 POST /api/xo-projects-sync/setup
-{ "repo_name": "<repo_name>", "passphrase": "<from user>" }
+{ "passphrase": "<from user>" }
 → {
     "configured": true,
     "repo_owner": "<owner>",
-    "repo_name": "<repo_name>",
-    "repo_url": "https://github.com/<owner>/<repo_name>.git",
-    "repo_created": true | false,
     "token_source": "connector" | "env"
   }
 ```
 
-Setup persists `BACKUP_REPO_NAME` + `BACKUP_PASSWORD` into `xo-cowork-api/.env`, ensures the GitHub repo exists (creates as private if missing — using `gh` CLI first, REST API fallback), and updates the running process's env in place. It's idempotent: re-running with the same values is a no-op.
+Setup persists `BACKUP_PASSWORD` into `xo-cowork-api/.env`, verifies that gpg is installed and the GitHub token resolves, and confirms which account is configured (via `repo_owner`). It does **not** create any GitHub repos — those are created lazily on first backup of each project.
+
+> **Guardrail — re-running `/setup` is destructive, and the API enforces it.**
+> If a passphrase is already configured and the request carries a *different* one, the endpoint returns **409 `passphrase_already_set`** unless the body includes `"confirm_rotation": true`. Sending the *same* passphrase is a safe no-op and does not require the flag. The reason is hard: every existing snapshot was encrypted with the previous passphrase and becomes permanently unrecoverable after rotation. This is the same shape as the `force: true` confirmation on restore — strictly more dangerous, because there's no preview.
+>
+> Before retrying with `confirm_rotation: true`:
+> 1. Tell the user, plainly: *"This will make every existing backup unrecoverable. Snapshots can't be re-decrypted with the new passphrase."*
+> 2. Ask them to confirm they don't need to restore anything from existing snapshots.
+> 3. Only then re-send the request with the flag set.
+>
+> If they want to rotate *and* keep their old backups available, the answer is: restore everything first under the current passphrase, then rotate, then back up again.
+>
+> ```json
+> POST /api/xo-projects-sync/setup
+> { "passphrase": "<new>", "confirm_rotation": true }
+> ```
 
 ## Token resolution
 
@@ -90,7 +125,7 @@ If `token_source: null` or any endpoint returns **401**:
 2. Do **not** write the PAT to either file for them — they must do that step manually.
 3. After they confirm it's set, retry the original call.
 
-The token needs `repo` scope to create + push to a private repo.
+The token needs `repo` scope to create + push to private repos.
 
 ## Backup
 
@@ -108,6 +143,8 @@ POST /api/xo-projects-sync/projects/{project_id}
   }
 ```
 
+On first call for a given `project_id`, the backend creates `xo-project-<project_id>` as a private repo. Subsequent calls skip straight to clone-and-push.
+
 For all projects in one go:
 
 ```json
@@ -119,7 +156,7 @@ POST /api/xo-projects-sync/all
   ]
 ```
 
-Bulk backup is independent-per-project: a failure on one project does NOT abort the others. Each entry carries its own `ok` and optional `error`.
+Bulk backup is independent-per-project: a failure on one project does NOT abort the others. Each entry carries its own `ok` and optional `error`. Per-project repos are independent, so one project's push failure can't break another's history.
 
 ## List remote snapshots
 
@@ -131,12 +168,20 @@ GET /api/xo-projects-sync/projects
       "snapshots": [
         { "id": "<snapshot_id_newer>", "created_at": "2026-05-11T15:30:00+00:00", "size_bytes": 423618 },
         { "id": "<snapshot_id_older>", "created_at": "2026-05-10T10:00:00+00:00", "size_bytes": 421104 }
-      ]
+      ],
+      "error": null
+    },
+    {
+      "project_id": "<unreachable_project_id>",
+      "snapshots": [],
+      "error": "RuntimeError: git clone --depth=1 ... failed: <reason>"
     }
   ]
 ```
 
-Snapshots are sorted newest-first. The backend keeps the last 10 per project — older ones are auto-pruned on the next backup.
+The backend discovers projects by listing the user's GitHub repos and filtering names that start with `xo-project-`. Snapshots are sorted newest-first. The backend keeps the last 10 per project — older ones are auto-pruned on the next backup.
+
+Per-project `error` is `null` for healthy entries. If a repo can't be cloned or read (transient network, lost `repo` scope on the token, corrupted history), the project still appears in the list with `snapshots: []` and `error` set — **don't silently drop these from what you tell the user**. Surface "1 backup is unreachable" and offer to retry or check the token.
 
 ## Restore
 
@@ -186,23 +231,30 @@ POST /api/xo-projects-sync/all/restore
   ]
 ```
 
-`snapshot_id_map` is optional and per-project; missing entries use the latest snapshot for that project. `force` applies to every project. Each project's result is independent — a 409-equivalent on one doesn't abort the rest.
+`snapshot_id_map` is optional and per-project; missing entries use the latest snapshot for that project. `force` applies to every project. Each project's result is independent — a 409-equivalent on one doesn't abort the rest. The list of projects to restore is discovered by enumerating `xo-project-*` repos on GitHub, so this works on a fresh machine with an empty `~/xo-projects/`.
 
 ## What gets backed up
 
-- Project is tarred + gzipped → encrypted with `gpg --symmetric --cipher-algo AES256` using `BACKUP_PASSWORD` → split into ≤95 MB parts to stay under GitHub's 100 MB file limit.
+- Project is tarred + gzipped → encrypted with the configured passphrase → split into parts to stay under GitHub's file size limit.
 - If the project is a git repo, `.gitignore` is respected (via `git ls-files --cached --others --exclude-standard`). Non-git projects skip only the mandatory excludes (their `.gitignore` is NOT consulted in v1).
 - Mandatory excludes regardless of `.gitignore`: `.env`, `.env.*`, `.git/`, `node_modules/`, `.venv/`, `__pycache__/`, `*.sock`.
+- The destination is `<owner>/xo-project-<project_id>/<snapshot_id>/` — one repo per project, snapshots at the repo root.
+
+## Staging
+
+Every backup / restore / list operation uses an **ephemeral shallow clone** in a tempdir that's deleted on completion. No persistent staging directory exists between operations — disk usage when idle is zero. This is invisible to the caller; it's just useful to know that operations are stateless on the local side.
 
 ## Common error responses
 
 | Status | When | Surface to user |
 |---|---|---|
-| 400 `not_configured` | `/setup` hasn't been called yet | Run setup first; ask for passphrase + repo name |
+| 400 `not_configured` | `/setup` hasn't been called yet | Run setup first; ask the user for a passphrase |
 | 401 `github_auth_missing` | No connector token AND no `GITHUB_PAT` | Set up auth (UI flow OR env var); see Token resolution above |
 | 404 `project_not_found` | Local project doesn't exist (backup) | The project hasn't been created yet — list projects or scaffold first |
-| 404 `snapshot_not_found` | Remote has no snapshot for that project / snapshot_id wrong | Check `GET /projects` for valid ids |
+| 404 `snapshot_not_found` | No `xo-project-<id>` repo on GitHub, OR repo exists but has no valid manifests, OR pinned `snapshot_id` is wrong | Check `GET /projects` for valid ids |
 | 409 `project_exists` | Restore target exists locally | Ask user to confirm overwrite, then retry with `force: true` |
+| 409 `passphrase_already_set` | `/setup` called with a different passphrase than the one already configured | Read the rotation guardrail above. Only retry with `confirm_rotation: true` after the user explicitly accepts that existing backups become unrecoverable |
 | 500 `gpg_missing` | `gpg` not installed on host | Run `sudo apt-get install -y gnupg` (host responsibility, not user-fixable from chat) |
 | 502 `verify_failed` | Snapshot sha256 doesn't match manifest | Snapshot is corrupted; try a different snapshot id |
 | 502 `repo_create_failed` | Token lacks `repo` scope or GitHub rejected | Regenerate PAT with `repo` scope |
+| 502 `git_failed` | A git op (clone, push) failed against a project's repo | Surface the error; usually transient (retry) or auth-related |

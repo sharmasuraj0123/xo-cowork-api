@@ -15,6 +15,9 @@ per project with ``ok`` and an optional ``error`` field, so the caller
 can surface partial failures cleanly.
 
 Also reads the remote-side snapshot index for the `/projects` endpoint.
+
+Staging: every operation creates its own `tempfile.TemporaryDirectory`
+and shallow-clones the project's repo into it. No persistent staging.
 """
 
 from __future__ import annotations
@@ -22,13 +25,14 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from services.cowork_agent.project_layout import project_dir
 
 from . import crypto, github, manifest
-from .config import SyncConfig
+from .config import SyncConfig, repo_name_for
 
 
 @dataclass
@@ -56,7 +60,22 @@ class ChecksumMismatchError(RuntimeError):
     """Concatenated parts' sha256 did not match the manifest. Abort before decrypt."""
 
 
-_lock = asyncio.Lock()
+_project_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def _lock_for(project_id: str) -> asyncio.Lock:
+    return _project_locks[project_id]
+
+
+# Concurrency cap for `list_remote_projects`. Each unit of work is a
+# shallow clone + manifest read; bound to keep fd / subprocess use
+# reasonable and to stay polite to GitHub.
+_LIST_CONCURRENCY = 8
+
+# Concurrency cap for `restore_all`. Each unit of work is a shallow
+# clone + integrity check + gpg decrypt + extract + atomic move. gpg
+# and the extract step are CPU-heavy, so cap lower than the list path.
+_BULK_CONCURRENCY = 4
 
 
 # ── Public: listing ──────────────────────────────────────────────────────────
@@ -76,48 +95,71 @@ class SnapshotSummary:
 class ProjectSummary:
     project_id: str
     snapshots: list[SnapshotSummary]
+    error: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "project_id": self.project_id,
             "snapshots": [s.to_dict() for s in self.snapshots],
+            "error": self.error,
         }
 
 
 async def list_remote_projects(
     *,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
 ) -> list[ProjectSummary]:
-    """Read the staging clone's project subdirs and list snapshots per project.
+    """Enumerate every `xo-project-*` repo the user owns and list its snapshots.
 
-    Triggers a `git pull` to make sure we see snapshots pushed from
-    elsewhere. Returns projects sorted alphabetically; snapshots within
-    each project sorted newest-first.
+    For each project: shallow-clone into a tempdir, read snapshot
+    manifests, delete the tempdir. Returns projects sorted by id;
+    snapshots within each sorted newest-first.
     """
-    async with _lock:
-        staging = await github.ensure_clone(repo_url, auth=auth)
-        out: list[ProjectSummary] = []
-        for entry in sorted(staging.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            snapshots = _list_project_snapshots(entry)
-            if not snapshots:
-                continue
-            out.append(ProjectSummary(project_id=entry.name, snapshots=snapshots))
-        return out
+    project_ids = await github.list_xo_project_repos(auth)
+    if not project_ids:
+        return []
+
+    # Parallelize the per-repo shallow clones with a bounded semaphore.
+    # No per-project lock: this is read-only (own tempdir, own clone,
+    # discarded on completion). `asyncio.gather` preserves input order,
+    # so the result is still sorted by project_id.
+    sem = asyncio.Semaphore(_LIST_CONCURRENCY)
+
+    async def _one(pid: str) -> ProjectSummary | None:
+        repo_url = f"https://github.com/{owner}/{repo_name_for(pid)}.git"
+        async with sem:
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    clone_dir = Path(tmp) / "clone"
+                    await github.shallow_clone(repo_url, clone_dir, auth=auth)
+                    snapshots = _list_project_snapshots(clone_dir)
+            except Exception as exc:
+                # Surface unreachable / unreadable repos as entries
+                # with an error so the caller can show "1 backup is
+                # unreachable" instead of silently dropping the project.
+                return ProjectSummary(
+                    project_id=pid, snapshots=[],
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        if not snapshots:
+            return None
+        return ProjectSummary(project_id=pid, snapshots=snapshots)
+
+    results = await asyncio.gather(*(_one(pid) for pid in project_ids))
+    return [r for r in results if r is not None]
 
 
-def _list_project_snapshots(project_dir_in_repo: Path) -> list[SnapshotSummary]:
-    """Inspect each timestamped subdir; return summaries newest-first.
+def _list_project_snapshots(clone_dir: Path) -> list[SnapshotSummary]:
+    """Inspect each timestamped subdir at the clone root; return summaries newest-first.
 
     Folders without a valid manifest are silently skipped — they're
     either in-progress writes or corruption; either way they're not
     safe to advertise as restorable.
     """
     summaries: list[SnapshotSummary] = []
-    for snap_dir in sorted(project_dir_in_repo.iterdir(), reverse=True):
-        if not snap_dir.is_dir():
+    for snap_dir in sorted(clone_dir.iterdir(), reverse=True):
+        if not snap_dir.is_dir() or snap_dir.name.startswith("."):
             continue
         try:
             mani = manifest.SnapshotManifest.read(snap_dir)
@@ -139,15 +181,18 @@ async def restore_one(
     *,
     cfg: SyncConfig,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
     snapshot_id: str | None = None,
     force: bool = False,
 ) -> RestoreResult:
-    """Restore a single project. Acquires module lock for the duration."""
-    async with _lock:
-        staging = await github.ensure_clone(repo_url, auth=auth)
+    """Restore a single project from its `xo-project-<id>` repo.
+
+    Acquires the per-project lock for the duration so concurrent
+    restores of the same project don't race on the local target.
+    """
+    async with _lock_for(project_id):
         return await _restore_one_locked(
-            project_id, staging=staging, cfg=cfg,
+            project_id, cfg=cfg, auth=auth, owner=owner,
             snapshot_id=snapshot_id, force=force,
         )
 
@@ -156,34 +201,39 @@ async def restore_all(
     *,
     cfg: SyncConfig,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
     snapshot_id_map: dict[str, str] | None = None,
     force: bool = False,
 ) -> list[RestoreResult]:
-    """Restore every project that has snapshots in the remote.
+    """Restore every project that has a backup repo on GitHub.
 
     ``snapshot_id_map`` lets the caller pin specific versions per project
     (e.g., for partial rollback); projects not in the map use the latest
     snapshot. ``force`` applies uniformly to all projects.
     """
-    async with _lock:
-        staging = await github.ensure_clone(repo_url, auth=auth)
-        results: list[RestoreResult] = []
-        snapshot_id_map = snapshot_id_map or {}
-        for entry in sorted(staging.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            project_id = entry.name
+    snapshot_id_map = snapshot_id_map or {}
+    project_ids = await github.list_xo_project_repos(auth)
+    if not project_ids:
+        return []
+
+    # Parallelize per-project restores with a bounded semaphore. Each
+    # project has its own repo and its own per-project lock, so the
+    # branches don't share state; the cap exists to limit concurrent
+    # gpg/extract CPU pressure.
+    sem = asyncio.Semaphore(_BULK_CONCURRENCY)
+
+    async def _one(pid: str) -> RestoreResult:
+        async with sem:
             try:
-                result = await _restore_one_locked(
-                    project_id, staging=staging, cfg=cfg,
-                    snapshot_id=snapshot_id_map.get(project_id),
+                return await restore_one(
+                    pid, cfg=cfg, auth=auth, owner=owner,
+                    snapshot_id=snapshot_id_map.get(pid),
                     force=force,
                 )
-                results.append(result)
             except Exception as exc:
-                results.append(_error_result(project_id, exc))
-        return results
+                return _error_result(pid, exc)
+
+    return await asyncio.gather(*(_one(pid) for pid in project_ids))
 
 
 # ── Internal: locked single-project path ─────────────────────────────────────
@@ -192,62 +242,67 @@ async def restore_all(
 async def _restore_one_locked(
     project_id: str,
     *,
-    staging: Path,
     cfg: SyncConfig,
+    auth: github.GitHubAuth,
+    owner: str,
     snapshot_id: str | None,
     force: bool,
 ) -> RestoreResult:
-    """All restore logic runs here. Caller is responsible for the lock + pull."""
+    """All restore logic runs here. Caller is responsible for the per-project lock."""
     assert cfg.passphrase is not None  # caller validated cfg.configured
 
-    project_root = staging / project_id
-    if not project_root.is_dir():
-        raise SnapshotNotFoundError(f"No snapshots for project {project_id!r} in backup repo.")
-
-    resolved_snapshot_id = snapshot_id or _newest_snapshot_id(project_root)
-    if resolved_snapshot_id is None:
+    repo_name = repo_name_for(project_id)
+    if not await github.repo_exists(owner, repo_name, auth=auth):
         raise SnapshotNotFoundError(
-            f"Project {project_id!r} has no valid snapshots in backup repo."
+            f"No backup repo for project {project_id!r} (expected {owner}/{repo_name})."
         )
+    repo_url = f"https://github.com/{owner}/{repo_name}.git"
 
-    snap_dir = project_root / resolved_snapshot_id
-    if not snap_dir.is_dir():
-        raise SnapshotNotFoundError(
-            f"Snapshot {resolved_snapshot_id!r} not found for project {project_id!r}."
-        )
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        clone_dir = tmp_root / "clone"
+        await github.shallow_clone(repo_url, clone_dir, auth=auth)
 
-    mani = manifest.SnapshotManifest.read(snap_dir)
+        resolved_snapshot_id = snapshot_id or _newest_snapshot_id(clone_dir)
+        if resolved_snapshot_id is None:
+            raise SnapshotNotFoundError(
+                f"Project {project_id!r} has no valid snapshots in backup repo."
+            )
 
-    # Verify integrity BEFORE deciding to overwrite local state. A bad
-    # snapshot must not block a working local copy.
-    parts = [snap_dir / name for name in mani.parts]
-    missing = [p for p in parts if not p.is_file()]
-    if missing:
-        raise SnapshotNotFoundError(
-            f"Snapshot {resolved_snapshot_id} is missing parts: {[p.name for p in missing]}"
-        )
-    actual_sha = manifest.sha256_files_concat(parts)
-    if actual_sha != mani.sha256:
-        raise ChecksumMismatchError(
-            f"Snapshot {resolved_snapshot_id} sha256 mismatch (manifest={mani.sha256[:12]} actual={actual_sha[:12]}). "
-            "Possible corruption — refusing to decrypt."
-        )
+        snap_dir = clone_dir / resolved_snapshot_id
+        if not snap_dir.is_dir():
+            raise SnapshotNotFoundError(
+                f"Snapshot {resolved_snapshot_id!r} not found for project {project_id!r}."
+            )
 
-    target = project_dir(project_id)
-    if target.exists():
-        if not force:
+        mani = manifest.SnapshotManifest.read(snap_dir)
+
+        # Verify integrity BEFORE deciding to overwrite local state. A bad
+        # snapshot must not block a working local copy.
+        parts = [snap_dir / name for name in mani.parts]
+        missing = [p for p in parts if not p.is_file()]
+        if missing:
+            raise SnapshotNotFoundError(
+                f"Snapshot {resolved_snapshot_id} is missing parts: {[p.name for p in missing]}"
+            )
+        actual_sha = manifest.sha256_files_concat(parts)
+        if actual_sha != mani.sha256:
+            raise ChecksumMismatchError(
+                f"Snapshot {resolved_snapshot_id} sha256 mismatch (manifest={mani.sha256[:12]} actual={actual_sha[:12]}). "
+                "Possible corruption — refusing to decrypt."
+            )
+
+        target = project_dir(project_id)
+        if target.exists() and not force:
             raise ProjectExistsError(
                 f"Project folder already exists at {target}. "
                 "Pass force=true to overwrite; existing local data will be lost."
             )
-        # Will replace at the end — keep on disk until the new content is ready.
 
-    # Decrypt + extract into a temp dir first, then atomic move into place.
-    # Two reasons:
-    # 1. If decrypt fails (wrong passphrase), the local project is untouched.
-    # 2. If extract fails halfway, we don't leave a half-written project tree.
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_root = Path(tmp)
+        # Decrypt + extract into a sibling temp dir first, then atomic
+        # move into place. Two reasons:
+        # 1. If decrypt fails (wrong passphrase), the local project is untouched.
+        # 2. If extract fails halfway, we don't leave a half-written project tree.
         plaintext_tar = tmp_root / "snapshot.tar.gz"
         try:
             await crypto.decrypt_from_chunks(parts, plaintext_tar, cfg.passphrase)
@@ -275,9 +330,9 @@ async def _restore_one_locked(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _newest_snapshot_id(project_root: Path) -> str | None:
+def _newest_snapshot_id(clone_dir: Path) -> str | None:
     candidates = sorted(
-        (d for d in project_root.iterdir() if d.is_dir()),
+        (d for d in clone_dir.iterdir() if d.is_dir() and not d.name.startswith(".")),
         key=lambda d: d.name,
         reverse=True,
     )

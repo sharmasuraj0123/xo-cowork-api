@@ -1,15 +1,17 @@
 ---
 name: xo-projects
-description: Use whenever an agent creates, operates inside, or manages an xo-project. Covers scaffolding a new xo-project via the xo-cowork-api; the boot ritual, canonical file map, and closing conventions for a project folder (AGENTS.md is the operating contract); recording and updating todos across a session; and backing up, restoring, syncing, snapshotting, or migrating xo-projects through the GitHub-backed sync API. Trigger this for any mention of xo-projects, .xo/, xo-cowork-api, or AGENTS.md, and for requests to back up / restore / sync / snapshot / migrate project state — even when the user doesn't name the skill explicitly. Two hard constraints hold from the moment the folder exists: new xo-projects are created only via the xo-cowork-api, and the agent never writes to .xo/ (a watcher service owns that directory).
+description: Use whenever an agent creates, operates inside, or manages an xo-project. Covers scaffolding a new xo-project via the xo-cowork-api; the boot ritual, canonical file map, and closing conventions for a project folder (AGENTS.md is the operating contract); recording and updating todos across a session; and backing up, restoring, syncing, snapshotting, or migrating xo-projects through the GitHub-backed sync API. Trigger this for any mention of xo-projects, .xo/, xo-cowork-api, or AGENTS.md, and for requests to back up / restore / sync / snapshot / migrate project state — even when the user doesn't name the skill explicitly. Four hard constraints — new xo-projects are created only via the xo-cowork-api; the agent never writes to .xo/ (a watcher service owns that directory); backups and restores happen only through the sync API (never via local tar, zip, cp, rsync, or pushing to an external git remote); and when this skill covers a task, the skill is the way to do it — no improvising with shell commands or ad-hoc copies because the proper tool feels heavy.
 ---
 
 # xo-projects
 
 This skill covers the whole lifecycle of an xo-project. It does three things:
 
-1. **Two hard constraints** (enforced outside the agent's judgment):
+1. **Four hard constraints** (enforced outside the agent's judgment):
    - New xo-projects are created via the xo-cowork-api only.
    - The agent does not write to `.xo/` — a watcher service tails runtime logs and owns the entire directory.
+   - **Backups and restores happen only through `/api/xo-projects-sync/*`.** Never `tar`, `zip`, `cp`, `rsync`, or `git push` the project to a local archive or external remote — even when the user just says "back this up" or "save this somewhere safe." Local copies miss the encryption, the manifest, and the secret excludes the API enforces, and they can't be discovered or restored by `GET /projects`.
+   - **When this skill covers a task, the skill is the way to do it.** Creating a project, recording todos, backing up, restoring — use the documented endpoints and native tools. Don't substitute shell commands, ad-hoc file copies, or local approximations because the proper tool feels heavy. If a documented tool fails, surface the failure to the human; don't silently roll your own.
 2. **A guide to every file in an xo-project:** what it's for, how it lives across the session, and the reasoning behind the conventions — so the agent can apply judgment when an edge case appears.
 3. **Pointers to two reference files** for situational, API-heavy detail — the todos HTTP API (only non-Claude-Code runtimes need it) and the backup/restore API — so they load only when the task actually calls for them.
 
@@ -27,6 +29,19 @@ Read this file top to bottom on first contact — the four parts below are all h
 - **`references/backup-restore.md`** — the GitHub-backed backup/restore/sync API. Read it when the user asks to back up, save, snapshot, sync, push, restore, pull, download, recover, or migrate projects.
 
 Keeping these out of the main file means a routine session doesn't drag endpoint schemas or the entire backup API into context.
+
+---
+
+## You are a coworker, not a one-shot tool
+
+You're rarely alone in an xo-project. The human watches the same project folder in a UI. Other agents may read it before starting their own work, or pick up after you tomorrow. You yourself may come back to it next session. The conventions in this skill exist because that shared context only works if everyone leaves a clean, accurate trail.
+
+Two things matter most:
+
+1. **Show your work in real time, not in retrospect.** Todos are the public log of what you're doing right now — what you've decided, what's in flight, what's done. Update them as state changes (Part 3 has the mechanics). Don't batch updates at the end; by then the human and other agents have already had to guess.
+2. **Be honest about state.** Don't mark a todo `completed` if it's only partially done. Don't leave abandoned `in_progress` items dangling. If you change your mind, mark it `cancelled` with the reason. The next person — human or agent — trusts the trail you left.
+
+Everything else is in the hard constraints above and the parts that follow: workspace hygiene in Part 2, the todo lifecycle in Part 3.
 
 ---
 
@@ -86,7 +101,9 @@ Two guardrails to internalize **before** opening AGENTS.md, since they apply fro
 
 ## Part 3 — Recording todos throughout the session
 
-`<project>/.xo/todos.json` is the live, cross-session view of what's in flight. The frontend, the watcher, and peers all read from it, so **every agent keeps it accurate continuously** — not just once at boot. Create todos as the plan takes shape; flip status as work moves; close each one deliberately.
+This is the mechanics behind the coworking discipline at the top of this file.
+
+**`<project>/.xo/todos.json` is the live, cross-session view of what's in flight** — it's what the human sees in the UI, what other agents read before they start, and what you yourself rely on when you come back to the project tomorrow. The frontend, the watcher, and peers all read from it, so **every agent keeps it accurate continuously** — not just once at boot. Every concrete step becomes a todo before you take it; flip status as work moves; close each one deliberately.
 
 **Two write paths — pick the one for your runtime, never mix them:**
 
@@ -107,6 +124,17 @@ The todo list is the **live** view of in-flight work. Past, finished work belong
 
 ## Part 4 — Backup & restore (GitHub-backed)
 
-xo-cowork-api ships endpoints for encrypted, GitHub-backed backups of xo-projects, all under `/api/xo-projects-sync/`. The user never needs to open GitHub manually — the backend creates and manages the repo.
+**This is a hard constraint, not a recommendation.** When the user asks to back up, save, snapshot, sync, push, upload, restore, pull, download, recover, or migrate projects — or says they're moving to a new workspace — the only correct action is to call the `/api/xo-projects-sync/*` endpoints. Stop and read `references/backup-restore.md` before taking any action; do not improvise.
 
-**Read `references/backup-restore.md`** when the user asks to back up, save, snapshot, sync, push, upload, restore, pull, download, recover, or migrate projects — or when they say they're moving to a new workspace. It covers the first-run setup flow (passphrase + repo), token resolution, per-project and bulk backup/restore, listing snapshots, what gets backed up, and the error table.
+**Forbidden local alternatives — never do any of these in response to a "back up" or "save" request:**
+
+- `tar czf project.tar.gz <project>` or any local archive — not encrypted, no manifest, won't be discoverable by `GET /projects`, can't be restored by the API, and includes secrets the API would exclude.
+- `cp -r <project> <somewhere>` or copying to `~/Downloads`, `/tmp`, a USB mount, another folder — same problems, plus carries `.env` files.
+- `git push <some-other-remote>` — bypasses the encryption layer and pushes secrets directly to a third remote.
+- Manually creating a GitHub repo and pushing the project to it — the API does this *for* you (per-project, on first backup), and your manual repo won't match the `xo-project-<id>` naming the API needs for discovery.
+
+If the user explicitly asks for a local tarball or a manual copy (not a backup), confirm that's what they want, do it as a one-off, and tell them it is **not** a backup and won't be available for restore.
+
+**The architecture this constraint protects:** xo-cowork-api ships endpoints under `/api/xo-projects-sync/` that encrypt the project with `gpg`, generate a manifest with a sha256, split it into chunks under GitHub's 100 MB limit, and push to a private GitHub repo. Each xo-project lives in its own private repo named `xo-project-<project_id>`, lazily created on first backup. The user never opens GitHub manually — the backend creates and manages each repo.
+
+**Read `references/backup-restore.md`** for the first-run setup flow (passphrase only), token resolution, per-project and bulk backup/restore, listing snapshots, what gets backed up, the staging model, and the error table.

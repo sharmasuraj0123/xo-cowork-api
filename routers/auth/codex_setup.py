@@ -27,9 +27,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -355,6 +357,137 @@ def _upsert_agent_auth_profile(
             pass
 
 
+_HERMES_CODEX_PRIMARY_MODEL = "gpt-5.4"  # valid codex slug (see hermes codex_models.py)
+_HERMES_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _persist_token_to_hermes_auth(token: str, refresh: Optional[str]) -> bool:
+    """Write the codex OAuth credential into the DEFAULT hermes profile's
+    ``auth.json`` using hermes's own canonical structure, mirroring hermes's
+    ``_save_codex_tokens`` (hermes_cli/auth.py).
+
+    The source of truth hermes reads is ``providers["openai-codex"]["tokens"]``
+    — the ``credential_pool`` entry is *derived* from it at gateway load time
+    (credential_pool.py seeds ``device_code`` from this state). Writing the
+    pool directly does nothing; writing ``providers.tokens`` + flipping
+    ``active_provider`` is what makes hermes pick up codex.
+
+    Default profile only (``~/.hermes``): codex's OAuth refresh token is
+    single-use, so fanning the same token across profiles would let them
+    invalidate each other on independent refresh. Returns True on success.
+    """
+    from services.cowork_agent.settings import HERMES_DIR
+
+    auth_path = HERMES_DIR / "auth.json"
+    last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    tokens: dict = {"access_token": token}
+    if refresh:
+        tokens["refresh_token"] = refresh
+
+    try:
+        if auth_path.is_file():
+            try:
+                data = json.loads(auth_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"[codex-setup] hermes auth.json unreadable ({e}); starting fresh")
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+
+        data.setdefault("version", 1)
+        # Clear any stale derived pool entry so hermes rebuilds it from tokens.
+        pool = data.get("credential_pool")
+        if isinstance(pool, dict):
+            pool.pop("openai-codex", None)
+        # Clear a prior suppression so the device_code source seeds again.
+        sup = data.get("suppressed_sources")
+        if isinstance(sup, dict):
+            sup.pop("openai-codex", None)
+
+        providers = data.setdefault("providers", {})
+        if not isinstance(providers, dict):
+            providers = {}
+            data["providers"] = providers
+        providers["openai-codex"] = {
+            "tokens": tokens,
+            "last_refresh": last_refresh,
+            "auth_mode": "chatgpt",
+        }
+        data["active_provider"] = "openai-codex"
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        tmp = str(auth_path) + ".tmp"
+        # auth.json holds secrets — keep it 0600 like hermes does.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, auth_path)
+        print(f"[codex-setup] hermes default auth.json: providers.openai-codex.tokens set, active_provider=openai-codex")
+        return True
+    except OSError as e:
+        print(f"[codex-setup] failed to write hermes auth.json ({e})")
+        return False
+
+
+def _set_hermes_primary_model() -> None:
+    """Make ``openai-codex``/``gpt-5.4`` the primary model+provider for the
+    DEFAULT hermes profile via ``hermes config set`` (mirrors openclaw's
+    ``_upsert_openclaw_config``). Without this the profile keeps its prior
+    default and never routes through codex even with the credential present.
+    Best-effort; failures are logged, never raised."""
+    try:
+        from services.cowork_agent.agent_registry import get_agent
+        from services.cowork_agent.settings import HERMES_DIR
+        hermes_bin = get_agent("hermes").binary
+    except Exception as e:  # noqa: BLE001
+        print(f"[codex-setup] can't resolve hermes binary; skipping primary-model set ({e})")
+        return
+
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(HERMES_DIR)
+    for key, value in (
+        ("model.provider", "openai-codex"),
+        ("model.base_url", _HERMES_CODEX_BASE_URL),
+        ("model.default", _HERMES_CODEX_PRIMARY_MODEL),
+    ):
+        try:
+            r = subprocess.run(
+                [hermes_bin, "config", "set", key, value],
+                cwd=str(HERMES_DIR), env=env, capture_output=True, text=True,
+                timeout=30, close_fds=True, start_new_session=True, check=False,
+            )
+            if r.returncode != 0:
+                print(f"[codex-setup] `hermes config set {key}` rc={r.returncode}: {(r.stderr or r.stdout or '').strip()[:200]}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[codex-setup] `hermes config set {key}` failed ({e})")
+    print(f"[codex-setup] hermes default primary model → openai-codex/{_HERMES_CODEX_PRIMARY_MODEL}")
+
+
+def _remove_codex_cli_auth() -> None:
+    """Delete ``~/.codex/auth.json`` after adopting its token into hermes.
+
+    Codex's OAuth refresh tokens are single-use; if both the codex CLI store
+    and hermes hold the same account's token, whichever refreshes first
+    invalidates the other (``token_invalidated`` 401). Removing the CLI copy
+    leaves hermes as the sole holder. Best-effort."""
+    for p in (
+        Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "codex" / "auth.json",
+        Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "codex" / "auth.json",
+        Path.home() / ".codex" / "auth.json",
+        Path.home() / ".config" / "codex" / "auth.json",
+    ):
+        try:
+            if p.is_file():
+                p.unlink()
+                print(f"[codex-setup] removed codex CLI auth {p} (single-holder for hermes)")
+        except OSError as e:
+            print(f"[codex-setup] couldn't remove {p} ({e})")
+
+
 def _ensure_node_on_path() -> None:
     """
     Prepend the directory containing `npm` to PATH if it's not already there.
@@ -644,24 +777,46 @@ async def codex_setup():
                         creds = _read_codex_credentials()
                         if creds and creds.get("token"):
                             token = creds["token"]
+                            refresh = creds.get("refresh")
+                            email = creds.get("email")
                             for key in _TOKEN_ENV_KEYS:
                                 os.environ[key] = token
-                            _persist_token_to_env_files(token)
-                            print(f"[codex-setup] token persisted (len={len(token)})")
-                            email = creds.get("email")
-                            if email:
-                                _upsert_openclaw_config(email)
-                                refresh = creds.get("refresh")
-                                expires_ms = creds.get("expires_ms")
-                                if refresh and expires_ms:
-                                    _upsert_agent_auth_profile(email, token, refresh, expires_ms)
-                                else:
-                                    print(
-                                        "[codex-setup] missing refresh/expires; "
-                                        "skipping agent auth-profiles.json upsert"
-                                    )
+
+                            # Persist to whichever backend is active (AGENT_NAME),
+                            # matching the dispatch the rest of the API uses.
+                            active_backend = os.getenv("AGENT_NAME", "openclaw")
+                            if active_backend == "hermes":
+                                # Write codex into hermes's canonical auth structure
+                                # (providers.tokens + active_provider) and set it as
+                                # the default profile's primary model, then drop the
+                                # codex CLI copy so it can't refresh-race the token.
+                                if await asyncio.to_thread(_persist_token_to_hermes_auth, token, refresh):
+                                    await asyncio.to_thread(_set_hermes_primary_model)
+                                    await asyncio.to_thread(_remove_codex_cli_auth)
+                                    # The running gateway caches its credential pool
+                                    # at startup — restart so it picks up the new
+                                    # codex token without a manual step.
+                                    try:
+                                        from routers.cowork_agent.channels import _run_hermes_sh
+                                        rc, _out = await _run_hermes_sh("restart", timeout_s=90.0)
+                                        print(f"[codex-setup] hermes gateway restart rc={rc}")
+                                    except Exception as e:  # noqa: BLE001
+                                        print(f"[codex-setup] hermes gateway restart skipped ({e})")
                             else:
-                                print("[codex-setup] no email claim found, skipping openclaw.json upsert")
+                                _persist_token_to_env_files(token)
+                                print(f"[codex-setup] token persisted (len={len(token)})")
+                                if email:
+                                    _upsert_openclaw_config(email)
+                                    expires_ms = creds.get("expires_ms")
+                                    if refresh and expires_ms:
+                                        _upsert_agent_auth_profile(email, token, refresh, expires_ms)
+                                    else:
+                                        print(
+                                            "[codex-setup] missing refresh/expires; "
+                                            "skipping agent auth-profiles.json upsert"
+                                        )
+                                else:
+                                    print("[codex-setup] no email claim found, skipping openclaw.json upsert")
                         else:
                             print("[codex-setup] login succeeded but no token found in credential files")
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
