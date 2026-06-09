@@ -16,8 +16,30 @@ def _normalize_content(msg: dict) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        return "".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
     return ""
+
+
+def _content_blocks(msg: dict) -> list[dict]:
+    """Normalize a message's ``content`` into a list of typed block dicts.
+
+    OpenClaw stores user messages with ``content`` as a plain string
+    (e.g. ``"hi"``) but assistant messages as a list of typed blocks. The
+    converters below iterate blocks uniformly, so coerce the string form into a
+    single text block and drop any non-dict entries defensively — otherwise a
+    string ``content`` is iterated character-by-character and ``str.get`` raises
+    ``AttributeError`` (the 500 on GET /api/messages for new sessions).
+    """
+    content = msg.get("content", [])
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if isinstance(content, list):
+        return [b for b in content if isinstance(b, dict)]
+    return []
 
 
 def convert_messages(session_id: str, records: list[dict]) -> list[dict]:
@@ -88,7 +110,7 @@ def convert_messages(session_id: str, records: list[dict]) -> list[dict]:
 
 def _convert_user_parts(msg_id, session_id, timestamp, msg):
     parts = []
-    for block in msg.get("content", []):
+    for block in _content_blocks(msg):
         if block.get("type") == "text":
             # Strip the workspace-context preamble appended by the frontend
             # in project-scoped chats; the model reads it from the JSONL but
@@ -108,7 +130,7 @@ def _convert_user_parts(msg_id, session_id, timestamp, msg):
 
 def _convert_assistant_parts(msg_id, session_id, timestamp, msg):
     parts = []
-    for block in msg.get("content", []):
+    for block in _content_blocks(msg):
         btype = block.get("type")
 
         if btype == "text":
