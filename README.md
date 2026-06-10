@@ -285,25 +285,6 @@ The wiki is the canonical reference for the API surface, kept in sync with the c
 
 ---
 
-## Status
-
-Maturity, honestly assessed (full breakdown in the [Architecture scorecard](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Architecture#10-vision-achievement-scorecard)):
-
-| Capability | Status |
-|---|---|
-| Multi-runtime adapter layer (Claude Code + OpenClaw + Hermes) | ✅ ~90% — Codex still legacy-only |
-| Project ↔ agent decoupling + scaffold | ✅ ~90% |
-| Sharing-safe project folder | ✅ ~95% |
-| Memory subsystem (semantic / episodic / procedural / working) | ✅ ~90% |
-| Connectors (Drive, OneDrive, GitHub, Vercel, Manus) | ✅ ~88% |
-| Unified usage / dashboard | 🟡 ~40% — watcher service still pending |
-| BFF layer for projects + secrets | 🟡 fresh — added 2026-05-12 |
-| Peer-sync between cowork instances | 🔴 0% — Phase 1 spec is in the wiki |
-| B2B chat-proxy hardening | 🔴 0% |
-| RBAC across instances | 🔴 0% — Clerk identity ready, no peer/grant code yet |
-
----
-
 ## Project structure
 
 ```
@@ -356,7 +337,7 @@ Issues and PRs welcome on the [`development` branch](https://github.com/sharmasu
 Conventions:
 
 - **Endpoints live in `routers/`** (thin handlers). Logic lives in `services/`. Top-level `server.py` is the only file that imports both.
-- **Adapters are auto-discovered.** Drop `config/agents/<name>/` + `services/cowork_agent/adapters/<name>/adapter.py` — no registry edit, no router changes, and **no core file may name a specific agent** (enforced by `scripts/check_agent_modularity.py`). See [DEVELOPING.md](DEVELOPING.md).
+- **Adapters are auto-discovered.** Drop `config/agents/<name>/` + `services/cowork_agent/adapters/<name>/adapter.py` — no registry edit, no router changes, and **no core file may name a specific agent** (the modularity invariant, enforced in review). See [DEVELOPING.md](DEVELOPING.md).
 - **The project folder is sacred.** Don't write chat content, runtime credentials, or anything else that wouldn't survive a git push into `~/xo-projects/<id>/`.
 
 ---

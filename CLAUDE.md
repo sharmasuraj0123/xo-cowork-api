@@ -42,8 +42,8 @@
 ## Validation and safety
 
 - The project venv is `venv/bin/python` (system `python3` lacks fastapi).
-- After touching core, run the modularity guard (must pass):
-  `venv/bin/python scripts/check_agent_modularity.py`.
+- After touching core, uphold the modularity invariant (no agent name in core
+  code; see DEVELOPING.md §6). A local AST guard can check it if present.
 - Import gate + route parity (expect 146 / 149 / 173 for
   claude_code / openclaw / hermes): `AGENT_NAME=<a> venv/bin/python -c "import server"`.
 - Validate behavior after edits (lint, compile/tests where feasible).

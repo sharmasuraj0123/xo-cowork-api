@@ -63,8 +63,6 @@ services/
     connectors/                   external services: gdrive/onedrive/github/vercel/manus/rclone_*/token_store
     visualizer/  xo_projects_sync/  project_template/   subsystems
     helpers.py project_layout.py scopes.py xo_cowork_state.py skill_installer.py providers_status_lib.py
-
-scripts/check_agent_modularity.py the modularity guard (local-only; see §6)
 ```
 
 The **only** two trees an agent author touches are `config/agents/<name>/` and
@@ -163,8 +161,8 @@ No core file changes. To add agent `foo`:
    `routes.py`, …). Skip the rest — their endpoints degrade to empty/501.
 5. (Optional) `settings.sh`/`agent.sh`/`troubleshoot.py` for setup + lifecycle.
 
-Run with `AGENT_NAME=foo python server.py` and validate (§5). Then run the
-modularity guard (§6) to confirm you didn't leak the name into core.
+Run with `AGENT_NAME=foo python server.py` and validate (§5), then confirm you
+didn't leak the agent name into core (the modularity invariant, §6).
 
 ---
 
@@ -189,8 +187,8 @@ for a in claude_code openclaw hermes; do
     print('$a', len({r.path for r in server.app.routes if hasattr(r,'path')}))"
 done
 
-# 2. Modularity guard — must pass (see §6)
-venv/bin/python scripts/check_agent_modularity.py
+# 2. Modularity invariant (§6) — no agent name in core code. Upheld in review;
+#    a local AST guard can verify it if you have it (kept out of the repo, §6).
 
 # 3. Smoke where data exists: list_models() per agent; /api/usage,
 #    /models/status, /channels/status, /providers/status, /api/sessions non-5xx
@@ -202,7 +200,7 @@ don't carry the `/api/channels/hermes/*` and `/api/config/hermes*` routes.
 
 ---
 
-## 6. The modularity invariant (and its guard)
+## 6. The modularity invariant
 
 **No core file may name a specific agent (`openclaw`/`hermes`/`claude_code`) in
 code.** Core is everything except the three agent-owned trees:
@@ -210,16 +208,18 @@ code.** Core is everything except the three agent-owned trees:
 `config/models/<name>/`. Agent names may appear in those trees only; everywhere
 else, resolve by `AGENT_NAME` through the capability loader.
 
-`scripts/check_agent_modularity.py` enforces this (AST-based; ignores
-docstrings/comments and `config.models.*` imports). Run it after touching core.
-A small documented allowlist covers four frozen exceptions:
+The rule is upheld in review. A small documented allowlist covers four frozen
+exceptions:
 
 - the `openclaw` safe-boot default in `agent_registry.py`,
 - the `/providers/status` OAuth keys (`claude_code`/`codex`) in `providers_status_lib.py`,
 - the legacy `/openclaw/usage` URL alias in `routers/cowork_agent/legacy/openclaw_usage.py`,
 - codex's legacy openclaw-gateway credential writes in `routers/auth/codex_setup.py`.
 
-> `scripts/` is git-excluded here (local dev tooling); copy/restore it as needed.
+> An AST-based guard for this invariant (ignores docstrings/comments and
+> `config.models.*` imports) is kept as local dev tooling, not committed. If you
+> have it, run it after touching core; otherwise verify the rule by hand against
+> the allowlist above.
 
 ---
 
@@ -253,6 +253,7 @@ The agent-modular refactor was finished and tidied:
   openclaw-gateway config writes are intentionally left (old but needed; schema
   is openclaw-specific) and allowlisted.
 - **Dead code removed** — the unused `seed_openclaw_status` alias.
-- **Guard added** — `scripts/check_agent_modularity.py` now enforces §6.
+- **Modularity invariant documented** — §6 codifies "no agent name in core
+  code"; a local AST guard (kept out of the repo) can check it.
 
 Full record: `docs/refactor/STATUS.md` and `HANDOFF.md` (local).
