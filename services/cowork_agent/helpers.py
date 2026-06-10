@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.settings import (
+from services.cowork_agent.registry.settings import (
     _INVALID_AGENT_ID_CHARS,
     _LEADING_DASHES,
     _MAX_AGENT_PAYLOAD_BYTES,

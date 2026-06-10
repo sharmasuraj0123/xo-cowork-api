@@ -12,15 +12,11 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.helpers import parse_jsonl
-from services.cowork_agent.hermes_state_db import load_hermes_session_records
-from services.cowork_agent.messages import convert_messages, convert_native_claude_messages
-from services.cowork_agent.sessions_io import (
+from services.cowork_agent.registry.adapter_registry import list_adapters
+from services.cowork_agent.adapters.loader import try_load_capability
+from services.cowork_agent.engine.sessions_io import (
     find_session_backend,
-    find_session_file,
     load_all_sessions,
-    update_session_directory,
-    update_claude_session_directory,
 )
 
 router = APIRouter()
@@ -57,22 +53,13 @@ def get_session(session_id: str):
 
 @router.get("/api/messages/{session_id}")
 def get_messages(session_id: str, limit: int = 50, offset: int = -1):
+    # Resolve the owning backend, then read messages via that adapter's
+    # sessions capability. Each adapter knows its own source (JSONL vs
+    # state.db) and converter — this router stays backend-agnostic.
     backend = find_session_backend(session_id)
-
-    # Hermes owns its messages in state.db (no JSONL file). Fetch records
-    # directly in openclaw shape so convert_messages handles them unchanged.
-    if backend == "hermes":
-        records = load_hermes_session_records(session_id)
-    else:
-        path = find_session_file(session_id)
-        if not path:
-            return {"total": 0, "offset": 0, "messages": []}
-        records = parse_jsonl(path)
-
-    if backend == "claude_code":
-        all_messages = convert_native_claude_messages(session_id, records)
-    else:
-        all_messages = convert_messages(session_id, records)
+    mod = try_load_capability("sessions", agent=backend) if backend else None
+    fn = getattr(mod, "get_messages", None) if mod else None
+    all_messages = fn(session_id) if fn else []
     total = len(all_messages)
 
     # ``offset=-1`` means "latest page". We deliberately return ALL messages
@@ -122,20 +109,19 @@ async def update_session(session_id: str, request: Request):
     if not directory:
         return JSONResponse(status_code=400, content={"detail": "directory must be a non-empty string"})
 
-    updated = update_session_directory(session_id, directory)
-    if not updated:
-        updated = update_claude_session_directory(session_id, directory)
-    if not updated:
-        # Hermes sessions live in per-profile state.db files and don't
-        # have a session-level "directory" concept. Return ok (no-op)
-        # rather than 404 so the FE workspace picker doesn't fail when
-        # an existing hermes chat is open.
-        from services.cowork_agent.hermes_state_db import find_hermes_profile
-        if find_hermes_profile(session_id):
-            return {"ok": True, "session_id": session_id, "directory": directory, "backend": "hermes", "applied": False}
-        return JSONResponse(status_code=404, content={"detail": "Session not found"})
+    # Ask each adapter's sessions capability to set the directory; the owning
+    # backend returns a result dict, the rest return None. Mutually exclusive
+    # per session, so order doesn't matter and no backend is named here.
+    for name in list_adapters():
+        mod = try_load_capability("sessions", agent=name)
+        fn = getattr(mod, "set_session_directory", None) if mod else None
+        if fn is None:
+            continue
+        result = fn(session_id, directory)
+        if result is not None:
+            return result
 
-    return {"ok": True, "session_id": session_id, "directory": directory}
+    return JSONResponse(status_code=404, content={"detail": "Session not found"})
 
 
 @router.delete("/api/sessions/{session_id}")

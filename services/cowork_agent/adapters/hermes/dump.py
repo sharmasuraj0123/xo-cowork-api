@@ -28,11 +28,14 @@ The CLI invocation mirrors the openclaw status adapter contract:
 from __future__ import annotations
 
 import ast
-import asyncio
-import os
 import re
-import shutil
 from typing import Any, Optional
+
+from services.cowork_agent.adapters.cli_status import (
+    CliStatusError as HermesStatusError,
+    resolve_binary,
+    run_cli,
+)
 
 HERMES_BIN_ENV = "HERMES_BIN"
 DEFAULT_BIN = "hermes"
@@ -46,20 +49,6 @@ _TOPLEVEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*):\s*(.*)$")
 # `  openrouter           not set`. Treat the first run of non-whitespace as the
 # key and the rest as the value.
 _INDENTED_RE = re.compile(r"^\s+(\S+)\s*(.*)$")
-
-
-class HermesStatusError(Exception):
-    """CLI invocation/parse failure. `code` maps to an HTTP status in the router."""
-
-    def __init__(self, message: str, *, code: str, detail: Optional[str] = None):
-        super().__init__(message)
-        self.code = code  # binary_not_found | timeout | execution_failed | invalid_output
-        self.detail = detail
-
-
-def _resolve_binary() -> str:
-    configured = (os.getenv(HERMES_BIN_ENV, "") or "").strip()
-    return configured or shutil.which(DEFAULT_BIN) or DEFAULT_BIN
 
 
 def _coerce(value: str) -> Any:
@@ -135,43 +124,15 @@ async def fetch_dump(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]
     Mirrors the openclaw status adapters' error contract so the unified
     `/models/status` and `/channels/status` routes can catch a single class.
     """
-    binary = _resolve_binary()
-    if os.path.isabs(binary) and not os.path.isfile(binary):
+    binary = resolve_binary(HERMES_BIN_ENV, DEFAULT_BIN)
+    result = await run_cli(binary, ("dump",), timeout=timeout, label="hermes")
+
+    out = result.stdout
+    err = result.stderr
+
+    if result.returncode != 0:
         raise HermesStatusError(
-            f"hermes binary not found at {binary}",
-            code="binary_not_found",
-            detail=binary,
-        )
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "dump",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (FileNotFoundError, PermissionError) as exc:
-        raise HermesStatusError(
-            f"hermes binary unavailable: {binary}",
-            code="binary_not_found",
-            detail=str(exc),
-        )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.communicate()
-        except Exception:
-            pass
-        raise HermesStatusError(f"hermes timed out after {timeout}s", code="timeout")
-
-    out = (stdout or b"").decode("utf-8", errors="replace").strip()
-    err = (stderr or b"").decode("utf-8", errors="replace").strip()
-
-    if proc.returncode != 0:
-        raise HermesStatusError(
-            f"hermes exited with code {proc.returncode}",
+            f"hermes exited with code {result.returncode}",
             code="execution_failed",
             detail=err or out[:300] or None,
         )

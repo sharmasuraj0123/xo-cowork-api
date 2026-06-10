@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-COMMANDS_JSON = HERE / "commands.json"
+COMMANDS_JSON = HERE / "manifest.json" if (HERE / "manifest.json").exists() else HERE / "commands.json"
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 

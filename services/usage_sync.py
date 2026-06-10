@@ -4,7 +4,7 @@ usage_sync.py — Daily usage sync to xo-swarm-api.
 Runs as an asyncio background task started from the FastAPI lifespan. The
 parsing/aggregation work lives in the active agent's
 ``config/agents/<name>/usage/usage.py`` (resolved via
-``services.cowork_agent.usage_loader``). This file is orchestration only:
+``services.cowork_agent.engine.usage_loader``). This file is orchestration only:
 
   - watermark I/O
   - delegate to ``module.aggregate_for_sync(since_date=watermark)``
@@ -24,8 +24,8 @@ from collections import defaultdict
 
 import httpx
 
-from services.cowork_agent.agent_registry import get_active_agent
-from services.cowork_agent.usage_loader import load_usage_module
+from services.cowork_agent.registry.agent_registry import get_active_agent
+from services.cowork_agent.engine.usage_loader import load_usage_module
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -126,7 +126,7 @@ def _empty_record(workspace_id: str, workspace_name, project_id, note: str,
 
 
 async def _post_records(records: list, daily: dict | None, state: dict) -> None:
-    from routers.auth import get_auth_token
+    from routers.auth.auth import get_auth_token
 
     token = get_auth_token()
     headers = {"Authorization": f"Bearer {token}"} if token else {}

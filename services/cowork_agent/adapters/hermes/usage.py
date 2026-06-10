@@ -1,7 +1,7 @@
 """
 Hermes usage — SQLite reader, dashboard aggregator, and sync aggregator.
 
-Loaded by ``services.cowork_agent.usage_loader.load_usage_module()`` when
+Loaded by ``services.cowork_agent.engine.usage_loader.load_usage_module()`` when
 ``AGENT_NAME=hermes``. Same five-function contract as openclaw/claude_code.
 
 Source: per-profile SQLite databases:
@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Optional
 
-from services.cowork_agent.settings import HERMES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
 
 def _resolve_tz(tz: str) -> tzinfo:

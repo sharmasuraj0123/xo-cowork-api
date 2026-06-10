@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-from services.cowork_agent.settings import HERMES_DIR, HERMES_PROFILES_DIR
+from services.cowork_agent.adapters.hermes.paths import HERMES_DIR, HERMES_PROFILES_DIR
 from services.cowork_agent.visualizer.discovery import iter_sessionslist_rows
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import (
@@ -225,7 +225,7 @@ class Source:
 
 
 def _profile_state_dbs() -> list[tuple[str, Path]]:
-    """Mirror of :func:`hermes_state_db._profile_state_dbs` — kept local
+    """Mirror of :func:`state_db._profile_state_dbs` — kept local
     to avoid making the visualizer source depend on the chat-side
     module's surface."""
     out: list[tuple[str, Path]] = []
@@ -285,7 +285,7 @@ def _build_session_to_project_map(backend: str) -> dict[str, str]:
 def _tool_names_from_json(tool_calls_raw: object) -> Iterator[str]:
     """Decode the hermes ``tool_calls`` JSON column into a stream of
     tool names. Mirrors the parse in
-    ``hermes_state_db._row_to_openclaw_record`` — same defensive
+    ``state_db._row_to_openclaw_record`` — same defensive
     shape handling so a malformed entry never raises."""
     if not isinstance(tool_calls_raw, str):
         return

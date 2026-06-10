@@ -77,7 +77,7 @@ class Event:
 
     ts: str
     native_session_id: str
-    runtime: str  # active agent's name, e.g. "claude_code", "openclaw", "hermes"
+    runtime: str  # the active agent's name (adapter directory name)
     project_id: str = ""
 
 

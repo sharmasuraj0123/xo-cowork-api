@@ -32,16 +32,16 @@ class OpenclawAdapter(BaseAgentAdapter):
           an OpenClaw session and returns accumulated response text.
         - Existing session: streams to OpenClaw and accumulates the response.
         """
-        from services.cowork_agent.settings import (
+        from services.cowork_agent.adapters.openclaw.paths import (
             OPENCLAW_API_URL,
             OPENCLAW_GATEWAY_TOKEN,
             OPENCLAW_MODEL,
         )
-        from services.cowork_agent.agent_registry import get_active_agent
-        from services.cowork_agent.sessions_io import find_session_key
+        from services.cowork_agent.registry.agent_registry import get_active_agent
+        from services.cowork_agent.adapters.openclaw.sessions import find_session_key
 
         if not session_id:
-            from services.cowork_agent.streaming import create_new_session
+            from services.cowork_agent.adapters.openclaw.direct_stream import create_new_session
             agent = get_active_agent()
             oc_agent = "main"
             session_key = f"agent:{oc_agent}:web:{uuid.uuid4().hex[:8]}"
@@ -109,9 +109,9 @@ class OpenclawAdapter(BaseAgentAdapter):
         """
         from services.cowork_agent.adapters.openclaw.streaming import stream_to_normalized
         from services.cowork_agent.adapters.openclaw.transcript import tee_exchange
-        from services.cowork_agent.sessions_io import find_session_key
-        from services.cowork_agent.streaming import find_session_id_by_key
-        from services.cowork_agent.settings import OPENCLAW_MODEL
+        from services.cowork_agent.adapters.openclaw.sessions import find_session_key
+        from services.cowork_agent.adapters.openclaw.direct_stream import find_session_id_by_key
+        from services.cowork_agent.adapters.openclaw.paths import OPENCLAW_MODEL
 
         # _dispatcher_sse always passes session_id=None; the real ID is in our_session_id
         if not session_id:
@@ -184,7 +184,7 @@ class OpenclawAdapter(BaseAgentAdapter):
     async def health(self) -> dict[str, Any]:
         """Ping the OpenClaw API URL to determine liveness."""
         import httpx
-        from services.cowork_agent.settings import OPENCLAW_API_URL, OPENCLAW_GATEWAY_TOKEN
+        from services.cowork_agent.adapters.openclaw.paths import OPENCLAW_API_URL, OPENCLAW_GATEWAY_TOKEN
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
@@ -196,3 +196,9 @@ class OpenclawAdapter(BaseAgentAdapter):
                 return {"ok": ok, "gateway": "up" if ok else f"http_{resp.status_code}"}
         except Exception as exc:
             return {"ok": False, "gateway": str(exc)}
+
+
+# Stable discovery alias — the dynamic loader resolves
+# services.cowork_agent.adapters.<AGENT_NAME>.adapter.Adapter, so every
+# adapter module exposes its class under this name.
+Adapter = OpenclawAdapter

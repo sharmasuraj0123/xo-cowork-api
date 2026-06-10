@@ -13,12 +13,12 @@ from typing import AsyncIterator
 
 import httpx
 
-from services.cowork_agent.settings import (
+from services.cowork_agent.adapters.openclaw.paths import (
     OPENCLAW_API_URL,
     OPENCLAW_GATEWAY_TOKEN,
     OPENCLAW_MODEL,
 )
-from services.cowork_agent.agent_registry import get_active_agent
+from services.cowork_agent.registry.agent_registry import get_active_agent
 
 
 def _session_header() -> str:
@@ -100,9 +100,9 @@ async def create_session(question: str) -> tuple[str, str, str]:
     Create a new OpenClaw session by sending the first message.
     Returns (session_key, session_id, response_text).
 
-    Wraps services.cowork_agent.streaming.create_new_session.
+    Wraps services.cowork_agent.adapters.openclaw.direct_stream.create_new_session.
     """
-    from services.cowork_agent.streaming import create_new_session
+    from services.cowork_agent.adapters.openclaw.direct_stream import create_new_session
 
     agent = get_active_agent()
     oc_agent = "main"

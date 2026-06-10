@@ -475,3 +475,9 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             return {"ok": True, "version": version}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+
+# Stable discovery alias — the dynamic loader resolves
+# services.cowork_agent.adapters.<AGENT_NAME>.adapter.Adapter, so every
+# adapter module exposes its class under this name.
+Adapter = ClaudeCodeAdapter

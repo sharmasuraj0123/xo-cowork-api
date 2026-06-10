@@ -21,25 +21,25 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
 import uvicorn
-from claude_code_client import ClaudeCodeClient
-from codex_code_client import CodexCodeClient
+from config.models.claude_code import ClaudeCodeClient
+from config.models.codex import CodexCodeClient
 
 # Load environment variables
 load_dotenv()
 
-from routers.auth import (
+from routers.auth.auth import (
     XO_API_KEY,
     consume_auth_flow,
     get_auth_token,
     get_auth_state,
     router as auth_router,
 )
-from routers.claude_setup_token import router as claude_setup_token_router
-from routers.codex_setup import router as codex_setup_router
-from routers.openclaw_usage import router as openclaw_usage_router
-from routers.models import router as models_router
-from routers.channels import router as channels_router
-from routers.providers import router as providers_router
+from routers.auth.claude_setup_token import router as claude_setup_token_router
+from routers.auth.codex_setup import router as codex_setup_router
+from routers.cowork_agent.legacy.openclaw_usage import router as openclaw_usage_router
+from routers.status.models import router as models_router
+from routers.status.channels import router as channels_router
+from routers.status.providers import router as providers_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
@@ -447,7 +447,7 @@ async def lifespan(app: FastAPI):
 
     # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
     try:
-        from services.cowork_agent.gdrive_rclone import ensure_rclone_running
+        from services.cowork_agent.connectors.gdrive_rclone import ensure_rclone_running
         await ensure_rclone_running()
         print("   rclone daemon: started for gdrive/onedrive connectors")
     except Exception as exc:
@@ -636,9 +636,15 @@ async def delete_session(project_id: str):
 
 @app.post("/gateway/restart")
 async def gateway_restart():
-    """Restart the OpenClaw gateway."""
+    """Restart the active agent's gateway via its ``config/agents/<agent>/agent.sh``.
+
+    Resolves the script from the active ``AGENT_NAME`` rather than hardcoding a
+    backend; agents without an ``agent.sh`` (e.g. claude_code) return 404.
+    """
     import subprocess
-    script = (Path(__file__).resolve().parent / "openclaw.sh").resolve()
+    from services.xo_manifest import resolve_agent_name
+    agent = resolve_agent_name()
+    script = (Path(__file__).resolve().parent / "config" / "agents" / agent / "agent.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="Gateway script not found")
     try:

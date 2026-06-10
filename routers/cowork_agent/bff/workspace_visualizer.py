@@ -35,6 +35,27 @@ from routers.cowork_agent.bff._visualizer_models import (
     UsageAnalyticsResponse,
     UsageSummaryCardResponse,
 )
+from routers.cowork_agent.bff._visualizer_presenter import (
+    TIMELINE_TYPES as _TIMELINE_TYPES,
+    avg_latency_ms_from_by_day as _avg_latency_ms_from_by_day,
+    bad_query as _bad_query,
+    by_day_from_stats as _by_day_from_stats,
+    cost_and_tokens_for_dates as _cost_and_tokens_for_dates,
+    date_from_ms as _date_from_ms,
+    messages_for_dates as _messages_for_dates,
+    model_call_counts_from_by_day as _model_call_counts_from_by_day,
+    model_usage_entries as _model_usage_entries,
+    model_usage_with_totals as _model_usage_with_totals,
+    parse_types_param as _parse_types_param,
+    performance_entry_for_day as _performance_entry_for_day,
+    performance_for_dates as _performance_for_dates,
+    provider_for_model as _provider_for_model,
+    rolling_key_for as _rolling_key_for,
+    row_total_tokens as _row_total_tokens,
+    tokens_from_stats as _tokens_from_stats,
+    tool_usage_from_stats as _tool_usage_from_stats,
+    zero_filled_dates as _zero_filled_dates,
+)
 from services.cowork_agent import scopes
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
 
@@ -42,22 +63,6 @@ router = APIRouter()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _bad_query(message: str) -> HTTPException:
-    return HTTPException(
-        status_code=400,
-        detail={"code": "invalid_query", "message": message},
-    )
-
-
-def _date_from_ms(epoch_ms: Optional[int]) -> Optional[str]:
-    if not epoch_ms:
-        return None
-    return (
-        datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-        .strftime("%Y-%m-%d")
-    )
 
 
 def _all_projects() -> list[str]:
@@ -90,70 +95,6 @@ def _union_sessionslist() -> dict[str, dict]:
             r["_project_id"] = pid
             merged[key] = r
     return merged
-
-
-def _zero_filled_dates(days: int) -> list[str]:
-    today = datetime.now(timezone.utc)
-    return [
-        (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
-        for i in range(days)
-    ]
-
-
-def _rolling_key_for(days: int) -> str:
-    """Pick the watcher's rolling window that best matches the request."""
-    return "30d" if days > 7 else "7d"
-
-
-def _tokens_from_stats(stats: dict, days: int) -> int:
-    """Sum input+output tokens from a stats.json rolling window.
-    No cache_read / cache_creation — matches what users see in the UI.
-    """
-    rolling = (stats.get("rolling") or {}).get(_rolling_key_for(days)) or {}
-    t = rolling.get("tokens") or {}
-    return int(t.get("input", 0) or 0) + int(t.get("output", 0) or 0)
-
-
-def _by_day_from_stats(stats: dict) -> dict[str, dict]:
-    """Return the workspace stats' ``by_day`` block; empty for
-    schema 1 files."""
-    bd = stats.get("by_day")
-    return bd if isinstance(bd, dict) else {}
-
-
-def _model_call_counts_from_by_day(by_day: dict[str, dict], dates: list[str]) -> dict[str, int]:
-    """``{model_id: total_count}`` summed across ``by_day.<date>.by_model.<model>.count``
-    for the requested ``dates`` window. ``rolling.<window>.by_model`` only
-    carries tokens, so the call/message count for the Model Usage card
-    has to come from the per-day block."""
-    counts: dict[str, int] = {}
-    for d in dates:
-        day = by_day.get(d) or {}
-        bm = (day.get("by_model") or {}) if isinstance(day, dict) else {}
-        if not isinstance(bm, dict):
-            continue
-        for model, entry in bm.items():
-            if not isinstance(entry, dict):
-                continue
-            counts[str(model)] = counts.get(str(model), 0) + int(entry.get("count", 0) or 0)
-    return counts
-
-
-def _performance_entry_for_day(date: str, day: dict) -> PerformanceEntry:
-    """One per-day latency rollup. Zero entry when no samples."""
-    lat = (day.get("latency") or {}) if isinstance(day, dict) else {}
-    count = int(lat.get("count", 0) or 0)
-    if count <= 0:
-        return PerformanceEntry(date=date, avgMs=0, p95Ms=0, minMs=0, maxMs=0)
-    sample = sorted(int(x) for x in (lat.get("p95_sample") or []))
-    p95 = sample[max(0, int(0.95 * (len(sample) - 1)))] if sample else 0
-    return PerformanceEntry(
-        date=date,
-        avgMs=int(int(lat.get("sum_ms", 0) or 0) / count),
-        p95Ms=p95,
-        minMs=int(lat.get("min_ms", 0) or 0),
-        maxMs=int(lat.get("max_ms", 0) or 0),
-    )
 
 
 def _response_time_stats_from_by_day(by_day: dict[str, dict]) -> dict:
@@ -210,120 +151,6 @@ def _response_time_stats_from_by_day(by_day: dict[str, dict]) -> dict:
         "max":    round(max_ms_overall / 1000.0, 3),
         "count":  count,
     }
-
-
-def _avg_latency_ms_from_by_day(by_day: dict[str, dict]) -> int:
-    total_sum = 0
-    total_count = 0
-    for day in by_day.values():
-        if not isinstance(day, dict):
-            continue
-        lat = day.get("latency") or {}
-        if not isinstance(lat, dict):
-            continue
-        c = int(lat.get("count", 0) or 0)
-        if c <= 0:
-            continue
-        total_sum += int(lat.get("sum_ms", 0) or 0)
-        total_count += c
-    return int(total_sum / total_count) if total_count else 0
-
-
-def _model_usage_entries(stats: dict, days: int) -> list[ModelUsageEntry]:
-    """``/usage/analytics``-shape per-model rollup for the workspace.
-    Tokens from rolling.<window>.by_model; calls from per-day."""
-    rolling = (stats.get("rolling") or {}).get(_rolling_key_for(days)) or {}
-    by_model_raw = rolling.get("by_model") or {}
-    by_day = _by_day_from_stats(stats)
-    counts = _model_call_counts_from_by_day(by_day, _zero_filled_dates(days))
-    entries: list[ModelUsageEntry] = []
-    if isinstance(by_model_raw, dict):
-        for model, t in by_model_raw.items():
-            if not isinstance(t, dict):
-                continue
-            m_in = int(t.get("input", 0) or 0)
-            m_out = int(t.get("output", 0) or 0)
-            if m_in + m_out <= 0:
-                continue
-            entries.append(ModelUsageEntry(
-                model=str(model),
-                provider=_provider_for_model(str(model)),
-                calls=int(counts.get(str(model), 0)),
-                tokens=m_in + m_out,
-                cost=0.0,
-            ))
-    entries.sort(key=lambda e: e.tokens, reverse=True)
-    return entries
-
-
-def _model_usage_with_totals(
-    stats: dict, days: int
-) -> list[ModelUsageWithTotals]:
-    """``SessionCostSummary``-shape per-model rollup for the workspace."""
-    rolling = (stats.get("rolling") or {}).get(_rolling_key_for(days)) or {}
-    by_model_raw = rolling.get("by_model") or {}
-    by_day = _by_day_from_stats(stats)
-    counts = _model_call_counts_from_by_day(by_day, _zero_filled_dates(days))
-    entries: list[ModelUsageWithTotals] = []
-    if isinstance(by_model_raw, dict):
-        for model, t in by_model_raw.items():
-            if not isinstance(t, dict):
-                continue
-            m_in = int(t.get("input", 0) or 0)
-            m_out = int(t.get("output", 0) or 0)
-            if m_in + m_out <= 0:
-                continue
-            entries.append(ModelUsageWithTotals(
-                provider=_provider_for_model(str(model)),
-                model=str(model),
-                count=int(counts.get(str(model), 0)),
-                totals=TokenTotals(
-                    input=m_in,
-                    output=m_out,
-                    cacheRead=0,
-                    cacheWrite=0,
-                    totalTokens=m_in + m_out,
-                    totalCost=0.0,
-                    inputCost=0.0,
-                    outputCost=0.0,
-                    cacheReadCost=0.0,
-                    cacheWriteCost=0.0,
-                    missingCostEntries=0,
-                ),
-            ))
-    entries.sort(key=lambda e: e.totals.totalTokens, reverse=True)
-    return entries
-
-
-def _tool_usage_from_stats(stats: dict, days: int) -> ToolUsage:
-    """Workspace tool tally from the chosen rolling window's by_tool.
-    Sorted descending; empty when no by_tool block present."""
-    window = "30d" if days > 7 else "7d"
-    rolling = (stats.get("rolling") or {}).get(window) or {}
-    by_tool = rolling.get("by_tool") or {}
-    tools: list[ToolUsageEntry] = []
-    if isinstance(by_tool, dict):
-        for name, count in by_tool.items():
-            n = int(count or 0)
-            if n <= 0:
-                continue
-            tools.append(ToolUsageEntry(name=str(name), count=n))
-    tools.sort(key=lambda t: t.count, reverse=True)
-    total = sum(t.count for t in tools)
-    return ToolUsage(totalCalls=total, uniqueTools=len(tools), tools=tools)
-
-
-def _provider_for_model(model: str) -> str:
-    """Best-effort provider tag from a model id; empty when unknown."""
-    if not model:
-        return ""
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith("gpt") or model.startswith("o1") or model.startswith("o3"):
-        return "openai"
-    if model.startswith("gemini"):
-        return "google"
-    return ""
 
 
 # ── /api/xo-projects/usage — UsageStats-shaped aggregate ─────────────────────
@@ -569,25 +396,6 @@ def workspace_usage_analytics(
     dates = _zero_filled_dates(window_days)
     by_day = _by_day_from_stats(stats)
 
-    cost_and_tokens: list[CostAndTokensEntry] = []
-    messages_per_day: list[MessagesEntry] = []
-    for d in dates:
-        day = by_day.get(d) or {}
-        tk = (day.get("tokens") or {}) if isinstance(day, dict) else {}
-        msgs = (day.get("messages") or {}) if isinstance(day, dict) else {}
-        cost_and_tokens.append(CostAndTokensEntry(
-            date=d,
-            tokens=int(tk.get("input", 0) or 0) + int(tk.get("output", 0) or 0),
-            cost=0.0,
-        ))
-        messages_per_day.append(MessagesEntry(
-            date=d,
-            total=int(msgs.get("total", 0) or 0),
-            user=int(msgs.get("user", 0) or 0),
-            assistant=int(msgs.get("assistant", 0) or 0),
-            toolCalls=int(msgs.get("toolCalls", 0) or 0),
-        ))
-
     return UsageAnalyticsResponse(
         stats=AnalyticsStats(
             totalCost=0.0,
@@ -595,9 +403,9 @@ def workspace_usage_analytics(
             totalMessages=total_messages,
             avgLatencyMs=_avg_latency_ms_from_by_day(by_day),
         ),
-        costAndTokens=cost_and_tokens,
-        messages=messages_per_day,
-        performance=[_performance_entry_for_day(d, by_day.get(d) or {}) for d in dates],
+        costAndTokens=_cost_and_tokens_for_dates(by_day, dates),
+        messages=_messages_for_dates(by_day, dates),
+        performance=_performance_for_dates(by_day, dates),
         toolUsage=_tool_usage_from_stats(stats, window_days),
         modelUsage=_model_usage_entries(stats, window_days),
     )
@@ -649,15 +457,6 @@ def workspace_usage_sessions() -> SessionListResponse:
 
 
 # ── /api/xo-projects/usage/summary ───────────────────────────────────────────
-
-
-def _row_total_tokens(usage: dict) -> int:
-    return (
-        int(usage.get("input_tokens", 0) or 0)
-        + int(usage.get("output_tokens", 0) or 0)
-        + int(usage.get("cache_read_input_tokens", 0) or 0)
-        + int(usage.get("cache_creation_input_tokens", 0) or 0)
-    )
 
 
 def _row_to_summary(
@@ -848,25 +647,6 @@ def workspace_activity() -> ActivityResponse:
 
 
 # ── /api/xo-projects/timeline ────────────────────────────────────────────────
-
-
-_TIMELINE_TYPES = frozenset({
-    "project.created", "session.started", "session.closed",
-    "todo.added", "todo.completed",
-    "file.edited", "file.created",
-    "plan.written", "episode.written",
-    "peer.sync.started", "peer.sync.applied", "peer.sync.conflict",
-})
-
-
-def _parse_types_param(types: Optional[str]) -> Optional[frozenset[str]]:
-    if types is None:
-        return None
-    requested = {t.strip() for t in types.split(",") if t.strip()}
-    unknown = requested - _TIMELINE_TYPES
-    if unknown:
-        raise _bad_query(f"unknown timeline type(s): {sorted(unknown)}")
-    return frozenset(requested)
 
 
 @router.get(

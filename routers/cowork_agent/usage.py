@@ -2,7 +2,7 @@
 Canonical usage router — `/api/usage/*`.
 
 Body is pure URL → module-method dispatch. The active agent is resolved by
-``services.cowork_agent.usage_loader.load_usage_module()`` (single
+``services.cowork_agent.engine.usage_loader.load_usage_module()`` (single
 ``importlib.import_module`` call, no if/elif), and every endpoint forwards
 into that module's view method. Zero agent-specific code lives here.
 
@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from services.cowork_agent.usage_loader import load_usage_module
+from services.cowork_agent.engine.usage_loader import load_usage_module
 
 router = APIRouter(tags=["usage"])
 
@@ -25,7 +25,7 @@ def _load_or_501():
     except ModuleNotFoundError as e:
         raise HTTPException(
             status_code=501,
-            detail=f"no usage module for active agent (tried config.agents.<name>.usage.usage): {e}",
+            detail=f"no usage module for active agent (tried services.cowork_agent.adapters.<AGENT_NAME>.usage): {e}",
         )
 
 
