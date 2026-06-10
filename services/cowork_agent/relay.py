@@ -1,22 +1,13 @@
 """
-Cross-workspace commit relay (client side).
+Cross-workspace commit relay — subscriber (client) side.
 
-Workspaces collaborating on the same xo-project each have their own clone of that
-project's shared GitHub repo. When one workspace pushes a commit, it publishes a
-minimal ping ``{project_id, commit}`` to a central relayer, which broadcasts it to
-every other subscribed workspace. On receipt, a workspace ``git fetch``es so the
-commit becomes locally available — it does NOT merge/checkout (the agent decides
-when to apply).
+Holds one SSE connection open to swarm's GET /commits/subscribe. On each broadcast
+event it runs `git fetch origin` in ~/xo-projects/<project_id> so the commit becomes
+locally available — it does NOT merge/checkout (the agent decides when to apply).
 
-The relayer is a separate service; it owns the single durable global ledger of
-transfers, assigning each a monotonic ``seq``. This client persists only a tiny
-**cursor** — the last ``seq`` it processed — so on reconnect it resumes via
-``/subscribe?since=<cursor>`` and catches up on anything that happened while it was
-offline. (The cursor is one integer, not a ledger; the full history stays at the
-relay.)
-
-Disabled entirely when ``RELAY_URL`` is unset: ``ping_commit`` is a no-op and the
-subscriber never starts. Outbound-call style mirrors ``services/usage_sync.py``.
+Resumes from a persisted cursor (the last `seq` processed) via ?since=<cursor>, so
+events that arrived while offline are replayed on reconnect. Publishing is handled by
+the watcher (services/cowork_agent/commit_relay), not here.
 """
 from __future__ import annotations
 
@@ -30,15 +21,20 @@ import httpx
 from routers.auth import get_auth_token
 from services.cowork_agent.project_layout import xo_projects_root
 
-RELAY_URL = (os.getenv("RELAY_URL", "") or "").strip().rstrip("/")
 CURSOR_PATH = Path(
     os.getenv("RELAY_CURSOR_PATH", str(Path.home() / ".xo-cowork" / "relay-cursor"))
 )
 
 
+def _base_url() -> str:
+    return os.getenv("CHAT_API_BASE_URL", "https://api-swarm-beta.xo.builders").rstrip("/")
+
+
+def _subscribe_url() -> str:
+    return f"{_base_url()}/commits/subscribe"
+
+
 def _log(msg: str) -> None:
-    # Background service: print() is block-buffered when stdout is a log file,
-    # so flush every line or the operator sees nothing.
     print(msg, flush=True)
 
 
@@ -62,35 +58,8 @@ def _write_cursor(seq: int) -> None:
         _log(f"⚠️ relay: failed to persist cursor: {exc}")
 
 
-async def ping_commit(project_id: str, commit: str) -> bool:
-    """Publish a {project_id, commit} ping to the relayer.
-
-    Fire-and-forget: never raises, returns False on any failure or when the relay
-    is not configured. A relay outage must never break the caller (e.g. a push).
-    """
-    if not RELAY_URL:
-        return False
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.post(
-                f"{RELAY_URL}/publish",
-                json={"project_id": project_id, "commit": commit},
-                headers=_headers(),
-            )
-            resp.raise_for_status()
-            body = resp.json()
-        _log(
-            f"📤 relay: published {project_id} @ {commit[:10]} "
-            f"(seq={body.get('seq')}, delivered_to={body.get('delivered_to')})"
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001 — non-fatal by design
-        _log(f"⚠️ relay publish failed (non-fatal): {exc}")
-        return False
-
-
 async def _fetch_on_receive(project_id: str, commit: str) -> None:
-    """git fetch so ``commit`` is locally available. Fetch only — never merge/checkout."""
+    """git fetch so `commit` is locally available. Fetch only — never merge/checkout."""
     repo = xo_projects_root() / project_id
     if not (repo / ".git").is_dir():
         _log(f"⚠️ relay: no clone at {repo}; skipping fetch for {commit[:10]}")
@@ -108,23 +77,15 @@ async def _fetch_on_receive(project_id: str, commit: str) -> None:
 
 
 async def run_relay_subscriber() -> None:
-    """Hold one SSE connection open to the relayer; git fetch on each ping.
-
-    Resumes from the persisted cursor (``?since=``) so events that arrived while
-    this workspace was offline are replayed on connect. Reconnects with a fixed
-    backoff if the connection drops. Started from the server lifespan only when
-    ``RELAY_URL`` is set, so this loop assumes it is.
-    """
-    _log(f"   relay: subscribing to {RELAY_URL}/subscribe (SSE, no polling)")
+    """Hold one SSE connection open to swarm; git fetch on each ping. Resumes from the
+    persisted cursor; reconnects with a fixed backoff if the connection drops."""
+    _log(f"   relay: subscribing to {_subscribe_url()} (SSE, no polling)")
     while True:
         cursor = _read_cursor()
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream(
-                    "GET",
-                    f"{RELAY_URL}/subscribe",
-                    params={"since": cursor},
-                    headers=_headers(),
+                    "GET", _subscribe_url(), params={"since": cursor}, headers=_headers(),
                 ) as resp:
                     resp.raise_for_status()
                     _log(f"📡 relay: connected (resuming from seq={cursor})")
