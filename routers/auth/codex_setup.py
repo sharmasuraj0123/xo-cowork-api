@@ -376,7 +376,7 @@ def _persist_token_to_hermes_auth(token: str, refresh: Optional[str]) -> bool:
     single-use, so fanning the same token across profiles would let them
     invalidate each other on independent refresh. Returns True on success.
     """
-    from services.cowork_agent.settings import HERMES_DIR
+    from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
 
     auth_path = HERMES_DIR / "auth.json"
     last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -440,8 +440,8 @@ def _set_hermes_primary_model() -> None:
     default and never routes through codex even with the credential present.
     Best-effort; failures are logged, never raised."""
     try:
-        from services.cowork_agent.agent_registry import get_agent
-        from services.cowork_agent.settings import HERMES_DIR
+        from services.cowork_agent.registry.agent_registry import get_agent
+        from services.cowork_agent.adapters.hermes.paths import HERMES_DIR
         hermes_bin = get_agent("hermes").binary
     except Exception as e:  # noqa: BLE001
         print(f"[codex-setup] can't resolve hermes binary; skipping primary-model set ({e})")
