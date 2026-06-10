@@ -22,7 +22,6 @@ from .manus import router as manus_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
 from .onedrive import router as onedrive_router
-from .relay import router as relay_router
 from .secrets import router as secrets_router
 from .sessions import router as sessions_router
 from .usage import router as usage_router
@@ -47,7 +46,6 @@ all_routers: list[APIRouter] = [
     onboarding_router,
     gdrive_router,
     onedrive_router,
-    relay_router,
     github_router,
     vercel_router,
     manus_router,
