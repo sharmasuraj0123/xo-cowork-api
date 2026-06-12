@@ -3,7 +3,7 @@
 # OpenClaw OneClick Setup & Gateway Manager
 # Combined setup + gateway management in a single script.
 #
-# Usage: ./openclaw.sh {setup|start|stop|restart|status|logs}
+# Usage: ./agent.sh {setup|start|stop|restart|status|logs}
 #
 # Required env vars (set in .env):
 #     TELEGRAM_BOT_TOKEN      - Telegram bot token from BotFather
@@ -97,7 +97,7 @@ acquire_lock() {
         rm -f "$LOCK_FILE"
         exec 9>"$LOCK_FILE"
         if ! flock -n 9; then
-            log_error "Another openclaw.sh operation is in progress"
+            log_error "Another agent.sh operation is in progress"
             exit 1
         fi
     fi
@@ -129,7 +129,11 @@ find_orphan_gateways() {
     [ -z "$gw_pids" ] && return
 
     for gw_pid in $gw_pids; do
-        # Skip if it's a child of our managed wrapper
+        # Skip the managed wrapper itself. Its `bash -c` command line embeds the
+        # literal "openclaw gateway run" string, so `pgrep -f` matches the loop
+        # we manage (PID in $PID_FILE) — it is not an orphan.
+        [ -n "$managed_wrapper_pid" ] && [ "$gw_pid" = "$managed_wrapper_pid" ] && continue
+        # Skip the real gateway process if it's a child of our managed wrapper.
         if [ -n "$managed_wrapper_pid" ] && kill -0 "$managed_wrapper_pid" 2>/dev/null; then
             local parent
             parent=$(ps -o ppid= -p "$gw_pid" 2>/dev/null | tr -d ' ')
@@ -538,23 +542,47 @@ install_cli() {
 # ==============================================================
 # Setup: Install missing peer deps for OpenClaw extensions
 #
-# Some OpenClaw releases ship extensions that import npm packages
-# they don't bundle (e.g. "Cannot find module: @slack/web-api").
-# Add entries to OPENCLAW_PEER_DEPS below and they will be installed
-# into the OpenClaw module dir on every setup (idempotent — skips
-# packages already present).
+# Some OpenClaw extensions import npm packages they don't bundle
+# (e.g. "Cannot find module: @slack/web-api"). Each entry below maps a
+# CHANNEL to the package(s) its extension needs. Telegram is bundled
+# (grammy) and needs none.
+#
+# Only deps for channels actually enabled (ENABLED_CHANNELS) are installed,
+# and any already present in the global node_modules are skipped — so a
+# telegram-only workspace (the default) pulls nothing, and re-runs don't
+# hit the registry. Without this, baileys (large) + slack were reinstalled
+# on every boot regardless of enabled channels.
 # ==============================================================
 
-OPENCLAW_PEER_DEPS=(
-    "@whiskeysockets/baileys"   # WhatsApp channel
-    "@slack/web-api"            # Slack channel
+declare -A OPENCLAW_CHANNEL_PEER_DEPS=(
+    [whatsapp]="@whiskeysockets/baileys"
+    [slack]="@slack/web-api"
 )
 
 install_openclaw_peer_deps() {
-    [ "${#OPENCLAW_PEER_DEPS[@]}" -eq 0 ] && return 0
+    local raw="${ENABLED_CHANNELS:-}"
+    local global_modules missing=()
+    global_modules="$(npm root -g 2>/dev/null)"
 
-    log "Installing OpenClaw peer deps: ${OPENCLAW_PEER_DEPS[*]}"
-    if npm install -g "${OPENCLAW_PEER_DEPS[@]}"; then
+    local ch pkg
+    for ch in "${!OPENCLAW_CHANNEL_PEER_DEPS[@]}"; do
+        # Channel not enabled → skip its deps entirely.
+        echo "$raw" | grep -q "\"$ch\"" || continue
+        for pkg in ${OPENCLAW_CHANNEL_PEER_DEPS[$ch]}; do
+            if [ -n "$global_modules" ] && [ -d "$global_modules/$pkg" ]; then
+                continue
+            fi
+            missing+=("$pkg")
+        done
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        log "No channel peer deps needed (enabled channels need none or already present)"
+        return 0
+    fi
+
+    log "Installing OpenClaw peer deps: ${missing[*]}"
+    if npm install -g "${missing[@]}"; then
         log_success "Peer deps installed"
     else
         log_warn "Peer deps install failed — extensions may fail at runtime"
@@ -675,6 +703,59 @@ start_gateway() {
 }
 
 # ==============================================================
+# Gateway: Teardown — shared stop sequence for stop/restart.
+#
+# With a wrapper PID: SIGTERM → wait 10s → force-kill (+ children).
+# Always: clean orphans, kill any bare openclaw-gateway binary, then wait
+# for the gateway port to be released. Call with "" to run only the
+# orphan/binary/port cleanup (restart's not-running path).
+# ==============================================================
+_teardown_gateway() {
+    local pid="$1"
+
+    if [ -n "$pid" ]; then
+        # Send SIGTERM to the wrapper — trap will clean up the child
+        kill "$pid" 2>/dev/null
+
+        # Wait up to 10s for graceful shutdown
+        for i in $(seq 1 10); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+
+        # Force kill if still alive
+        if kill -0 "$pid" 2>/dev/null; then
+            log_warn "Graceful shutdown failed, force killing..."
+            kill -9 "$pid" 2>/dev/null
+            # Also kill any orphaned child
+            pkill -9 -P "$pid" 2>/dev/null || true
+        fi
+
+        rm -f "$PID_FILE"
+    fi
+
+    # Also kill any orphan gateway processes
+    kill_orphan_gateways
+
+    # Explicitly kill the openclaw-gateway binary in case it was orphaned
+    pkill -x "openclaw-gateway" 2>/dev/null || true
+    sleep 1
+    if pgrep -x "openclaw-gateway" >/dev/null 2>&1; then
+        log_warn "openclaw-gateway binary still alive, force killing..."
+        pkill -9 -x "openclaw-gateway" 2>/dev/null || true
+    fi
+
+    # Wait up to 5s for port 18789 to be released
+    for i in $(seq 1 5); do
+        if ! ss -tlnp 2>/dev/null | grep -q ':18789 ' && \
+           ! netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
+            break
+        fi
+        sleep 1
+    done
+}
+
+# ==============================================================
 # Gateway: Stop (targeted, no greedy pkill)
 # ==============================================================
 stop_gateway() {
@@ -698,44 +779,7 @@ stop_gateway() {
     pid=$(cat "$PID_FILE")
     echo -e "${RED}Stopping gateway (PID: $pid)...${NC}"
 
-    # Send SIGTERM to the wrapper — trap will clean up the child
-    kill "$pid" 2>/dev/null
-
-    # Wait up to 10s for graceful shutdown
-    for i in $(seq 1 10); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-    done
-
-    # Force kill if still alive
-    if kill -0 "$pid" 2>/dev/null; then
-        log_warn "Graceful shutdown failed, force killing..."
-        kill -9 "$pid" 2>/dev/null
-        # Also kill any orphaned child
-        pkill -9 -P "$pid" 2>/dev/null || true
-    fi
-
-    rm -f "$PID_FILE"
-
-    # Also kill any orphan gateway processes
-    kill_orphan_gateways
-
-    # Explicitly kill the openclaw-gateway binary in case it was orphaned
-    pkill -x "openclaw-gateway" 2>/dev/null || true
-    sleep 1
-    if pgrep -x "openclaw-gateway" >/dev/null 2>&1; then
-        log_warn "openclaw-gateway binary still alive, force killing..."
-        pkill -9 -x "openclaw-gateway" 2>/dev/null || true
-    fi
-
-    # Wait up to 5s for port 18789 to be released
-    for i in $(seq 1 5); do
-        if ! ss -tlnp 2>/dev/null | grep -q ':18789 ' && \
-           ! netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
-            break
-        fi
-        sleep 1
-    done
+    _teardown_gateway "$pid"
 
     echo -e "${GREEN}Stopped.${NC}"
 }
@@ -769,48 +813,16 @@ status_gateway() {
 restart_gateway() {
     acquire_lock
 
+    local pid=""
     if is_running; then
-        local pid
         pid=$(cat "$PID_FILE")
         echo -e "${RED}Stopping gateway (PID: $pid) for restart...${NC}"
-
-        kill "$pid" 2>/dev/null
-
-        # Wait up to 10s for graceful shutdown
-        for i in $(seq 1 10); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 1
-        done
-
-        # Force kill if still alive
-        if kill -0 "$pid" 2>/dev/null; then
-            log_warn "Graceful shutdown failed, force killing..."
-            kill -9 "$pid" 2>/dev/null
-            pkill -9 -P "$pid" 2>/dev/null || true
-        fi
-
-        rm -f "$PID_FILE"
     fi
 
-    # Kill any orphan gateway processes
-    kill_orphan_gateways
-
-    # Explicitly kill the openclaw-gateway binary in case it was orphaned
-    pkill -x "openclaw-gateway" 2>/dev/null || true
-    sleep 1
-    if pgrep -x "openclaw-gateway" >/dev/null 2>&1; then
-        log_warn "openclaw-gateway binary still alive, force killing..."
-        pkill -9 -x "openclaw-gateway" 2>/dev/null || true
-    fi
-
-    # Wait up to 5s for port 18789 to be released
-    for i in $(seq 1 5); do
-        if ! ss -tlnp 2>/dev/null | grep -q ':18789 ' && \
-           ! netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
-            break
-        fi
-        sleep 1
-    done
+    # Tear down the wrapper (if any) plus orphans/binary/port. Passing an
+    # empty pid runs only the cleanup, matching the previous always-clean
+    # behaviour when no managed gateway was running.
+    _teardown_gateway "$pid"
 
     # Start fresh
     _launch_gateway_loop
@@ -837,7 +849,7 @@ install_gateway_guard() {
     log "Installing gateway guard..."
     sudo tee "$guard_file" > /dev/null <<GUARDEOF
 # Intercept "openclaw gateway run" to prevent unmanaged gateway processes.
-# All gateway lifecycle should go through openclaw.sh (start/stop/restart).
+# All gateway lifecycle should go through agent.sh (start/stop/restart).
 openclaw() {
     if [ "\$1" = "gateway" ] && [ "\${2:-}" = "run" ]; then
         echo "⚠  Do not run 'openclaw gateway run' directly."

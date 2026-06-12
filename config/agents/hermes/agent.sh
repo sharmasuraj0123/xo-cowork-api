@@ -4,7 +4,7 @@
 # Combined setup + gateway management in a single script.
 # Modeled after openclaw.sh but targeting Hermes Agent.
 #
-# Usage: ./hermes.sh {setup|start|stop|restart|status|logs}
+# Usage: ./agent.sh {setup|start|stop|restart|status|logs}
 #
 # Required env vars (set in .env):
 #     ANTHROPIC_API_KEY       - Anthropic API key for Claude model
@@ -113,7 +113,7 @@ acquire_lock() {
         rm -f "$GW_LOCK_FILE"
         exec 9>"$GW_LOCK_FILE"
         if ! flock -n 9; then
-            log_error "Another hermes.sh operation is in progress"
+            log_error "Another agent.sh operation is in progress"
             exit 1
         fi
     fi
@@ -567,7 +567,7 @@ install_gateway_guard() {
     log "Installing gateway guard..."
     sudo tee "$guard_file" > /dev/null <<GUARDEOF
 # Intercept "hermes gateway start/run" to prevent unmanaged gateway processes.
-# All gateway lifecycle should go through hermes.sh (start/stop/restart).
+# All gateway lifecycle should go through agent.sh (start/stop/restart).
 hermes() {
     if [ "\$1" = "gateway" ] && { [ "\${2:-}" = "start" ] || [ "\${2:-}" = "run" ] || [ "\${2:-}" = "restart" ]; }; then
         echo "⚠  Do not run 'hermes gateway $2' directly (no systemd in this container)."
@@ -666,7 +666,7 @@ _launch_gateway_loop() {
 
             cd "$hermes_dir"
             # Use "gateway run" (foreground) instead of "gateway start" (systemd).
-            # No systemd/loginctl in this container — hermes.sh manages the lifecycle.
+            # No systemd/loginctl in this container — agent.sh manages the lifecycle.
             "$hermes_bin" gateway run 2>&1 &
             gateway_pid=$!
             wait "$gateway_pid"
