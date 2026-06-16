@@ -590,6 +590,36 @@ install_openclaw_peer_deps() {
 }
 
 # ==============================================================
+# Setup: Install OnchainOS CLI (okx/onchainos-skills)
+#
+# Installs the `onchainos` binary to ~/.local/bin via the upstream
+# install script. The okx-* skills call this binary as their primary
+# execution path (falling back to direct OKX API calls only if it's
+# missing), so it's installed before the skills. Idempotent (skips if
+# already on PATH) and non-fatal.
+# ==============================================================
+install_onchainos_cli() {
+    log "Installing OnchainOS CLI..."
+    export PATH="$HOME/.local/bin:$PATH"
+
+    if command -v onchainos &>/dev/null; then
+        log_success "OnchainOS CLI already installed: $(which onchainos)"
+        return 0
+    fi
+
+    if curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh; then
+        export PATH="$HOME/.local/bin:$PATH"
+        if command -v onchainos &>/dev/null; then
+            log_success "OnchainOS CLI installed: $(which onchainos)"
+        else
+            log_warn "OnchainOS CLI installed but not found on PATH (~/.local/bin)"
+        fi
+    else
+        log_warn "Failed to install OnchainOS CLI — skills will fall back to direct OKX API"
+    fi
+}
+
+# ==============================================================
 # Setup: Install OnchainOS skills (okx/onchainos-skills)
 #
 # Mirrors OKX's official OpenClaw install (.openclaw/INSTALL.md): clones
@@ -598,8 +628,8 @@ install_openclaw_peer_deps() {
 # dir as a single grouped folder ~/.openclaw/skills/onchainos-skills, so
 # the ~26 okx-* skills live under one head folder. Symlink keeps them in
 # sync with the clone; copy fallback if symlinks aren't supported. The
-# skills call the OKX OnchainOS API directly using OKX_API_KEY /
-# OKX_SECRET_KEY / OKX_PASSPHRASE (from .env); no extra binary needed.
+# skills invoke the onchainos CLI (installed above) and the OKX_API_KEY /
+# OKX_SECRET_KEY / OKX_PASSPHRASE credentials from .env.
 # Non-fatal.
 # ==============================================================
 install_onchain_skills() {
@@ -926,6 +956,7 @@ run_setup() {
     enable_channels
     install_cli
     install_openclaw_peer_deps
+    install_onchainos_cli
     install_onchain_skills
     log "Running config doctor..."
     if openclaw doctor --fix --yes 2>/dev/null; then
