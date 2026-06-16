@@ -402,6 +402,47 @@ def _run_agent_setup() -> None:
         print(f"⚠️ Agent setup ({agent}) failed (non-fatal): {e}")
 
 
+def _install_shared_deps() -> None:
+    """Install shared, agent-agnostic system deps once at boot.
+
+    Delegates to scripts/install_shared_deps.sh, which ensures rclone
+    (gdrive/onedrive connectors), gh (xo-projects-sync backup repos), and
+    gnupg (xo-projects-sync encryption) are present. Moving these here means
+    workspace templates no longer each have to install them. The script is
+    idempotent (skips deps already on PATH) and no-ops on non-apt hosts.
+    Non-fatal: a failure logs and returns so the API still comes up.
+    """
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(repo_root, "scripts", "install_shared_deps.sh")
+    if not os.path.isfile(script):
+        print(f"⚠️ No shared-deps script (expected at {script}) — skipping")
+        return
+
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+
+    print("🔧 Ensuring shared system deps (rclone, gh, gnupg)...")
+    try:
+        # 10-minute ceiling covers a cold first-time install (rclone download +
+        # gh .deb + apt). Steady-state re-runs finish in seconds.
+        result = subprocess.run(
+            ["bash", script],
+            cwd=repo_root,
+            check=False,
+            timeout=600,
+        )
+        if result.returncode == 0:
+            print("✅ Shared dep check completed")
+        else:
+            print(f"⚠️ Shared dep install exited with code {result.returncode} (non-fatal — server will still start)")
+    except subprocess.TimeoutExpired:
+        print("⚠️ Shared dep install timed out after 10min (non-fatal)")
+    except Exception as e:
+        print(f"⚠️ Shared dep install failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
@@ -409,6 +450,10 @@ async def lifespan(app: FastAPI):
     # Done synchronously so the API doesn't accept requests until the
     # agent it's meant to drive is installed and configured.
     _run_agent_setup()
+
+    # Install shared, agent-agnostic system deps (rclone, gh, gnupg) before the
+    # connector + xo-projects-sync checks below rely on them being on PATH.
+    _install_shared_deps()
 
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
