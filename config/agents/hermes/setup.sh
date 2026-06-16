@@ -192,6 +192,12 @@ OPENAI_API_KEY=${OPENAI_API_KEY:-}
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}
 
+# OnchainOS (OKX) skills credentials — used by the okx-* skills installed
+# into ~/.hermes/skills/onchainos-skills by agent.sh.
+OKX_API_KEY=${OKX_API_KEY:-}
+OKX_SECRET_KEY=${OKX_SECRET_KEY:-}
+OKX_PASSPHRASE=${OKX_PASSPHRASE:-}
+
 # Terminal backends
 TERMINAL_MODAL_IMAGE=${TERMINAL_MODAL_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}
 TERMINAL_TIMEOUT=${TERMINAL_TIMEOUT:-60}
