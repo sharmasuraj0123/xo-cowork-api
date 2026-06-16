@@ -56,7 +56,7 @@ _SSE_HEARTBEAT_INTERVAL = 15
 
 _TOKEN_ENV_KEYS = ["OPENAI_CODEX_ACCESS_TOKEN"]
 
-_OPENCLAW_DEFAULT_PRIMARY_MODEL = "openai-codex/gpt-5.4"
+_OPENCLAW_DEFAULT_PRIMARY_MODEL = "openai/gpt-5.5"
 
 
 def _strip_ansi(line: str) -> str:
