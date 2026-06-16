@@ -590,6 +590,50 @@ install_openclaw_peer_deps() {
 }
 
 # ==============================================================
+# Setup: Install OnchainOS skills (okx/onchainos-skills)
+#
+# Mirrors OKX's official OpenClaw install (.openclaw/INSTALL.md): clones
+# the skills repo into ~/.openclaw/onchainos-skills (pulls if it already
+# exists) and links its skills/ tree into the OpenClaw skills discovery
+# dir as a single grouped folder ~/.openclaw/skills/onchainos-skills, so
+# the ~26 okx-* skills live under one head folder. Symlink keeps them in
+# sync with the clone; copy fallback if symlinks aren't supported. The
+# skills call the OKX OnchainOS API directly using OKX_API_KEY /
+# OKX_SECRET_KEY / OKX_PASSPHRASE (from .env); no extra binary needed.
+# Non-fatal.
+# ==============================================================
+install_onchain_skills() {
+    log "Installing OnchainOS skills..."
+    local repo_url="https://github.com/okx/onchainos-skills"
+    local src_repo="${OPENCLAW_DIR}/onchainos-skills"
+    local skills_dir="${OPENCLAW_DIR}/skills"
+    local target="${skills_dir}/onchainos-skills"
+
+    if [ -d "$src_repo/.git" ]; then
+        log "OnchainOS skills repo exists, pulling latest..."
+        git -C "$src_repo" pull --ff-only 2>/dev/null || log_warn "Could not update OnchainOS skills repo"
+    elif ! git clone --depth 1 "$repo_url" "$src_repo" 2>/dev/null; then
+        log_warn "Failed to clone OnchainOS skills repo — skipping skills install"
+        return 0
+    fi
+
+    if [ ! -d "$src_repo/skills" ]; then
+        log_warn "OnchainOS skills repo has no skills/ directory — skipping"
+        return 0
+    fi
+
+    mkdir -p "$skills_dir"
+    rm -rf "$target"
+    if ln -s "$src_repo/skills" "$target" 2>/dev/null; then
+        log_success "OnchainOS skills linked: ${target} -> ${src_repo}/skills"
+    elif cp -r "$src_repo/skills" "$target" 2>/dev/null; then
+        log_success "OnchainOS skills copied to ${target}"
+    else
+        log_warn "Failed to install OnchainOS skills into ${skills_dir}"
+    fi
+}
+
+# ==============================================================
 # Gateway: Check if running
 # ==============================================================
 is_running() {
@@ -882,6 +926,7 @@ run_setup() {
     enable_channels
     install_cli
     install_openclaw_peer_deps
+    install_onchain_skills
     log "Running config doctor..."
     if openclaw doctor --fix --yes 2>/dev/null; then
         log_success "Config validated"

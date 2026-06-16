@@ -366,6 +366,50 @@ install_cli() {
 }
 
 # ==============================================================
+# Setup: Install OnchainOS skills (okx/onchainos-skills)
+#
+# Mirrors OKX's grouped install layout: clones the skills repo into
+# ~/.hermes/onchainos-skills (pulls if it already exists) and links its
+# skills/ tree into the Hermes skills discovery dir as a single grouped
+# folder ~/.hermes/skills/onchainos-skills, so the ~26 okx-* skills live
+# under one head folder. Symlink keeps them in sync with the clone; copy
+# fallback if symlinks aren't supported. The skills call the OKX
+# OnchainOS API directly using OKX_API_KEY / OKX_SECRET_KEY /
+# OKX_PASSPHRASE (from .env); no extra binary needed. Non-fatal. Run
+# after configure_hermes so the skills dir already exists.
+# ==============================================================
+install_onchain_skills() {
+    log "Installing OnchainOS skills..."
+    local repo_url="https://github.com/okx/onchainos-skills"
+    local src_repo="${HERMES_DIR}/onchainos-skills"
+    local skills_dir="${HERMES_DIR}/skills"
+    local target="${skills_dir}/onchainos-skills"
+
+    if [ -d "$src_repo/.git" ]; then
+        log "OnchainOS skills repo exists, pulling latest..."
+        git -C "$src_repo" pull --ff-only 2>/dev/null || log_warn "Could not update OnchainOS skills repo"
+    elif ! git clone --depth 1 "$repo_url" "$src_repo" 2>/dev/null; then
+        log_warn "Failed to clone OnchainOS skills repo — skipping skills install"
+        return 0
+    fi
+
+    if [ ! -d "$src_repo/skills" ]; then
+        log_warn "OnchainOS skills repo has no skills/ directory — skipping"
+        return 0
+    fi
+
+    mkdir -p "$skills_dir"
+    rm -rf "$target"
+    if ln -s "$src_repo/skills" "$target" 2>/dev/null; then
+        log_success "OnchainOS skills linked: ${target} -> ${src_repo}/skills"
+    elif cp -r "$src_repo/skills" "$target" 2>/dev/null; then
+        log_success "OnchainOS skills copied to ${target}"
+    else
+        log_warn "Failed to install OnchainOS skills into ${skills_dir}"
+    fi
+}
+
+# ==============================================================
 # Setup: Configure Hermes via hermes config set
 # ==============================================================
 configure_hermes() {
@@ -898,6 +942,8 @@ run_setup() {
     export PATH="$HOME/.local/bin:$HERMES_DIR/hermes-agent/venv/bin:$PATH"
 
     configure_hermes
+
+    install_onchain_skills
 
     # Run hermes doctor for health check
     log "Running health check..."
