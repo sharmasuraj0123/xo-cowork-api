@@ -622,14 +622,13 @@ install_onchainos_cli() {
 # ==============================================================
 # Setup: Install OnchainOS skills (okx/onchainos-skills)
 #
-# Mirrors OKX's official OpenClaw install (.openclaw/INSTALL.md): clones
-# the skills repo into ~/.openclaw/onchainos-skills (pulls if it already
-# exists) and links its skills/ tree into the OpenClaw skills discovery
-# dir as a single grouped folder ~/.openclaw/skills/onchainos-skills, so
-# the ~26 okx-* skills live under one head folder. Symlink keeps them in
-# sync with the clone; copy fallback if symlinks aren't supported. The
-# skills invoke the onchainos CLI (installed above) and the OKX_API_KEY /
-# OKX_SECRET_KEY / OKX_PASSPHRASE credentials from .env.
+# Clones the skills repo into ~/.openclaw/onchainos-skills (pulls if it
+# already exists), then copies each okx-* skill folder directly into the
+# OpenClaw skills discovery dir ~/.openclaw/skills/ — flat, no grouping
+# folder and no symlink, so every skill sits at the top level alongside
+# any other installed skills. Existing copies are refreshed on each run.
+# The skills invoke the onchainos CLI (installed above) and the
+# OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE credentials from .env.
 # Non-fatal.
 # ==============================================================
 install_onchain_skills() {
@@ -637,7 +636,6 @@ install_onchain_skills() {
     local repo_url="https://github.com/okx/onchainos-skills"
     local src_repo="${OPENCLAW_DIR}/onchainos-skills"
     local skills_dir="${OPENCLAW_DIR}/skills"
-    local target="${skills_dir}/onchainos-skills"
 
     if [ -d "$src_repo/.git" ]; then
         log "OnchainOS skills repo exists, pulling latest..."
@@ -653,13 +651,23 @@ install_onchain_skills() {
     fi
 
     mkdir -p "$skills_dir"
-    rm -rf "$target"
-    if ln -s "$src_repo/skills" "$target" 2>/dev/null; then
-        log_success "OnchainOS skills linked: ${target} -> ${src_repo}/skills"
-    elif cp -r "$src_repo/skills" "$target" 2>/dev/null; then
-        log_success "OnchainOS skills copied to ${target}"
+    local installed=0
+    local skill name
+    for skill in "$src_repo"/skills/*/; do
+        [ -d "$skill" ] || continue
+        name="$(basename "$skill")"
+        rm -rf "${skills_dir:?}/${name}"
+        if cp -r "$skill" "${skills_dir}/${name}" 2>/dev/null; then
+            installed=$((installed + 1))
+        else
+            log_warn "Failed to install skill ${name}"
+        fi
+    done
+
+    if [ "$installed" -gt 0 ]; then
+        log_success "OnchainOS skills installed: ${installed} skill(s) under ${skills_dir}"
     else
-        log_warn "Failed to install OnchainOS skills into ${skills_dir}"
+        log_warn "No OnchainOS skills were installed into ${skills_dir}"
     fi
 }
 
