@@ -213,7 +213,7 @@ def _openclaw_config_path() -> str:
 def _upsert_openclaw_config(email: str) -> None:
     """
     Update ~/.openclaw/openclaw.json post-login:
-      1. auth.profiles["openai-codex:<email>"] = {provider, mode, email}
+      1. auth.profiles["openai:<email>"] = {provider, mode, email}
       2. agents.defaults.model.primary = _OPENCLAW_DEFAULT_PRIMARY_MODEL (always overwrite)
 
     Best-effort: missing/malformed file is logged and skipped, never raised.
@@ -241,9 +241,9 @@ def _upsert_openclaw_config(email: str) -> None:
     if not isinstance(profiles, dict):
         profiles = {}
         auth["profiles"] = profiles
-    profile_key = f"openai-codex:{email}"
+    profile_key = f"openai:{email}"
     profiles[profile_key] = {
-        "provider": "openai-codex",
+        "provider": "openai",
         "mode": "oauth",
         "email": email,
     }

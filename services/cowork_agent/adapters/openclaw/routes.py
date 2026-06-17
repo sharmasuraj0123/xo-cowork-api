@@ -66,7 +66,7 @@ def codex_status():
         for pid, prof in profiles_obj.items():
             if not isinstance(prof, dict):
                 continue
-            if prof.get("provider") != "openai-codex":
+            if prof.get("provider") not in ("openai", "openai-codex"):
                 continue
             email = prof.get("email") or pid
             if email in seen_emails:
