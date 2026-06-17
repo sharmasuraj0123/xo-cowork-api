@@ -418,11 +418,10 @@ def _install_shared_deps() -> None:
         print(f"⚠️ No shared-deps script (expected at {script}) — skipping")
         return
 
-    try:
-        os.chmod(script, 0o755)
-    except OSError:
-        pass
-
+    # Invoke via `bash <script>` (below), which does not require the script's
+    # executable bit — so we deliberately do NOT chmod it. chmod-ing on every
+    # boot would flip the tracked mode (644 → 755) and surface the file as a
+    # spurious git change in the workspace.
     print("🔧 Ensuring shared system deps (rclone, gh, gnupg)...")
     try:
         # 10-minute ceiling covers a cold first-time install (rclone download +
