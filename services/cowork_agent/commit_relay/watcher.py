@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 
-from services.cowork_agent.project_layout import list_projects, project_dir
+from services.cowork_agent.project_layout import git_repo_dirs
 
 from . import git_ops, state, swarm_client
 
@@ -28,6 +28,11 @@ def _interval() -> int:
         return int(os.getenv("RELAY_POLL_INTERVAL_SECONDS", "60"))
     except ValueError:
         return 60
+
+
+def _project_id() -> str | None:
+    """The workspace's project id (== workspace id) reported to swarm. 1:1 per workspace."""
+    return (os.getenv("PROJECT_ID", "") or "").strip() or None
 
 
 async def run_tick(project_id: str, repo_dir, branch: str) -> str:
@@ -55,19 +60,26 @@ async def start_commit_relay_watcher() -> None:
     if not _enabled():
         log.info("commit_relay watcher: disabled (set RELAY_ENABLED=true)")
         return
+    project_id = _project_id()
+    if not project_id:
+        log.info("commit_relay watcher: disabled (no PROJECT_ID in env)")
+        return
     branch = _branch()
     interval = _interval()
-    log.info("commit_relay watcher: started branch=%s interval=%ss", branch, interval)
+    log.info("commit_relay watcher: started project=%s branch=%s interval=%ss",
+             project_id, branch, interval)
     while True:
         try:
-            for proj in list_projects():
-                name = proj.get("name")
-                if not name:
-                    continue
-                repo = project_dir(name)
-                if not (repo / ".git").is_dir():
-                    continue
-                await run_tick(name, repo, branch)
+            # 1:1 workspace↔repo. Report the single repo under PROJECT_ID; refuse to guess
+            # if there are several (would mix unrelated repos under one project).
+            repos = git_repo_dirs()
+            if len(repos) == 1:
+                await run_tick(project_id, repos[0], branch)
+            elif not repos:
+                log.debug("commit_relay watcher: no git repo under xo-projects; skipping")
+            else:
+                log.warning("commit_relay watcher: %d repos under xo-projects; expected 1 "
+                            "(1:1 workspace↔repo) — skipping to avoid mixing", len(repos))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — keep the loop alive

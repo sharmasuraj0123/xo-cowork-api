@@ -35,6 +35,10 @@ async def report_commits(project_id: str, hashes: list[str], token: str | None =
     except Exception as exc:
         log.warning("commit_relay: report failed: %s", exc)
         return False
+    if resp.status_code == 403:
+        # Not shared / not a member yet — an expected steady state, not an error.
+        log.debug("commit_relay: project not shared/authorized (403); skipping report")
+        return False
     if resp.status_code >= 400:
         log.warning("commit_relay: swarm returned %s", resp.status_code)
         return False
