@@ -1,23 +1,13 @@
 """Project-scope BFF endpoints over ``<project>/.xo/``.
 
-This module never imports ``os`` or ``pathlib`` (P2). All filesystem
-reads happen behind ``services.cowork_agent.scopes.VisualizerScope``,
-which delegates to ``services.cowork_agent.visualizer.reader``. See
-docs/watcher-design.md §6.
+This module never imports ``os`` or ``pathlib``. All filesystem reads
+happen behind ``services.cowork_agent.scopes.VisualizerScope``, which
+delegates to ``services.cowork_agent.visualizer.reader``.
 
-Phase 1 ships six endpoints with empty/zero state where Phase 2's
-watcher has not yet written the backing files:
-
-* ``/usage/summary/card`` — totals from adapter-owned
-  ``sessionslist.json``; daily breakdown is single-bucket by session
-  ``updatedAt`` (true daily roll-up comes from the watcher's
-  ``stats.json`` in Phase 2).
-* ``/todos`` — empty until the watcher writes ``todos.json``.
-* ``/activity`` — empty until the watcher writes ``activity.json``.
-
-The remaining five project-scope endpoints (``/usage/analytics``,
-``/usage/summary``, ``/usage/sessions``, ``/usage/sessions/{id}``,
-``/timeline``) ship in §13.1.6.
+Endpoints are populated when the watcher has written the backing
+files (``stats.json``, ``sessions-augment.json``, ``todos.json``,
+``activity.json``). Files written under older schema versions
+degrade gracefully — readers treat missing keys as zero.
 """
 
 from __future__ import annotations
@@ -32,11 +22,14 @@ from routers.cowork_agent.bff._visualizer_models import (
     AnalyticsStats,
     CostAndTokensEntry,
     CreateTodoRequest,
+    DailyBreakdownEntry,
     DailyCostEntry,
+    DailyModelUsageEntry,
     DeleteTodoResponse,
     MessageCounts,
     MessagesEntry,
     ModelUsageEntry,
+    ModelUsageWithTotals,
     OpenSession,
     PerformanceEntry,
     SessionCostSummary,
@@ -45,12 +38,34 @@ from routers.cowork_agent.bff._visualizer_models import (
     SessionTodos,
     TimelineEvent,
     TimelineResponse,
+    TokenTotals,
     Todo,
     TodosResponse,
     ToolUsage,
+    ToolUsageEntry,
     UpdateTodoRequest,
     UsageAnalyticsResponse,
     UsageSummaryCardResponse,
+)
+from routers.cowork_agent.bff._visualizer_presenter import (
+    TIMELINE_TYPES as _TIMELINE_TYPES,
+    avg_latency_ms_from_by_day as _avg_latency_ms_from_by_day,
+    bad_query as _bad_query,
+    by_day_from_stats as _by_day_from_stats,
+    cost_and_tokens_for_dates as _cost_and_tokens_for_dates,
+    date_from_ms as _date_from_ms,
+    messages_for_dates as _messages_for_dates,
+    model_call_counts_from_by_day as _model_call_counts_from_by_day,
+    model_usage_entries as _model_usage_from_stats,
+    model_usage_with_totals as _model_usage_with_totals_from_stats,
+    parse_types_param as _parse_types_param,
+    performance_entry_for_day as _performance_entry_for_day,
+    performance_for_dates as _performance_for_dates,
+    provider_for_model as _provider_for_model,
+    row_total_tokens as _row_total_tokens,
+    tokens_from_stats as _tokens_from_stats,
+    tool_usage_from_stats as _tool_usage_from_stats,
+    zero_filled_dates as _zero_filled_dates,
 )
 from services.cowork_agent import scopes
 
@@ -71,22 +86,6 @@ def _require_project(project_id: str) -> scopes.VisualizerScope:
     return scope
 
 
-def _bad_query(message: str) -> HTTPException:
-    return HTTPException(
-        status_code=400,
-        detail={"code": "invalid_query", "message": message},
-    )
-
-
-def _date_from_ms(epoch_ms: Optional[int]) -> Optional[str]:
-    if not epoch_ms:
-        return None
-    return (
-        datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-        .strftime("%Y-%m-%d")
-    )
-
-
 # ── /api/xo-projects/{id}/usage/summary/card ─────────────────────────────────
 
 
@@ -95,7 +94,7 @@ def _sum_session_totals(sessionslist: dict[str, dict]) -> tuple[int, int]:
 
     Tokens are read from the adapter-owned ``usage`` block. Message
     count comes from the watcher-augment ``messageCount`` field if
-    present (Phase 2), else ``0``.
+    present, else ``0``.
     """
     total_tokens = 0
     total_messages = 0
@@ -111,11 +110,9 @@ def _bucket_daily_cost(
     sessionslist: dict[str, dict], *, days: int
 ) -> list[DailyCostEntry]:
     """Build the ``dailyCost`` array, zero-filled for the requested
-    window, sorted oldest→newest.
-
-    Phase 1 limitation: one bucket per session, keyed by the session's
-    ``updatedAt`` date. Phase 2's ``stats.json`` will replace this with
-    a true per-event roll-up. Totals are correct either way.
+    window, sorted oldest→newest. One bucket per session keyed by
+    session ``updatedAt``; coarser than the per-event by_day rollup
+    other endpoints use, but totals match either way.
     """
     buckets: dict[str, dict[str, int | float]] = {}
     for row in sessionslist.values():
@@ -127,8 +124,7 @@ def _bucket_daily_cost(
         b["tokens"] += int(usage.get("input_tokens", 0) or 0)
         b["tokens"] += int(usage.get("output_tokens", 0) or 0)
         b["messages"] += int(row.get("messageCount", 0) or 0)
-        # Cost stays 0 for Claude Code in v1 (no cost model — see
-        # docs/watcher-design.md §8.3).
+        # Cost stays 0 — no pricing table.
 
     today = datetime.now(timezone.utc)
     out: list[DailyCostEntry] = []
@@ -170,7 +166,7 @@ def project_usage_summary_card(
     _, total_messages = _sum_session_totals(sessionslist)
     return UsageSummaryCardResponse(
         days=days,
-        totalCost=0.0,  # cost-per-token table is Phase 3 polish
+        totalCost=0.0,  # no pricing table
         totalMessages=total_messages,
         totalTokens=total_tokens,
         dailyCost=_bucket_daily_cost(sessionslist, days=days),
@@ -213,7 +209,7 @@ def _shape_todos(project_id: str, raw: Optional[dict]) -> TodosResponse:
             )
         out_sessions[str(sid)] = SessionTodos(
             runtime=str(entry.get("runtime", "")),
-            source_file=None,  # P1: never echo absolute paths back (§3.4.1)
+            source_file=None,  # never echo absolute paths back
             session_started_at=entry.get("session_started_at"),
             todos=todos,
         )
@@ -232,9 +228,9 @@ def _shape_todos(project_id: str, raw: Optional[dict]) -> TodosResponse:
 def project_todos(project_id: str) -> TodosResponse:
     """Per-session task list for one project.
 
-    Empty ``{sessions: {}}`` until the Phase 2 watcher writes
-    ``todos.json``. Adapter-written ``sessionslist.json`` is NOT a
-    source for todos — todos live exclusively in the watcher-derived
+    Empty ``{sessions: {}}`` when the watcher hasn't written
+    ``todos.json`` yet. Adapter-written ``sessionslist.json`` is NOT
+    a source for todos — todos live exclusively in the watcher-derived
     ``todos.json``.
     """
     scope = _require_project(project_id)
@@ -422,9 +418,9 @@ def _shape_activity(project_id: str, raw: Optional[dict]) -> ActivityResponse:
 def project_activity(project_id: str) -> ActivityResponse:
     """Live presence — which sessions are open in this project right now.
 
-    Empty ``{open_sessions: []}`` until the Phase 2 watcher writes
-    ``activity.json``. AGENTS.md §4 (boot ritual) reads this file to
-    answer "is anyone else working here right now?".
+    Empty ``{open_sessions: []}`` when the watcher hasn't written
+    ``activity.json`` yet. AGENTS.md (boot ritual) reads this file
+    to answer "is anyone else working here right now?".
     """
     scope = _require_project(project_id)
     try:
@@ -438,35 +434,156 @@ def project_activity(project_id: str) -> ActivityResponse:
     return _shape_activity(project_id, raw)
 
 
-# ── Shared helpers for the usage-aggregation routes ──────────────────────────
+def _message_counts_for_row(row: dict) -> MessageCounts:
+    """Build a ``MessageCounts`` from one merged sessionslist row.
 
-
-def _zero_filled_dates(days: int) -> list[str]:
-    from datetime import timedelta
-    today = datetime.now(timezone.utc)
-    return [
-        (today - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
-        for i in range(days)
-    ]
-
-
-def _tokens_from_stats(stats: dict, days: int) -> int:
-    """Sum input+output tokens from a stats.json rolling window.
-    No cache_read / cache_creation — matches what users see in the UI.
+    Reads ``messageCountByRole`` for the role split; falls back to
+    zeros for schema 1 augment rows that don't carry the field.
+    ``total`` and ``toolCalls`` come from top-level augment fields.
     """
-    window = "30d" if days > 7 else "7d"
-    rolling = (stats.get("rolling") or {}).get(window) or {}
-    t = rolling.get("tokens") or {}
-    return int(t.get("input", 0) or 0) + int(t.get("output", 0) or 0)
-
-
-def _row_total_tokens(usage: dict) -> int:
-    return (
-        int(usage.get("input_tokens", 0) or 0)
-        + int(usage.get("output_tokens", 0) or 0)
-        + int(usage.get("cache_read_input_tokens", 0) or 0)
-        + int(usage.get("cache_creation_input_tokens", 0) or 0)
+    by_role_raw = row.get("messageCountByRole")
+    by_role = by_role_raw if isinstance(by_role_raw, dict) else {}
+    return MessageCounts(
+        total=int(row.get("messageCount", 0) or 0),
+        user=int(by_role.get("user", 0) or 0),
+        assistant=int(by_role.get("assistant", 0) or 0),
+        toolCalls=int(row.get("toolCallCount", 0) or 0),
+        toolResults=int(by_role.get("toolResults", 0) or 0),
+        errors=int(by_role.get("errors", 0) or 0),
     )
+
+
+def _tool_usage_for_session(stats: dict, native_session_id: str) -> ToolUsage:
+    """Per-session tool tally from ``stats.by_session.<sid>.tools``."""
+    if not native_session_id:
+        return ToolUsage(totalCalls=0, uniqueTools=0, tools=[])
+    by_session = stats.get("by_session") or {}
+    row = by_session.get(native_session_id) or {}
+    tools_raw = row.get("tools") if isinstance(row, dict) else None
+    if not isinstance(tools_raw, dict):
+        return ToolUsage(totalCalls=0, uniqueTools=0, tools=[])
+    entries = [
+        ToolUsageEntry(name=str(n), count=int(c or 0))
+        for n, c in tools_raw.items() if int(c or 0) > 0
+    ]
+    entries.sort(key=lambda t: t.count, reverse=True)
+    total = sum(t.count for t in entries)
+    return ToolUsage(totalCalls=total, uniqueTools=len(entries), tools=entries)
+
+
+def _model_usage_for_session(
+    stats: dict, native_session_id: str
+) -> list[ModelUsageWithTotals]:
+    """Per-session model breakdown from ``stats.by_session.<sid>.by_model``."""
+    if not native_session_id:
+        return []
+    by_session = stats.get("by_session") or {}
+    row = by_session.get(native_session_id) or {}
+    bm = row.get("by_model") if isinstance(row, dict) else None
+    if not isinstance(bm, dict):
+        return []
+    entries: list[ModelUsageWithTotals] = []
+    for model, t in bm.items():
+        if not isinstance(t, dict):
+            continue
+        inp = int(t.get("input", 0) or 0)
+        outp = int(t.get("output", 0) or 0)
+        if inp + outp <= 0:
+            continue
+        entries.append(ModelUsageWithTotals(
+            provider=_provider_for_model(str(model)),
+            model=str(model),
+            count=0,  # stats.by_session.by_model carries tokens only
+            totals=TokenTotals(
+                input=inp, output=outp,
+                cacheRead=0, cacheWrite=0, totalTokens=inp + outp,
+                totalCost=0.0, inputCost=0.0, outputCost=0.0,
+                cacheReadCost=0.0, cacheWriteCost=0.0, missingCostEntries=0,
+            ),
+        ))
+    entries.sort(key=lambda e: e.totals.totalTokens, reverse=True)
+    return entries
+
+
+def _daily_model_usage_from_by_day(
+    by_day: dict[str, dict], dates: list[str]
+) -> list[DailyModelUsageEntry]:
+    """Flatten ``by_day.<date>.by_model`` into one entry per
+    (date, model) pair. Dates iterated in the requested order so the
+    series stays time-ordered; within a date, models sorted by tokens
+    desc for stable display order."""
+    out: list[DailyModelUsageEntry] = []
+    for d in dates:
+        day = by_day.get(d) or {}
+        models = (day.get("by_model") or {}) if isinstance(day, dict) else {}
+        if not isinstance(models, dict):
+            continue
+        entries = [
+            (model, mt) for model, mt in models.items()
+            if isinstance(mt, dict)
+        ]
+        entries.sort(
+            key=lambda kv: int(kv[1].get("input", 0) or 0) + int(kv[1].get("output", 0) or 0),
+            reverse=True,
+        )
+        for model, mt in entries:
+            tokens = int(mt.get("input", 0) or 0) + int(mt.get("output", 0) or 0)
+            if tokens <= 0:
+                continue
+            out.append(DailyModelUsageEntry(
+                date=d,
+                provider=_provider_for_model(model),
+                model=model,
+                tokens=tokens,
+                cost=0.0,
+                count=int(mt.get("count", 0) or 0),
+            ))
+    return out
+
+
+def _daily_breakdown_for_dates(
+    by_day: dict[str, dict], dates: list[str]
+) -> list[DailyBreakdownEntry]:
+    """``SessionCostSummary.dailyBreakdown`` shape — same per-date
+    tokens as costAndTokens but a different Pydantic model."""
+    out: list[DailyBreakdownEntry] = []
+    for d in dates:
+        day = by_day.get(d) or {}
+        tk = (day.get("tokens") or {}) if isinstance(day, dict) else {}
+        out.append(DailyBreakdownEntry(
+            date=d,
+            tokens=int(tk.get("input", 0) or 0) + int(tk.get("output", 0) or 0),
+            cost=0.0,
+        ))
+    return out
+
+
+def _duration_ms_for_session(stats: dict, native_session_id: str) -> Optional[int]:
+    """Look up one session's duration in ``stats.by_session.<nativeSid>``.
+    Returns None when the watcher hasn't recorded a duration yet."""
+    if not native_session_id:
+        return None
+    by_session = stats.get("by_session") or {}
+    row = by_session.get(native_session_id)
+    if not isinstance(row, dict):
+        return None
+    d = row.get("duration_ms")
+    return int(d) if isinstance(d, (int, float)) else None
+
+
+def _activity_dates(first_ms: Optional[int], last_ms: Optional[int]) -> list[str]:
+    """List of ISO dates (UTC) spanned by the activity window. Typical
+    session covers one or two dates; returns ``[]`` when either bound
+    is missing."""
+    if not first_ms or not last_ms:
+        return []
+    from datetime import timedelta
+    if last_ms < first_ms:
+        last_ms = first_ms
+    start = datetime.fromtimestamp(first_ms / 1000, tz=timezone.utc).date()
+    end = datetime.fromtimestamp(last_ms / 1000, tz=timezone.utc).date()
+    n = (end - start).days
+    return [(start + timedelta(days=i)).isoformat() for i in range(n + 1)]
 
 
 def _row_to_list_item(composite_key: str, row: dict, *, project_id: Optional[str]) -> SessionListItem:
@@ -486,14 +603,17 @@ def _row_to_list_item(composite_key: str, row: dict, *, project_id: Optional[str
 
 
 def _aggregate_session_summary(
-    composite_key: str, row: dict, *, single_session: bool
+    composite_key: str, row: dict, *, single_session: bool,
+    stats: Optional[dict] = None,
 ) -> SessionCostSummary:
     """Build a ``SessionCostSummary`` from one sessionslist row.
 
-    Phase 1: token totals are real (from adapter ``usage``); cost,
-    per-day, per-tool, per-model breakdowns are zero/empty until
-    Phase 2 writes the full daily roll-up. Wire shape matches
-    ``/openclaw/usage/summary`` field-for-field.
+    Token totals come from the adapter ``usage`` block. ``durationMs``
+    and ``activityDates`` are surfaced when ``stats`` is provided —
+    duration from ``stats.by_session.<nativeSid>.duration_ms`` and
+    dates derived from the row's first/last activity. Cost, per-day,
+    per-tool, and per-model breakdowns remain empty until the watcher
+    writes a per-day rollup.
     """
     usage = row.get("usage") or {}
     inp = int(usage.get("input_tokens", 0) or 0)
@@ -502,14 +622,34 @@ def _aggregate_session_summary(
     cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
     total = inp + out + cache_read + cache_write
     native = row.get("nativeSessionId") or ""
+    first_act = row.get("firstActivity") or row.get("updatedAt")
+    last_act = row.get("lastActivity") or row.get("updatedAt")
+
+    duration_ms: Optional[int] = None
+    dates: list[str] = []
+    daily_breakdown: list[DailyBreakdownEntry] = []
+    if stats is not None:
+        duration_ms = _duration_ms_for_session(stats, native)
+        dates = _activity_dates(first_act, last_act)
+        if dates:
+            # dailyBreakdown is the by_day token block filtered to
+            # the session's activity window. by_day buckets are
+            # project-wide (they aggregate across sessions on the
+            # same day), so this overstates a single session's
+            # contribution on days where other sessions were also
+            # active. Per-session daily breakdown would need per-
+            # session daily tracking in sessions-augment.
+            daily_breakdown = _daily_breakdown_for_dates(
+                _by_day_from_stats(stats), dates,
+            )
 
     return SessionCostSummary(
         sessionId=composite_key if single_session else "all",
         sessionFile=f"{native}.jsonl" if (single_session and native) else "1 file",
-        firstActivity=row.get("firstActivity") or row.get("updatedAt"),
-        lastActivity=row.get("lastActivity") or row.get("updatedAt"),
-        durationMs=None,
-        activityDates=[],
+        firstActivity=first_act,
+        lastActivity=last_act,
+        durationMs=duration_ms,
+        activityDates=dates,
         input=inp,
         output=out,
         cacheRead=cache_read,
@@ -521,19 +661,17 @@ def _aggregate_session_summary(
         cacheReadCost=0.0,
         cacheWriteCost=0.0,
         missingCostEntries=0,
-        dailyBreakdown=[],
+        dailyBreakdown=daily_breakdown,
         dailyLatency=[],
         dailyModelUsage=[],
-        messageCounts=MessageCounts(
-            total=int(row.get("messageCount", 0) or 0),
-            user=0,
-            assistant=0,
-            toolCalls=int(row.get("toolCallCount", 0) or 0),
-            toolResults=0,
-            errors=0,
+        messageCounts=_message_counts_for_row(row),
+        toolUsage=(
+            _tool_usage_for_session(stats, native)
+            if stats is not None else ToolUsage(totalCalls=0, uniqueTools=0, tools=[])
         ),
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
-        modelUsage=[],
+        modelUsage=(
+            _model_usage_for_session(stats, native) if stats is not None else []
+        ),
     )
 
 
@@ -561,12 +699,7 @@ def project_usage_analytics(
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
 ) -> UsageAnalyticsResponse:
-    """Per-project analytics dashboard. Shape mirrors ``/openclaw/usage/analytics``.
-
-    Phase 1 fills ``stats`` (totals) from ``sessionslist.json``;
-    daily/tool/model arrays are zero-filled until Phase 2 writes
-    ``stats.json``.
-    """
+    """Per-project analytics dashboard. Shape mirrors ``/openclaw/usage/analytics``."""
     try:
         if start:
             datetime.strptime(start, "%Y-%m-%d")
@@ -581,26 +714,21 @@ def project_usage_analytics(
     total_tokens = _tokens_from_stats(stats, window_days)
     sessionslist = scope.read_sessionslist()
     _, total_messages = _sum_session_totals(sessionslist)
-    zero_dates = _zero_filled_dates(window_days)
+    dates = _zero_filled_dates(window_days)
+    by_day = _by_day_from_stats(stats)
 
     return UsageAnalyticsResponse(
         stats=AnalyticsStats(
             totalCost=0.0,
             totalTokens=total_tokens,
             totalMessages=total_messages,
-            avgLatencyMs=0,
+            avgLatencyMs=_avg_latency_ms_from_by_day(by_day),
         ),
-        costAndTokens=[CostAndTokensEntry(date=d, tokens=0, cost=0.0) for d in zero_dates],
-        messages=[
-            MessagesEntry(date=d, total=0, user=0, assistant=0, toolCalls=0)
-            for d in zero_dates
-        ],
-        performance=[
-            PerformanceEntry(date=d, avgMs=0, p95Ms=0, minMs=0, maxMs=0)
-            for d in zero_dates
-        ],
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
-        modelUsage=[],
+        costAndTokens=_cost_and_tokens_for_dates(by_day, dates),
+        messages=_messages_for_dates(by_day, dates),
+        performance=_performance_for_dates(by_day, dates),
+        toolUsage=_tool_usage_from_stats(stats, window_days),
+        modelUsage=_model_usage_from_stats(stats, window_days),
     )
 
 
@@ -660,9 +788,13 @@ def project_usage_summary(
 
     scope = _require_project(project_id)
     sessionslist = scope.read_sessionslist()
+    stats = scope.read_stats() or {}
+    # Window for the by_model rollup. Mirrors _tokens_from_stats's
+    # 7d/30d choice: prefer the longer window for aggregate views.
+    summary_window_days = days or 30
 
     per_session = [
-        _aggregate_session_summary(k, r, single_session=True)
+        _aggregate_session_summary(k, r, single_session=True, stats=stats)
         for k, r in sessionslist.items()
     ]
 
@@ -671,23 +803,35 @@ def project_usage_summary(
     out = sum(s.output for s in per_session)
     cr = sum(s.cacheRead for s in per_session)
     cw = sum(s.cacheWrite for s in per_session)
-    msgs = sum(s.messageCounts.total for s in per_session)
+    first_act = min((s.firstActivity for s in per_session if s.firstActivity), default=None)
+    last_act = max((s.lastActivity for s in per_session if s.lastActivity), default=None)
+    # Aggregate messageCounts by summing each per-session breakdown.
+    agg_msg = MessageCounts(
+        total=sum(s.messageCounts.total for s in per_session),
+        user=sum(s.messageCounts.user for s in per_session),
+        assistant=sum(s.messageCounts.assistant for s in per_session),
+        toolCalls=sum(s.messageCounts.toolCalls for s in per_session),
+        toolResults=sum(s.messageCounts.toolResults for s in per_session),
+        errors=sum(s.messageCounts.errors for s in per_session),
+    )
 
+    activity_dates = _activity_dates(first_act, last_act)
     return SessionCostSummary(
         sessionId="all",
         sessionFile=f"{len(per_session)} files",
-        firstActivity=min((s.firstActivity for s in per_session if s.firstActivity), default=None),
-        lastActivity=max((s.lastActivity for s in per_session if s.lastActivity), default=None),
+        firstActivity=first_act,
+        lastActivity=last_act,
         durationMs=None,
-        activityDates=[],
+        activityDates=activity_dates,
         input=inp, output=out, cacheRead=cr, cacheWrite=cw,
         totalTokens=inp + out + cr + cw,
         totalCost=0.0, inputCost=0.0, outputCost=0.0,
         cacheReadCost=0.0, cacheWriteCost=0.0, missingCostEntries=0,
-        dailyBreakdown=[], dailyLatency=[], dailyModelUsage=[],
-        messageCounts=MessageCounts(total=msgs, user=0, assistant=0, toolCalls=0, toolResults=0, errors=0),
-        toolUsage=ToolUsage(totalCalls=0, uniqueTools=0, tools=[]),
-        modelUsage=[],
+        dailyBreakdown=_daily_breakdown_for_dates(_by_day_from_stats(stats), activity_dates),
+        dailyLatency=[], dailyModelUsage=[],
+        messageCounts=agg_msg,
+        toolUsage=_tool_usage_from_stats(stats, summary_window_days),
+        modelUsage=_model_usage_with_totals_from_stats(stats, summary_window_days),
         sessionCount=len(per_session),
         sessions=per_session,
     )
@@ -719,29 +863,13 @@ def project_usage_one_session(
             detail={"code": "session_not_found", "message": "Session not found."},
         )
     composite_key, row = found
-    return _aggregate_session_summary(composite_key, row, single_session=True)
+    stats = scope.read_stats() or {}
+    return _aggregate_session_summary(
+        composite_key, row, single_session=True, stats=stats,
+    )
 
 
 # ── /api/xo-projects/{id}/timeline ───────────────────────────────────────────
-
-
-_TIMELINE_TYPES = frozenset({
-    "project.created", "session.started", "session.closed",
-    "todo.added", "todo.completed",
-    "file.edited", "file.created",
-    "plan.written", "episode.written",
-    "peer.sync.started", "peer.sync.applied", "peer.sync.conflict",
-})
-
-
-def _parse_types_param(types: Optional[str]) -> Optional[frozenset[str]]:
-    if types is None:
-        return None
-    requested = {t.strip() for t in types.split(",") if t.strip()}
-    unknown = requested - _TIMELINE_TYPES
-    if unknown:
-        raise _bad_query(f"unknown timeline type(s): {sorted(unknown)}")
-    return frozenset(requested)
 
 
 @router.get(
@@ -756,8 +884,8 @@ def project_timeline(
 ) -> TimelineResponse:
     """Newest-first event stream for one project.
 
-    Reads from ``<project>/.xo/timeline.jsonl``. Empty until Phase 2
-    watcher emits events.
+    Reads from ``<project>/.xo/timeline.jsonl``. Empty when the
+    watcher hasn't emitted any events for this project yet.
     """
     if before is not None:
         try:

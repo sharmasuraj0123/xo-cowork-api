@@ -155,12 +155,12 @@ async def build_providers_status(
     *,
     anthropic_key_present: Callable[[], bool],
     openai_key_present: Callable[[], bool],
+    openrouter_key_present: Callable[[], bool],
 ) -> dict[str, Any]:
     """Compose the ``/providers/status`` response for `agent`.
 
-    `anthropic_key_present` / `openai_key_present` are callables so each
-    adapter can resolve the key from its own env source without this module
-    knowing where that source lives.
+    The ``*_key_present`` callables let each adapter resolve keys from its
+    own env source without this module knowing where that source lives.
     """
     models = _read_xo_models(agent)
 
@@ -175,6 +175,8 @@ async def build_providers_status(
         api_keys["anthropic"] = {"connected": bool(anthropic_key_present())}
     if _leaf_enabled(models, "api_keys", "openai"):
         api_keys["openai"] = {"connected": bool(openai_key_present())}
+    if _leaf_enabled(models, "api_keys", "openrouter"):
+        api_keys["openrouter"] = {"connected": bool(openrouter_key_present())}
 
     return {"agent": agent, "oauth": oauth, "api_keys": api_keys}
 

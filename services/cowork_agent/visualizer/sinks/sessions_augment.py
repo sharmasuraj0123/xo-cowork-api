@@ -10,11 +10,10 @@ Tracks the fields the runtime adapters don't compute:
   ``TaskStatusChanged``
 * ``firstActivity`` / ``lastActivity`` — epoch ms of the earliest /
   latest event observed
-* ``ended_at`` — currently always null (filled in by Phase 3 when
-  session-close detection lands)
+* ``ended_at`` — currently always null (filled once session-close
+  detection lands)
 * ``episode_refs`` — preserved verbatim; the
-  :mod:`memory_episodic` watcher (Phase 3) writes to this field
-  separately
+  :mod:`memory_episodic` watcher writes to this field separately
 
 Keys match :mod:`sessionslist` — composite cowork-key when an
 adapter row exists, else native session id (the BFF merge naturally
@@ -82,6 +81,8 @@ def _build_native_to_composite_map(sessionslist: Optional[dict]) -> dict[str, st
 def _empty_row() -> dict:
     return {
         "messageCount":   0,
+        "messageCountByRole": {"user": 0, "assistant": 0,
+                               "toolResults": 0, "errors": 0},
         "toolCallCount":  0,
         "taskCount":      {"total": 0, "completed": 0, "in_progress": 0,
                            "pending": 0, "cancelled": 0, "blocked": 0},
@@ -152,6 +153,15 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
 
         if isinstance(ev, MessageObserved):
             row["messageCount"] = int(row.get("messageCount", 0)) + 1
+            # Per-role split. Legacy schema-1 rows on disk won't have
+            # the sub-dict — create it lazily so an upgrade doesn't
+            # lose existing messageCount.
+            by_role = row.get("messageCountByRole")
+            if not isinstance(by_role, dict):
+                by_role = {"user": 0, "assistant": 0, "toolResults": 0, "errors": 0}
+                row["messageCountByRole"] = by_role
+            role_key = ev.role if ev.role in ("user", "assistant") else "assistant"
+            by_role[role_key] = int(by_role.get(role_key, 0)) + 1
             changed = True
         elif isinstance(ev, ToolUseObserved):
             row["toolCallCount"] = int(row.get("toolCallCount", 0)) + 1
@@ -188,7 +198,7 @@ def apply(xo_dir: Path, events: Iterable[Event]) -> bool:
     # the wire pick named fields rather than spreading the dict —
     # see ``routers/cowork_agent/bff/visualizer.py::_row_to_list_item``.
     write_json_atomic(augment_path, {
-        "schema": 1,
+        "schema": 2,
         "updated_at": _now_iso(),
         "sessions": sessions,
     })

@@ -1,15 +1,16 @@
 """
-Secrets endpoints backed by the `~/.openclaw/.env` file.
+Secrets endpoints backed by the **active agent's** ``.env`` file.
 
 GET parses the file into key/value entries, PUT overwrites it with a new list
-of entries. The parser/serializer lives in `openclaw_env` so other route files
-(e.g. the onboarding provider-key flow) share the same format.
+of entries. The parser/serializer lives in `agent_env` (resolved by
+``AGENT_NAME``) so other route files (e.g. the onboarding provider-key flow)
+share the same format and target the same file.
 """
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from services.cowork_agent.openclaw_env import load_env_entries, save_env_entries
+from services.cowork_agent.registry.agent_env import load_env_entries, save_env_entries
 
 router = APIRouter()
 

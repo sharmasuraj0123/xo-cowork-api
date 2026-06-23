@@ -1,6 +1,6 @@
 """BFF secrets routes — read & edit with curated shape.
 
-Curated wrapper over services/cowork_agent/openclaw_env via the
+Curated wrapper over services/cowork_agent/agent_env via the
 SecretsScope handle in services.cowork_agent.scopes. Five routes:
 
   GET    /api/secrets                  list with masked previews

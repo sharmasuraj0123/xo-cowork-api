@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.settings import (
+from services.cowork_agent.registry.settings import (
     _INVALID_AGENT_ID_CHARS,
     _LEADING_DASHES,
     _MAX_AGENT_PAYLOAD_BYTES,
@@ -77,6 +77,31 @@ def parse_jsonl(path: Path) -> list[dict]:
     return lines
 
 
+# ── Workspace-context preamble ───────────────────────────────────────────────
+#
+# The xo-coworker frontend prepends a "Project context" block to user prompts
+# in project-scoped chats (use-chat.ts) so the model knows about AGENTS.md
+# and the boot ritual. The model needs that text — it stays on disk in the
+# JSONL — but rendering it as part of the user bubble in the UI is noisy and
+# makes the first user message look like a "skill" injection. Strip it from
+# the visible text wherever we surface user-facing strings (message
+# conversion, title derivation).
+#
+# The marker is stable across preamble revisions; only the body text below
+# the header has changed over time.
+_WORKSPACE_PREAMBLE_MARKER = "\n\n---\n\n> **Project context**"
+
+
+def strip_workspace_preamble(text: str) -> str:
+    """Return text with the trailing workspace-context preamble removed."""
+    if not text:
+        return text
+    idx = text.find(_WORKSPACE_PREAMBLE_MARKER)
+    if idx < 0:
+        return text
+    return text[:idx].rstrip()
+
+
 def derive_title(records: list[dict]) -> str:
     """Extract a title from the first user message text (OpenClaw/simplified format)."""
     for r in records:
@@ -84,8 +109,8 @@ def derive_title(records: list[dict]) -> str:
             content = r["message"].get("content", [])
             for block in content:
                 if block.get("type") == "text":
-                    text = block["text"].strip()
-                    if text.startswith("Read HEARTBEAT.md"):
+                    text = strip_workspace_preamble(block["text"].strip())
+                    if not text or text.startswith("Read HEARTBEAT.md"):
                         continue
                     return text[:80] + ("..." if len(text) > 80 else "")
     return "Untitled Session"
@@ -95,6 +120,11 @@ def derive_title_native_claude(records: list[dict]) -> str:
     """Extract a title from native Claude Code JSONL records (type=user/assistant)."""
     for r in records:
         if r.get("type") != "user":
+            continue
+        # Skip runtime-injected meta records (Skill payloads etc.) so the
+        # sidebar title is never sourced from a several-thousand-character
+        # skill body when the user's first real prompt happened to load one.
+        if r.get("isMeta") is True:
             continue
         msg = r.get("message", {})
         content = msg.get("content", "")
@@ -107,6 +137,7 @@ def derive_title_native_claude(records: list[dict]) -> str:
             ).strip()
         else:
             continue
+        text = strip_workspace_preamble(text)
         if text and not text.startswith("Read HEARTBEAT.md"):
             return text[:80] + ("..." if len(text) > 80 else "")
     return "Untitled Session"

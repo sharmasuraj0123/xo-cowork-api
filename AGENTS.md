@@ -12,6 +12,23 @@
 - Keep route handlers thin; move logic to clients/services.
 - Preserve request/response contracts unless explicitly requested.
 
+## Agent-modular architecture (read before touching core)
+
+- Broker design: core code never names a specific agent. The active backend is
+  resolved from `AGENT_NAME` through one seam, the capability loader
+  `services/cowork_agent/adapters/loader.py`. A missing capability degrades to an
+  empty/501 shape, never a crash.
+- Agent-specific code lives only in three trees:
+  `services/cowork_agent/adapters/<name>/`, `config/agents/<name>/`, and
+  `config/models/<name>/` (legacy Plane-A model clients). No other file may name
+  an agent (`openclaw`/`hermes`/`claude_code`) in code.
+- Adapters are auto-discovered — adding an agent = drop those folders, zero core
+  edits. The one sanctioned core literal is the `openclaw` safe-boot default in
+  `registry/agent_registry.py`.
+- Two planes: Plane A = legacy `/ask_question*` via `config/models/<name>/`
+  (`AI_PROVIDER`); Plane B = `/api/*` via `AGENT_NAME` adapters.
+- Full guide: `DEVELOPING.md`.
+
 ## Code and safety standards
 
 - Prefer clear, maintainable code.
@@ -21,6 +38,10 @@
 
 ## Validation
 
+- The project venv is `venv/bin/python` (system `python3` lacks fastapi).
+- After touching core, run `venv/bin/python scripts/check_agent_modularity.py` (must pass).
+- Import gate + route parity (expect 146 / 149 / 173 for claude_code / openclaw / hermes):
+  `AGENT_NAME=<a> venv/bin/python -c "import server"`.
 - Validate changes with lints/tests/compile where feasible.
 - Keep edits minimal and targeted to the requested task.
 

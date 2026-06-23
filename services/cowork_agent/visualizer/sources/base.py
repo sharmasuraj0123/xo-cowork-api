@@ -27,7 +27,7 @@ class PresenceRow(dict):
 class Source(Protocol):
     """Every runtime source implements this protocol."""
 
-    name: str  # e.g. "claude_code"
+    name: str  # adapter directory name (the active agent's name)
 
     def poll_events(self) -> Iterator[Event]:
         """Yield events observed since the last call. Stateless from

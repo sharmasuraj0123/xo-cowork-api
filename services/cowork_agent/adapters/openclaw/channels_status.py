@@ -11,12 +11,15 @@ Runs `openclaw channels status --json` — the source of truth for channel
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import re
-import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from services.cowork_agent.adapters.cli_status import (
+    CliStatusError as OpenclawStatusError,
+    resolve_binary,
+    run_cli,
+)
 
 OPENCLAW_BIN_ENV = "OPENCLAW_BIN"
 DEFAULT_BIN = "openclaw"
@@ -27,50 +30,15 @@ _TEXT_FALLBACK_MARKER = "Gateway not reachable"
 _BULLET_RE = re.compile(r"^- (?P<channel>\S+)\s+\S+:\s+(?P<flags>.+)$")
 
 
-class OpenclawStatusError(Exception):
-    """CLI invocation/parse failure. `code` maps to an HTTP status in the router."""
-
-    def __init__(self, message: str, *, code: str, detail: Optional[str] = None):
-        super().__init__(message)
-        self.code = code  # binary_not_found | timeout | execution_failed | invalid_output
-        self.detail = detail
-
-
-def _resolve_binary() -> str:
-    configured = (os.getenv(OPENCLAW_BIN_ENV, "") or "").strip()
-    return configured or shutil.which(DEFAULT_BIN) or DEFAULT_BIN
-
-
 async def fetch_channels_raw(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Dict[str, Any]:
     """Run the CLI; return {"mode": "json"|"text", "payload": dict|str}."""
-    binary = _resolve_binary()
-    if os.path.isabs(binary) and not os.path.isfile(binary):
-        raise OpenclawStatusError(
-            f"openclaw binary not found at {binary}", code="binary_not_found", detail=binary
-        )
+    binary = resolve_binary(OPENCLAW_BIN_ENV, DEFAULT_BIN)
+    result = await run_cli(
+        binary, ("channels", "status", "--json"), timeout=timeout, label="openclaw"
+    )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "channels", "status", "--json",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-    except (FileNotFoundError, PermissionError) as e:
-        raise OpenclawStatusError(
-            f"openclaw binary unavailable: {binary}", code="binary_not_found", detail=str(e)
-        )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.communicate()
-        except Exception:
-            pass
-        raise OpenclawStatusError(f"openclaw timed out after {timeout}s", code="timeout")
-
-    out = (stdout or b"").decode("utf-8", errors="replace").strip()
-    err = (stderr or b"").decode("utf-8", errors="replace").strip()
+    out = result.stdout
+    err = result.stderr
 
     if out.startswith("{"):
         try:
@@ -85,9 +53,9 @@ async def fetch_channels_raw(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Dict[s
         if _TEXT_FALLBACK_MARKER in stream:
             return {"mode": "text", "payload": stream}
 
-    if proc.returncode != 0:
+    if result.returncode != 0:
         raise OpenclawStatusError(
-            f"openclaw exited with code {proc.returncode}",
+            f"openclaw exited with code {result.returncode}",
             code="execution_failed",
             detail=err or out[:300] or None,
         )

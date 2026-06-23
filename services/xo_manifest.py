@@ -8,16 +8,17 @@ to render.
 
 Two layers live in the file:
 
-1. Static capability flags — hand-tuned per agent in `DEFAULTS`. Written
-   once at server startup, overwriting any prior file.
+1. Static capability flags — sourced per agent from
+   `config/agents/<agent>/capabilities.json`. Written once at server
+   startup, overwriting any prior file.
 2. Live status (openclaw only, for now) — the full response from
    `/openclaw/models/status` and `/openclaw/channels/status`, embedded
    under a `status` key in the corresponding section. Refreshed in a
    background task at startup and on every endpoint hit. Deferred for
    claude_code and hermes until they have their own status sources.
 
-The defaults table is the source of truth; cascade rule (parent
-`enabled=false` → children false) is applied at build time so future
+Each agent's `capabilities.json` is the source of truth; the cascade rule
+(parent `enabled=false` → children false) is applied at build time so future
 toggle changes propagate without hand-editing leaves.
 """
 
@@ -33,82 +34,42 @@ from typing import Any
 from services.cowork_agent.project_layout import xo_projects_root
 
 
-DEFAULT_AGENT = "openclaw"
-KNOWN_AGENTS = ("openclaw", "claude_code", "hermes")
 
 
-def _all_data_true() -> dict:
-    return {
-        "enabled": True,
-        "google_drive": {"enabled": True},
-        "one_drive":    {"enabled": True},
-        "github":       {"enabled": True},
-        "vercel":       {"enabled": True},
-    }
+_AGENTS_DIR = Path(__file__).resolve().parents[1] / "config" / "agents"
 
 
-def _channels(enabled: bool, telegram: bool, slack: bool) -> dict:
-    return {
-        "enabled": enabled,
-        "telegram": {"enabled": telegram},
-        "slack":    {"enabled": slack},
-    }
+def _capabilities_path(agent: str) -> Path:
+    """``config/agents/<agent>/capabilities.json`` — the per-agent static
+    capability flags (Models / Data / Channels / Secrets and their leaves).
+
+    Sourced from the agent's own config dir, not a hardcoded table, so adding
+    a backend is "drop a folder" and no core file names an agent.
+    """
+    return _AGENTS_DIR / agent / "capabilities.json"
 
 
-DEFAULTS: dict[str, dict] = {
-    "openclaw": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": False},
-                "codex":       {"enabled": True},
-            },
-            "api_keys": {
-                "enabled":   True,
-                "anthropic": {"enabled": True},
-                "openai":    {"enabled": True},
-            },
-        },
-        "data": _all_data_true(),
-        "channels": _channels(enabled=True, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-    "claude_code": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": True},
-                "codex":       {"enabled": False},
-            },
-            "api_keys": {
-                "enabled":   True,
-                "anthropic": {"enabled": True},
-                "openai":    {"enabled": False},
-            },
-        },
-        "data": _all_data_true(),
-        # channels.enabled is false; the cascade rule zeros out the children.
-        "channels": _channels(enabled=False, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-    "hermes": {
-        "models": {
-            "enabled": True,
-            "oauth": {
-                "claude_code": {"enabled": False},
-                "codex":       {"enabled": False},
-            },
-            "api_keys": {
-                "enabled":   True,
-                "anthropic": {"enabled": True},
-                "openai":    {"enabled": True},
-            },
-        },
-        "data": _all_data_true(),
-        "channels": _channels(enabled=True, telegram=True, slack=True),
-        "secrets": {"enabled": True},
-    },
-}
+def _load_capabilities(agent: str) -> dict | None:
+    """Return the parsed capabilities dict for ``agent``, or None if the agent
+    has no ``capabilities.json`` (unknown / not installed / malformed)."""
+    path = _capabilities_path(agent)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _known_agents() -> list[str]:
+    """Agents that ship a ``capabilities.json`` (for valid-list messages)."""
+    if not _AGENTS_DIR.is_dir():
+        return []
+    return sorted(
+        d.name for d in _AGENTS_DIR.iterdir()
+        if d.is_dir() and (d / "capabilities.json").is_file()
+    )
 
 
 _LOCK = asyncio.Lock()
@@ -146,16 +107,28 @@ def _apply_cascade(manifest: dict) -> dict:
 def build_static_manifest(agent: str) -> dict:
     """Return a fresh manifest dict for `agent` with cascade applied and
     the `agent` field set. Caller owns the returned dict."""
-    if agent not in DEFAULTS:
-        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(KNOWN_AGENTS)})")
+    capabilities = _load_capabilities(agent)
+    if capabilities is None:
+        raise KeyError(f"unknown agent '{agent}' (valid: {', '.join(_known_agents())})")
     manifest: dict[str, Any] = {"agent": agent}
-    manifest.update(copy.deepcopy(DEFAULTS[agent]))
+    manifest.update(copy.deepcopy(capabilities))
     return _apply_cascade(manifest)
 
 
 def resolve_agent_name() -> str:
-    """Read AGENT_NAME from env. Empty/missing → DEFAULT_AGENT."""
-    return (os.getenv("AGENT_NAME", "") or "").strip() or DEFAULT_AGENT
+    """The active agent name — the single resolver used across core code.
+
+    ``AGENT_NAME`` (if set) wins and is returned verbatim, even if it names no
+    manifest (callers map that to a 501). When unset, the default is resolved
+    by the registry (``DEFAULT_AGENT`` env → single-manifest → documented
+    ``openclaw`` fallback). The agent-name default literal lives only there —
+    no core file hardcodes an agent name.
+    """
+    explicit = (os.getenv("AGENT_NAME", "") or "").strip()
+    if explicit:
+        return explicit
+    from services.cowork_agent.registry.agent_registry import get_active_agent
+    return get_active_agent().name
 
 
 async def _write_atomic(manifest: dict) -> Path:
@@ -175,10 +148,10 @@ async def write_static_manifest() -> None:
     means we deliberately do NOT touch any existing file.
     """
     agent = resolve_agent_name()
-    if agent not in DEFAULTS:
+    if _load_capabilities(agent) is None:
         print(
             f"⚠️ xo.json: AGENT_NAME='{agent}' is not a known agent "
-            f"(valid: {', '.join(KNOWN_AGENTS)}) — skipping"
+            f"(valid: {', '.join(_known_agents())}) — skipping"
         )
         return
 
@@ -222,23 +195,18 @@ def _resolve_status_fetchers(agent: str):
     """Return (fetch_models, fetch_channels) for the active agent, or
     (None, None) if the agent has no live-status sources yet.
 
-    Imports lazily so a missing adapter module (e.g. early dev state) never
-    breaks the import graph for callers that don't need it.
+    Resolved through the ``models_status`` / ``channels_status`` capabilities so
+    no backend is named here; an agent missing either capability falls through
+    to a no-op. Loaded lazily so a missing adapter module never breaks the
+    import graph for callers that don't need it.
     """
-    if agent == "openclaw":
-        from services.cowork_agent.adapters.openclaw.models_status import get_models_status
-        from services.cowork_agent.adapters.openclaw.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    if agent == "hermes":
-        from services.cowork_agent.adapters.hermes.models_status import get_models_status
-        from services.cowork_agent.adapters.hermes.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    if agent == "claude_code":
-        from services.cowork_agent.adapters.claude_code.models_status import get_models_status
-        from services.cowork_agent.adapters.claude_code.channels_status import get_channels_status
-        return get_models_status, get_channels_status
-    # Any future name without a status source falls through to a no-op.
-    return None, None
+    from services.cowork_agent.adapters.loader import try_load_capability
+
+    ms = try_load_capability("models_status", agent=agent)
+    cs = try_load_capability("channels_status", agent=agent)
+    fetch_models = getattr(ms, "get_models_status", None) if ms else None
+    fetch_channels = getattr(cs, "get_channels_status", None) if cs else None
+    return fetch_models, fetch_channels
 
 
 async def seed_agent_status() -> None:
@@ -272,8 +240,3 @@ async def seed_agent_status() -> None:
         _seed("channels", fetch_channels),
         return_exceptions=True,
     )
-
-
-# Backwards-compat alias for the earlier openclaw-only name. Safe to remove
-# once no callers reference it.
-seed_openclaw_status = seed_agent_status

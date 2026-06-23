@@ -7,6 +7,7 @@ import asyncio
 import os
 import json
 import datetime
+import subprocess
 import uuid
 import shutil
 from pathlib import Path
@@ -20,25 +21,25 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
 import uvicorn
-from claude_code_client import ClaudeCodeClient
-from codex_code_client import CodexCodeClient
+from config.models.claude_code import ClaudeCodeClient
+from config.models.codex import CodexCodeClient
 
 # Load environment variables
 load_dotenv()
 
-from routers.auth import (
+from routers.auth.auth import (
     XO_API_KEY,
     consume_auth_flow,
     get_auth_token,
     get_auth_state,
     router as auth_router,
 )
-from routers.claude_setup_token import router as claude_setup_token_router
-from routers.codex_setup import router as codex_setup_router
-from routers.openclaw_usage import router as openclaw_usage_router
-from routers.models import router as models_router
-from routers.channels import router as channels_router
-from routers.providers import router as providers_router
+from routers.auth.claude_setup_token import router as claude_setup_token_router
+from routers.auth.codex_setup import router as codex_setup_router
+from routers.cowork_agent.legacy.openclaw_usage import router as openclaw_usage_router
+from routers.status.models import router as models_router
+from routers.status.channels import router as channels_router
+from routers.status.providers import router as providers_router
 try:
     from services.usage_sync import start_usage_sync_scheduler
 except Exception as _usage_import_err:
@@ -355,9 +356,104 @@ async def startup_warmup_request() -> None:
 # FastAPI Application
 # =============================================================================
 
+def _run_agent_setup() -> None:
+    """Run config/agents/<AGENT_NAME>/setup.sh once at boot.
+
+    Dispatches by the AGENT_NAME env var (e.g. AGENT_NAME=openclaw → runs
+    config/agents/openclaw/setup.sh). Idempotent — re-runs on every boot
+    but each step (apt install, node install, openclaw CLI install,
+    gateway start) is gated on its own "already installed?" check.
+    Non-fatal: a failure here logs and returns so the API still comes
+    up for debugging.
+    """
+    agent = (os.getenv("AGENT_NAME", "") or "").strip()
+    if not agent:
+        print("🔧 AGENT_NAME unset — skipping agent bootstrap")
+        return
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(repo_root, "config", "agents", agent, "setup.sh")
+    if not os.path.isfile(script):
+        print(f"⚠️ No setup.sh for AGENT_NAME={agent} (expected at {script}) — skipping")
+        return
+
+    print(f"🔧 Running agent setup for AGENT_NAME={agent}...")
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+
+    try:
+        # 15-minute ceiling covers a cold first-time install (apt + Node + npm
+        # + OpenClaw CLI). Steady-state re-runs finish in seconds.
+        result = subprocess.run(
+            ["bash", script],
+            cwd=repo_root,
+            check=False,
+            timeout=900,
+        )
+        if result.returncode == 0:
+            print(f"✅ Agent setup ({agent}) completed")
+        else:
+            print(f"⚠️ Agent setup ({agent}) exited with code {result.returncode} (non-fatal — server will still start)")
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Agent setup ({agent}) timed out after 15min (non-fatal)")
+    except Exception as e:
+        print(f"⚠️ Agent setup ({agent}) failed (non-fatal): {e}")
+
+
+def _install_shared_deps() -> None:
+    """Install shared, agent-agnostic system deps once at boot.
+
+    Delegates to scripts/install_shared_deps.sh, which ensures rclone
+    (gdrive/onedrive connectors), gh (xo-projects-sync backup repos), and
+    gnupg (xo-projects-sync encryption) are present. Moving these here means
+    workspace templates no longer each have to install them. The script is
+    idempotent (skips deps already on PATH) and no-ops on non-apt hosts.
+    Non-fatal: a failure logs and returns so the API still comes up.
+    """
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(repo_root, "scripts", "install_shared_deps.sh")
+    if not os.path.isfile(script):
+        print(f"⚠️ No shared-deps script (expected at {script}) — skipping")
+        return
+
+    # Invoke via `bash <script>` (below), which does not require the script's
+    # executable bit — so we deliberately do NOT chmod it. chmod-ing on every
+    # boot would flip the tracked mode (644 → 755) and surface the file as a
+    # spurious git change in the workspace.
+    print("🔧 Ensuring shared system deps (rclone, gh, gnupg)...")
+    try:
+        # 10-minute ceiling covers a cold first-time install (rclone download +
+        # gh .deb + apt). Steady-state re-runs finish in seconds.
+        result = subprocess.run(
+            ["bash", script],
+            cwd=repo_root,
+            check=False,
+            timeout=600,
+        )
+        if result.returncode == 0:
+            print("✅ Shared dep check completed")
+        else:
+            print(f"⚠️ Shared dep install exited with code {result.returncode} (non-fatal — server will still start)")
+    except subprocess.TimeoutExpired:
+        print("⚠️ Shared dep install timed out after 10min (non-fatal)")
+    except Exception as e:
+        print(f"⚠️ Shared dep install failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
+    # Done synchronously so the API doesn't accept requests until the
+    # agent it's meant to drive is installed and configured.
+    _run_agent_setup()
+
+    # Install shared, agent-agnostic system deps (rclone, gh, gnupg) before the
+    # connector + xo-projects-sync checks below rely on them being on PATH.
+    _install_shared_deps()
+
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
     _tok = get_auth_token()
@@ -395,7 +491,7 @@ async def lifespan(app: FastAPI):
 
     # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
     try:
-        from services.cowork_agent.gdrive_rclone import ensure_rclone_running
+        from services.cowork_agent.connectors.gdrive_rclone import ensure_rclone_running
         await ensure_rclone_running()
         print("   rclone daemon: started for gdrive/onedrive connectors")
     except Exception as exc:
@@ -584,9 +680,15 @@ async def delete_session(project_id: str):
 
 @app.post("/gateway/restart")
 async def gateway_restart():
-    """Restart the OpenClaw gateway."""
+    """Restart the active agent's gateway via its ``config/agents/<agent>/agent.sh``.
+
+    Resolves the script from the active ``AGENT_NAME`` rather than hardcoding a
+    backend; agents without an ``agent.sh`` (e.g. claude_code) return 404.
+    """
     import subprocess
-    script = Path(os.path.expanduser("~/xo-cowork-api/openclaw.sh")).resolve()
+    from services.xo_manifest import resolve_agent_name
+    agent = resolve_agent_name()
+    script = (Path(__file__).resolve().parent / "config" / "agents" / agent / "agent.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="Gateway script not found")
     try:

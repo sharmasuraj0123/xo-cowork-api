@@ -9,10 +9,9 @@ Two halves with a strict boundary:
   outside of ``reader.py``.
 
 * The writer (the watcher) lives under ``sources/``, ``ingest/``,
-  ``sinks/``, ``workspace/`` (added in Phase 2). It owns every
-  ``.xo/`` file the BFF reads, with one exception: ``.xo/sessions/
-  sessionslist.json`` is adapter-owned (see docs/watcher-design.md
-  §3.7).
+  ``sinks/``, ``workspace/``. It owns every ``.xo/`` file the BFF
+  reads, with one exception: ``.xo/sessions/sessionslist.json`` is
+  adapter-owned.
 
 BFF routes import only the scope handles, not anything in this
 package. The scope handles import from ``reader.py`` only.

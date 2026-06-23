@@ -34,7 +34,7 @@ def apply(events: Iterable[dict], *, project_id: str) -> bool:
 
     No rotation at the workspace tier today — workspace traffic is
     smaller (events × projects, but with high overlap on quiet
-    periods). Phase 3 polish if needed.
+    periods).
     """
     lines = []
     for ev in events:

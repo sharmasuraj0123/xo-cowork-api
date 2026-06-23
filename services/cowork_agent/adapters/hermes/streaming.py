@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from services.cowork_agent.settings import (
+from services.cowork_agent.adapters.hermes.paths import (
     HERMES_API_TOKEN,
     HERMES_API_URL,
     HERMES_MODEL,

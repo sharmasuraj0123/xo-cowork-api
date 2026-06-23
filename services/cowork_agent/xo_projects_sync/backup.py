@@ -6,11 +6,14 @@ Endpoints in `routers/cowork_agent/xo_projects_sync.py` call the
 ``backup_one`` / ``backup_all`` entry points; everything else here is
 internal.
 
-Concurrency: every public entry point acquires the module-level lock.
-The staging clone is shared mutable state; two simultaneous backups
-would race on commit/push, lose changes, or push conflicting commits.
-v1 serializes; if higher throughput is ever required, splitting per
-project_id is the natural next step.
+Staging: every call uses its own `tempfile.TemporaryDirectory` and
+shallow-clones the project's GitHub repo into it. No persistent staging
+directory exists between calls — disk usage is zero when idle.
+
+Concurrency: a per-project `asyncio.Lock` serializes concurrent backups
+of the same project (which would otherwise race on the remote's HEAD).
+Different projects can back up in parallel; the global module lock from
+the previous design is gone.
 """
 
 from __future__ import annotations
@@ -18,13 +21,14 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from services.cowork_agent.project_layout import list_projects, project_dir, xo_projects_root
+from services.cowork_agent.project_layout import list_projects, project_dir
 
 from . import crypto, github, manifest, tarball
-from .config import MAX_VERSIONS_PER_PROJECT, SyncConfig
+from .config import MAX_VERSIONS_PER_PROJECT, SyncConfig, repo_name_for
 
 
 @dataclass
@@ -41,7 +45,18 @@ class BackupResult:
         return asdict(self)
 
 
-_lock = asyncio.Lock()
+_project_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def _lock_for(project_id: str) -> asyncio.Lock:
+    return _project_locks[project_id]
+
+
+# Concurrency cap for `backup_all`. Each unit of work is a full
+# tar → gpg → split → push pipeline; gpg is CPU-heavy, so we cap
+# lower than the list-only path. Tune via this constant if a real
+# host shows headroom.
+_BULK_CONCURRENCY = 4
 
 
 # ── Public entry points ──────────────────────────────────────────────────────
@@ -52,46 +67,52 @@ async def backup_one(
     *,
     cfg: SyncConfig,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
     note: str | None = None,
 ) -> BackupResult:
-    """Back up a single xo-project. Holds the module lock for the duration."""
-    async with _lock:
-        return await _backup_one_locked(project_id, cfg=cfg, auth=auth, repo_url=repo_url, note=note)
+    """Back up a single xo-project. Lazy-creates the per-project repo if missing.
+
+    Holds the per-project lock for the duration so concurrent backups of
+    the same project never race on the remote.
+    """
+    async with _lock_for(project_id):
+        return await _backup_one_locked(project_id, cfg=cfg, auth=auth, owner=owner, note=note)
 
 
 async def backup_all(
     *,
     cfg: SyncConfig,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
     note: str | None = None,
 ) -> list[BackupResult]:
-    """Back up every xo-project on disk. One commit per project, single push at end.
+    """Back up every local xo-project. One repo per project.
 
-    On a project-level error, records the error in that project's result and
-    continues with the rest — caller can decide how to surface partial failures.
+    Runs up to `_BULK_CONCURRENCY` projects in parallel — each project
+    targets its own repo and holds its own per-project lock, so there's
+    no shared state across the parallel branches. Result order matches
+    `list_projects()` order (gather preserves input order).
+    On a project-level error, records the error in that project's
+    result and continues with the rest — caller can decide how to
+    surface partial failures.
     """
-    async with _lock:
-        projects = [p["name"] for p in list_projects()]
-        if not projects:
-            return []
-        results: list[BackupResult] = []
-        staging = await github.ensure_clone(repo_url, auth=auth)
-        for pid in projects:
+    entries = list_projects()
+    if not entries:
+        return []
+    sem = asyncio.Semaphore(_BULK_CONCURRENCY)
+
+    async def _one(pid: str) -> BackupResult:
+        async with sem:
             try:
-                result = await _build_and_stage(pid, staging=staging, cfg=cfg, note=note)
-                await _commit_project(pid, message=_commit_message(pid, result.snapshot_id, note),
-                                      auth=auth, staging=staging)
-                results.append(result)
+                return await backup_one(pid, cfg=cfg, auth=auth, owner=owner, note=note)
             except Exception as exc:
-                results.append(BackupResult(
+                return BackupResult(
                     project_id=pid, snapshot_id="", size_bytes=0, sha256="",
                     parts=0, ok=False, error=f"{type(exc).__name__}: {exc}",
-                ))
-        # Single push covers all per-project commits we just made.
-        await github._git(["push", "origin", "HEAD"], cwd=staging, auth=auth)  # noqa: SLF001
-        return results
+                )
+
+    pids = [entry["name"] for entry in entries]
+    return await asyncio.gather(*(_one(pid) for pid in pids))
 
 
 # ── Internal: locked single-project path ─────────────────────────────────────
@@ -102,35 +123,9 @@ async def _backup_one_locked(
     *,
     cfg: SyncConfig,
     auth: github.GitHubAuth,
-    repo_url: str,
+    owner: str,
     note: str | None,
 ) -> BackupResult:
-    staging = await github.ensure_clone(repo_url, auth=auth)
-    result = await _build_and_stage(project_id, staging=staging, cfg=cfg, note=note)
-    pushed = await github.commit_and_push(
-        _commit_message(project_id, result.snapshot_id, note),
-        auth=auth,
-        path=staging,
-    )
-    if not pushed:
-        # Shouldn't happen — we just wrote new chunk files — but surface it
-        # so silent no-ops don't masquerade as successes.
-        result.ok = False
-        result.error = "Nothing to commit; staging directory unchanged after backup write"
-    return result
-
-
-async def _build_and_stage(
-    project_id: str,
-    *,
-    staging: Path,
-    cfg: SyncConfig,
-    note: str | None,
-) -> BackupResult:
-    """Build the encrypted snapshot for one project, write it into the staging clone.
-
-    Does NOT commit/push — the caller decides how to batch commits.
-    """
     src = project_dir(project_id)
     if not src.is_dir():
         raise FileNotFoundError(
@@ -139,56 +134,64 @@ async def _build_and_stage(
         )
     assert cfg.passphrase is not None  # caller validated cfg.configured
 
+    repo_name = repo_name_for(project_id)
+    # Lazy repo creation: first backup of a project may need to make the
+    # remote. Subsequent backups skip this branch.
+    if not await github.repo_exists(owner, repo_name, auth=auth):
+        await github.create_repo(owner, repo_name, auth=auth)
+    repo_url = f"https://github.com/{owner}/{repo_name}.git"
+
     snapshot_id = manifest.utc_timestamp_id()
-    project_dir_in_repo = staging / project_id
-    snapshot_dir = project_dir_in_repo / snapshot_id
-    snapshot_dir.mkdir(parents=True, exist_ok=False)
 
-    # tar → gpg → split. Use a temp file outside the repo so the
-    # plaintext tarball never lands inside the staging clone.
     with tempfile.TemporaryDirectory() as tmp:
-        tar_path = Path(tmp) / "snapshot.tar.gz"
-        size_plain = await tarball.build_tarball(src, tar_path)
-        parts = await crypto.encrypt_to_chunks(tar_path, snapshot_dir, cfg.passphrase)
+        tmp_root = Path(tmp)
+        clone_dir = tmp_root / "clone"
+        await github.shallow_clone(repo_url, clone_dir, auth=auth)
 
-    sha = manifest.sha256_files_concat(parts)
-    encrypted_size = sum(p.stat().st_size for p in parts)
-    mani = manifest.SnapshotManifest(
-        project_id=project_id,
-        snapshot_id=snapshot_id,
-        created_at=manifest.utc_iso_now(),
-        size_bytes=encrypted_size,
-        sha256=sha,
-        parts=[p.name for p in parts],
-        gitignore_respected=True,
-        note=note or None,
-    )
-    mani.write(snapshot_dir)
+        snapshot_dir = clone_dir / snapshot_id
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
 
-    _prune_old_snapshots(project_dir_in_repo)
+        # Tar → gpg → split. Keep the plaintext tarball outside the
+        # clone tree so it can never accidentally land in a commit.
+        plain_tarball = tmp_root / "snapshot.tar.gz"
+        await tarball.build_tarball(src, plain_tarball)
+        parts = await crypto.encrypt_to_chunks(plain_tarball, snapshot_dir, cfg.passphrase)
 
-    return BackupResult(
+        sha = manifest.sha256_files_concat(parts)
+        encrypted_size = sum(p.stat().st_size for p in parts)
+        mani = manifest.SnapshotManifest(
+            project_id=project_id,
+            snapshot_id=snapshot_id,
+            created_at=manifest.utc_iso_now(),
+            size_bytes=encrypted_size,
+            sha256=sha,
+            parts=[p.name for p in parts],
+            gitignore_respected=True,
+            note=note or None,
+        )
+        mani.write(snapshot_dir)
+
+        _prune_old_snapshots(clone_dir)
+
+        pushed = await github.commit_and_push_in(
+            clone_dir,
+            _commit_message(project_id, snapshot_id, note),
+            auth=auth,
+        )
+
+    result = BackupResult(
         project_id=project_id,
         snapshot_id=snapshot_id,
         size_bytes=encrypted_size,
         sha256=sha,
         parts=len(parts),
     )
-
-
-async def _commit_project(project_id: str, *, message: str, auth: github.GitHubAuth, staging: Path) -> None:
-    """Stage and commit only this project's subdir (no push)."""
-    await github._git(["add", project_id], cwd=staging, auth=None)  # noqa: SLF001
-    # Skip commit if nothing changed (shouldn't happen but defensive).
-    proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(staging), "diff", "--cached", "--quiet",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.wait()
-    if proc.returncode == 0:
-        return
-    await github._git(["commit", "-m", message], cwd=staging, auth=None)  # noqa: SLF001
+    if not pushed:
+        # Shouldn't happen — we just wrote new files — but surface it
+        # so silent no-ops don't masquerade as successes.
+        result.ok = False
+        result.error = "Nothing to commit; clone working tree unchanged after backup write"
+    return result
 
 
 def _commit_message(project_id: str, snapshot_id: str, note: str | None) -> str:
@@ -201,12 +204,12 @@ def _commit_message(project_id: str, snapshot_id: str, note: str | None) -> str:
     return base
 
 
-def _prune_old_snapshots(project_dir_in_repo: Path) -> None:
-    """Delete oldest timestamped subdirs so at most MAX_VERSIONS_PER_PROJECT remain."""
-    if not project_dir_in_repo.is_dir():
+def _prune_old_snapshots(clone_dir: Path) -> None:
+    """Delete oldest timestamped subdirs at the clone root so at most MAX_VERSIONS_PER_PROJECT remain."""
+    if not clone_dir.is_dir():
         return
     timestamps = sorted(
-        (d for d in project_dir_in_repo.iterdir() if d.is_dir() and _looks_like_timestamp(d.name)),
+        (d for d in clone_dir.iterdir() if d.is_dir() and _looks_like_timestamp(d.name)),
         key=lambda d: d.name,
     )
     excess = len(timestamps) - MAX_VERSIONS_PER_PROJECT
