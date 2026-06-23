@@ -13,7 +13,7 @@ for every agent whose home dir exists on the host.
 import shutil
 from pathlib import Path
 
-from services.cowork_agent.registry.agent_registry import all_agents
+from services.cowork_agent.registry.agent_registry import all_agents, get_active_agent
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_DIR = _REPO_ROOT / ".agents" / "skills"
@@ -36,9 +36,15 @@ def install_xo_skills() -> None:
     target `skills/<name>/` is wiped first so files removed from the
     source don't linger after a re-run. Skips an agent (with a warning)
     if its `home_dir` is absent — that means the corresponding CLI isn't
-    installed on this host.
+    installed on this host. The one exception is the active agent: if its
+    manifest sets `precreate_home_for_skills`, its home is created when
+    missing (the CLI may simply not have run yet at boot, e.g. ~/.claude
+    only materializes on the first `claude` invocation).
     """
-    runtimes = [(manifest.name, manifest.home_dir) for manifest in all_agents()]
+    try:
+        active_name = get_active_agent().name
+    except Exception:  # noqa: BLE001 — non-fatal bootstrap; fall back to skip
+        active_name = None
 
     for skill_name in BUNDLED_SKILLS:
         source = _SOURCE_DIR / skill_name
@@ -46,10 +52,25 @@ def install_xo_skills() -> None:
             print(f"⚠️ bundled skill source missing or invalid: {source}")
             continue
 
-        for label, home in runtimes:
+        for manifest in all_agents():
+            label, home = manifest.name, manifest.home_dir
             if not home.is_dir():
-                print(f"⚠️ {label} skill install skipped for {skill_name!r}: {home} does not exist")
-                continue
+                # A missing home normally means that agent's CLI isn't installed,
+                # so we skip. But the *active* agent may not have created its home
+                # yet at boot; when its manifest opts in, pre-create it so bundled
+                # skills still land. Name-agnostic by design (modularity invariant,
+                # DEVELOPING §6): gated on `active_name` + a manifest flag, never an
+                # agent literal.
+                if manifest.name == active_name and manifest.raw.get("precreate_home_for_skills"):
+                    try:
+                        home.mkdir(parents=True, exist_ok=True)
+                        print(f"📁 {label} home pre-created for skill install: {home}")
+                    except Exception as exc:
+                        print(f"⚠️ {label} skill install skipped for {skill_name!r}: cannot create {home}: {exc}")
+                        continue
+                else:
+                    print(f"⚠️ {label} skill install skipped for {skill_name!r}: {home} does not exist")
+                    continue
             target = home / "skills" / skill_name
             try:
                 if target.exists():
