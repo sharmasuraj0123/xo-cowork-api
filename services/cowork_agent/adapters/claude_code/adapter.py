@@ -262,8 +262,14 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        # Drop empty / placeholder auth vars so the CLI falls back cleanly.
         for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if env.get(key) in (None, "", "sk-ant-none"):
+                env.pop(key, None)
+        # An OAuth token (sk-ant-oat...) is not a valid API key; if one leaked into
+        # ANTHROPIC_API_KEY the CLI would pick API-key auth and fail. Strip it.
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY"):
+            if (env.get(key) or "").startswith("sk-ant-oat"):
                 env.pop(key, None)
         return env
 
