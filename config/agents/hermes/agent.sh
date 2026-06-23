@@ -429,6 +429,23 @@ configure_hermes() {
         log_success "Slack configured"
     fi
 
+    # ── Dashboard ──────────────────────────────────────────────────────────────
+    # Theme + analytics are always set; basic_auth is gated on the workspace
+    # name being present so we never write empty credentials. Username and
+    # password both default to $CODER_WORKSPACE_NAME (injected by the Coder pod).
+    log "Configuring dashboard..."
+    hermes config set dashboard.theme default
+    hermes config set dashboard.show_token_analytics false
+
+    local ws_name="${CODER_WORKSPACE_NAME:-}"
+    if [ -n "$ws_name" ]; then
+        hermes config set dashboard.basic_auth.username "$ws_name"
+        hermes config set dashboard.basic_auth.password "$ws_name"
+        log_success "Dashboard basic_auth set (user=$ws_name)"
+    else
+        log_warn "CODER_WORKSPACE_NAME unset — skipping dashboard basic_auth"
+    fi
+
     # WhatsApp — these must live in env (not config.yaml), so persist them to $ENV_FILE
     if [ "$whatsapp_enabled" = "true" ] || [ -n "${WHATSAPP_CREDS:-}" ]; then
         log "Configuring WhatsApp..."
