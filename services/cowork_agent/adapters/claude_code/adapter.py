@@ -262,10 +262,79 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        # Drop empty / placeholder auth vars so the CLI falls back cleanly.
         for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if env.get(key) in (None, "", "sk-ant-none"):
                 env.pop(key, None)
+        # An OAuth token (sk-ant-oat...) is not a valid API key; if one leaked into
+        # ANTHROPIC_API_KEY the CLI would pick API-key auth and fail. Strip it.
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY"):
+            if (env.get(key) or "").startswith("sk-ant-oat"):
+                env.pop(key, None)
+        # Auth precedence for the spawned `claude`:
+        #   1. A native login (~/.claude/.credentials.json) — the CLI auto-refreshes
+        #      it via its refresh token, so it is the durable, self-healing source.
+        #   2. CLAUDE_CODE_OAUTH_TOKEN — the static token captured by the
+        #      "Connect to Claude" (setup-token) flow and persisted to the agent's
+        #      env_file (~/.claude/.env). It cannot self-refresh.
+        # The running process loses the token across restarts: the project .env
+        # stores it empty and the `claude` CLI never reads the agent env_file. So
+        # when no token is present in the process env AND there is no usable native
+        # login, re-inject it from the env_file. We inject *only* when a login is
+        # absent so a stale token can never shadow a healthy, refreshing
+        # credentials.json (the CLI prefers credentials.json, but we don't rely on
+        # that undocumented precedence).
+        if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not self._has_usable_native_login():
+            token = self._oauth_token_from_agent_env_file()
+            if token:
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         return env
+
+    def _agent_home_dir(self) -> Path:
+        """The active agent's home (``~/.claude``), from the manifest ``home_dir``."""
+        return Path(os.path.expanduser(self.commands.get("home_dir") or "~/.claude"))
+
+    def _has_usable_native_login(self) -> bool:
+        """True when ``~/.claude/(.)credentials.json`` holds a login the CLI can
+        use: a refresh token (so the CLI renews the access token itself), or an
+        access token that has not yet expired. Such a login self-refreshes, so we
+        let the CLI use it rather than injecting a static env token."""
+        home = self._agent_home_dir()
+        for name in (".credentials.json", "credentials.json"):
+            path = home / name
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+            if not isinstance(oauth, dict):
+                oauth = data if isinstance(data, dict) else {}
+            if oauth.get("refreshToken"):
+                return True
+            access = oauth.get("accessToken")
+            expires_at = oauth.get("expiresAt")
+            if access and isinstance(expires_at, (int, float)):
+                # expiresAt is epoch milliseconds.
+                if expires_at / 1000 > datetime.now(timezone.utc).timestamp():
+                    return True
+            elif access and expires_at is None:
+                return True
+        return False
+
+    def _oauth_token_from_agent_env_file(self) -> str | None:
+        """Read ``CLAUDE_CODE_OAUTH_TOKEN`` from the agent env_file (``~/.claude/.env``),
+        where the Connect-to-Claude flow persists it. Returns the value only if it
+        looks like an OAuth token (``sk-ant-oat``)."""
+        env_file = self.commands.get("env_file")
+        if not env_file:
+            return None
+        from services.cowork_agent.providers_status_lib import parse_env_file
+
+        values = parse_env_file(Path(os.path.expanduser(env_file)))
+        token = (values.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+        return token if token.startswith("sk-ant-oat") else None
 
     # ── Convenience wrappers ───────────────────────────────────────────────────
 

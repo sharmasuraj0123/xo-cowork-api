@@ -7,6 +7,7 @@
   "agents_dir": "~/.claude/projects",
   "workspace_dir": "~/xo-projects",
   "provisioning_log": "~/.claude/provisioning.log",
+  "precreate_home_for_skills": true,
   "cwd": "~",
   "cli_timeout_seconds": 300,
   "api": {

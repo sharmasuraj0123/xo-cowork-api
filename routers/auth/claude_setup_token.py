@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional, AsyncGenerator
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 # PTY lets Ink/Claude Code use raw mode on stdin (piped stdin is not a TTY and throws).
 try:
@@ -45,9 +45,47 @@ _MIN_FULL_TOKEN_LEN = 100  # tokens are ~108 chars; if we get less, expect a con
 _CONTINUATION_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")  # next line is rest of token (no spaces)
 
 
+# Strip CSI, OSC (incl. the OSC-8 hyperlink the CLI wraps the OAuth URL in) and
+# two-char escapes. Without OSC stripping the raw escape bytes reach the frontend
+# and corrupt the authorize link (%1B%5D8…/%07, duplicated params).
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_2CHAR_RE = re.compile(r"\x1b[@-Z\\-_]")
+
+
 def _strip_ansi(line: str) -> str:
-    """Remove ANSI escape sequences from CLI output."""
-    return re.sub(r"\x1b\[[0-9;]*[a-zA-Zm]?", "", line)
+    """Remove ANSI/OSC escape sequences (and stray BEL) from CLI output."""
+    line = _ANSI_OSC_RE.sub("", line)
+    line = _ANSI_CSI_RE.sub("", line)
+    line = _ANSI_2CHAR_RE.sub("", line)
+    return line.replace("\x07", "")
+
+
+_AUTH_URL_RE = re.compile(r"https://claude\.ai/oauth/authorize\?[^\s\"'<>\x00-\x1f]+")
+
+
+def _extract_auth_url(text: str) -> Optional[str]:
+    """Return a clean, param-deduplicated OAuth authorize URL from `text`, or None.
+
+    Redraws can repeat the URL (and each query param) several times; we keep the
+    first value of each param so the rebuilt link is the canonical one.
+    """
+    match = _AUTH_URL_RE.search(text)
+    if not match:
+        return None
+    raw = match.group(0)
+    second = raw.find("https://", len("https://"))  # drop a concatenated redraw
+    if second != -1:
+        raw = raw[:second]
+    split = urlsplit(raw)
+    deduped: dict[str, str] = {}
+    for key, value in parse_qsl(split.query, keep_blank_values=True):
+        value = "".join(ch for ch in value if ord(ch) >= 0x20)  # drop leftover garbage
+        if key and key not in deduped:
+            deduped[key] = value
+    if not deduped:
+        return None
+    return urlunsplit((split.scheme, split.netloc, split.path, urlencode(deduped), ""))
 
 
 def _extract_oauth_token(line: str) -> Optional[str]:
@@ -136,23 +174,59 @@ def _upsert_env_key(env_path: str, key: str, value: str) -> None:
         f.writelines(lines)
 
 
-# Keys to persist with the same token value
-_TOKEN_ENV_KEYS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+# An OAuth token (sk-ant-oat...) is not a valid ANTHROPIC_API_KEY; storing it
+# there makes the CLI pick API-key auth and fail with "invalid api key" on the
+# cowork chat path. Persist only the OAuth var and clear a poisoned API key.
+_OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
+_CONFLICTING_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+
+def _is_oauth_token_value(value: Optional[str]) -> bool:
+    """True for an OAuth token or the sk-ant-none placeholder (never a real API key)."""
+    normalized = (value or "").strip().strip('"').strip("'")
+    return normalized.startswith("sk-ant-oat") or normalized == "sk-ant-none"
+
+
+def _clear_poisoned_api_key_in_file(env_path: str) -> None:
+    """Drop ANTHROPIC_API_KEY from a .env file if it holds an OAuth token / placeholder."""
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, "r") as f:
+        lines = f.readlines()
+    kept: list[str] = []
+    changed = False
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith(f"{_CONFLICTING_API_KEY_ENV}="):
+            _, _, value = stripped.partition("=")
+            if _is_oauth_token_value(value):
+                changed = True
+                continue
+        kept.append(raw)
+    if changed:
+        with open(env_path, "w") as f:
+            f.writelines(kept)
+
+
+def _clear_poisoned_api_key_in_process() -> None:
+    """Remove an OAuth-token-valued ANTHROPIC_API_KEY from the running process env."""
+    if _is_oauth_token_value(os.environ.get(_CONFLICTING_API_KEY_ENV)):
+        os.environ.pop(_CONFLICTING_API_KEY_ENV, None)
 
 
 def _persist_token_to_env_files(token: str) -> None:
-    """
-    Write CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY to:
-      1. Project .env  (xo-cowork-api/.env)
-      2. The active agent's .env (resolved from its manifest)
-    """
+    """Persist CLAUDE_CODE_OAUTH_TOKEN to the project + active-agent .env files,
+    clearing any legacy OAuth-token-valued ANTHROPIC_API_KEY along the way."""
     env_paths = [_project_env_path(), _agent_env_path()]
     for env_path in env_paths:
-        for key in _TOKEN_ENV_KEYS:
-            try:
-                _upsert_env_key(env_path, key, token)
-            except OSError as e:
-                print(f"[setup-token] Failed to write {key} to {env_path}: {e}")
+        try:
+            _upsert_env_key(env_path, _OAUTH_TOKEN_ENV_KEY, token)
+        except OSError as e:
+            print(f"[setup-token] Failed to write {_OAUTH_TOKEN_ENV_KEY} to {env_path}: {e}")
+        try:
+            _clear_poisoned_api_key_in_file(env_path)
+        except OSError as e:
+            print(f"[setup-token] Failed to clear {_CONFLICTING_API_KEY_ENV} in {env_path}: {e}")
 
 
 def _resolve_claude_cli_path() -> str:
@@ -181,8 +255,9 @@ def _pty_wanted() -> bool:
     return flag not in ("0", "false", "no", "off") and _HAS_PTY
 
 
-def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 120) -> None:
-    """Best-effort terminal size for the child (some CLIs behave better with a defined geometry)."""
+def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 1000) -> None:
+    """Best-effort terminal size for the child. A wide width stops Ink from
+    wrapping the long OAuth URL across lines (which corrupts capture)."""
     if not _HAS_PTY:
         return
     try:
@@ -393,6 +468,7 @@ async def claude_setup_token():
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
         token_buffer: Optional[str] = None
+        auth_url_sent = False
         session_id = str(uuid.uuid4())
         ready_event = asyncio.Event()
 
@@ -562,8 +638,8 @@ async def claude_setup_token():
                     if value == 0:
                         fallback_token = _read_token_from_cli_credentials()
                         if fallback_token:
-                            for k in _TOKEN_ENV_KEYS:
-                                os.environ[k] = fallback_token
+                            os.environ[_OAUTH_TOKEN_ENV_KEY] = fallback_token
+                            _clear_poisoned_api_key_in_process()
                             _persist_token_to_env_files(fallback_token)
                             print(f"[setup-token] token persisted from CLI credentials (len={len(fallback_token)})")
                     clear_session()
@@ -572,8 +648,8 @@ async def claude_setup_token():
                 # On success, CLI may print the OAuth token (~108 chars); CLI often wraps at 80 chars
                 if kind == "stdout":
                     def persist_token(t: str) -> None:
-                        for k in _TOKEN_ENV_KEYS:
-                            os.environ[k] = t
+                        os.environ[_OAUTH_TOKEN_ENV_KEY] = t
+                        _clear_poisoned_api_key_in_process()
                         _persist_token_to_env_files(t)
                         print(f"[setup-token] token persisted (len={len(t)})")
 
@@ -595,7 +671,19 @@ async def claude_setup_token():
                                 persist_token(token)
                             else:
                                 token_buffer = token
-                yield f"data: {json.dumps({'type': kind, 'line': value})}\n\n"
+
+                # Forward escape-free text so the frontend never re-encodes
+                # terminal bytes into the link. Emit the OAuth URL once, cleaned.
+                clean_line = _strip_ansi(value)
+                if kind == "stdout":
+                    auth_url = _extract_auth_url(clean_line)
+                    if auth_url:
+                        if auth_url_sent:
+                            continue  # drop duplicate redraws of the same URL
+                        auth_url_sent = True
+                        clean_line = auth_url
+                        yield f"data: {json.dumps({'type': 'auth_url', 'url': auth_url})}\n\n"
+                yield f"data: {json.dumps({'type': kind, 'line': clean_line})}\n\n"
         except FileNotFoundError:
             clear_session()
             print(f"[setup-token] CLI not found: {cli_path}")
