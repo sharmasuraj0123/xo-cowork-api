@@ -180,6 +180,17 @@ def _upsert_env_key(env_path: str, key: str, value: str) -> None:
 _OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
 _CONFLICTING_API_KEY_ENV = "ANTHROPIC_API_KEY"
 
+# Per-user shell profile written so NEW login shells inherit the token (so
+# `echo $CLAUDE_CODE_OAUTH_TOKEN` and manual `claude` calls in a fresh terminal
+# work). This does NOT affect the running API process or the `claude -p`
+# subprocesses it spawns — those read the token from the API's own env (set
+# live during the flow + reloaded from .env on restart). Already-open shells
+# must re-source the profile to see it. Override the target with
+# CLAUDE_OAUTH_PROFILE_PATH (e.g. ~/.profile, or /etc/profile.d/xo-claude.sh).
+_GLOBAL_PROFILE_PATH = os.getenv(
+    "CLAUDE_OAUTH_PROFILE_PATH", str(Path.home() / ".bashrc")
+)
+
 
 def _is_oauth_token_value(value: Optional[str]) -> bool:
     """True for an OAuth token or the sk-ant-none placeholder (never a real API key)."""
@@ -214,6 +225,50 @@ def _clear_poisoned_api_key_in_process() -> None:
         os.environ.pop(_CONFLICTING_API_KEY_ENV, None)
 
 
+def _upsert_export_in_profile(profile_path: str, key: str, value: str) -> None:
+    """Insert or replace a single ``export KEY="value"`` line in a shell profile,
+    preserving the rest of the file. Creates the file (and parent dir) if missing.
+
+    Unlike a .env upsert this writes an ``export`` so login shells that source
+    the profile actually put the var in their environment."""
+    export_line = f'export {key}="{value}"\n'
+    marker = f"export {key}="
+    if not os.path.isfile(profile_path):
+        parent = os.path.dirname(profile_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(profile_path, "w") as f:
+            f.write(export_line)
+        return
+    with open(profile_path, "r") as f:
+        lines = f.readlines()
+    out: list[str] = []
+    found = False
+    for raw in lines:
+        if raw.lstrip().startswith(marker):
+            out.append(export_line)  # replace any prior (possibly stale) value
+            found = True
+        else:
+            out.append(raw)
+    if not found:
+        if out and not out[-1].endswith("\n"):
+            out.append("\n")
+        out.append(export_line)
+    with open(profile_path, "w") as f:
+        f.writelines(out)
+
+
+def _persist_token_to_global_profile(token: str) -> None:
+    """Best-effort: export the OAuth token from the user's shell profile so new
+    terminals inherit it. Never fatal — the API chat path does not depend on
+    this (it reads the token from the API process env / .env)."""
+    try:
+        _upsert_export_in_profile(_GLOBAL_PROFILE_PATH, _OAUTH_TOKEN_ENV_KEY, token)
+        print(f"[setup-token] exported {_OAUTH_TOKEN_ENV_KEY} in {_GLOBAL_PROFILE_PATH}")
+    except OSError as e:
+        print(f"[setup-token] Failed to update profile {_GLOBAL_PROFILE_PATH}: {e}")
+
+
 def _persist_token_to_env_files(token: str) -> None:
     """Persist CLAUDE_CODE_OAUTH_TOKEN to the project + active-agent .env files,
     clearing any legacy OAuth-token-valued ANTHROPIC_API_KEY along the way."""
@@ -227,6 +282,8 @@ def _persist_token_to_env_files(token: str) -> None:
             _clear_poisoned_api_key_in_file(env_path)
         except OSError as e:
             print(f"[setup-token] Failed to clear {_CONFLICTING_API_KEY_ENV} in {env_path}: {e}")
+    # New login shells get the token too (manual `claude` calls / echo).
+    _persist_token_to_global_profile(token)
 
 
 def _resolve_claude_cli_path() -> str:
