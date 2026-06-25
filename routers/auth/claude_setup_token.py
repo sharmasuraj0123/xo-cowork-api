@@ -51,12 +51,20 @@ _CONTINUATION_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")  # next line is rest of 
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_2CHAR_RE = re.compile(r"\x1b[@-Z\\-_]")
+# nF-class escapes: ESC + one or more intermediate bytes (0x20-0x2F) + a final
+# byte (0x30-0x7E). The most common is the charset-designation reset ESC ( B
+# ("\x1b(B" -> %1B%28B once URL-encoded). The 2-char regex above misses these
+# because the intermediate byte "(" (0x28) is outside its @-_ range, so without
+# this the escape leaks into the OAuth URL and corrupts the captured token
+# (e.g. a partial strip leaves the trailing "B"; sk-ant-oat... -> sk-ant-...).
+_ANSI_NF_RE = re.compile(r"\x1b[\x20-\x2f]+[\x30-\x7e]")
 
 
 def _strip_ansi(line: str) -> str:
     """Remove ANSI/OSC escape sequences (and stray BEL) from CLI output."""
     line = _ANSI_OSC_RE.sub("", line)
     line = _ANSI_CSI_RE.sub("", line)
+    line = _ANSI_NF_RE.sub("", line)
     line = _ANSI_2CHAR_RE.sub("", line)
     return line.replace("\x07", "")
 
@@ -109,8 +117,14 @@ def _merge_and_extract_token(partial: str, continuation: str) -> Optional[str]:
 
 
 def _project_env_path() -> str:
-    """Project root .env (same repo as this router), so persist works regardless of cwd."""
-    return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parent.parent / ".env")
+    """Project root .env (same repo as this router), so persist works regardless of cwd.
+
+    This file lives at ``routers/auth/claude_setup_token.py`` — three levels below
+    the repo root — so we anchor to ``parents[2]``. (It was ``parent.parent`` when
+    the module lived at ``routers/claude_setup_token.py``; the #79 rename moved it
+    one level deeper, which silently retargeted persistence to a dead ``routers/.env``
+    that ``load_dotenv()`` never reads.)"""
+    return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parents[2] / ".env")
 
 
 def _agent_env_path() -> str:
@@ -227,6 +241,27 @@ def _persist_token_to_env_files(token: str) -> None:
             _clear_poisoned_api_key_in_file(env_path)
         except OSError as e:
             print(f"[setup-token] Failed to clear {_CONFLICTING_API_KEY_ENV} in {env_path}: {e}")
+
+
+def _persist_token_from_cli_credentials() -> Optional[str]:
+    """Read the token the CLI wrote to ~/.claude/.credentials.json and persist it.
+
+    This is the authoritative, terminal-noise-free source: ``setup-token`` always
+    writes the token here on success, whereas the streamed PTY output can be
+    corrupted by escape/cursor sequences (which silently breaks the regex-based
+    capture and leaves ``.env`` unwritten). Idempotent — safe to call more than
+    once; skips work if the env already holds this exact token. Returns the token
+    on success, else None."""
+    token = _read_token_from_cli_credentials()
+    if not token:
+        return None
+    if os.environ.get(_OAUTH_TOKEN_ENV_KEY) == token:
+        return token  # already persisted this run; nothing to do
+    os.environ[_OAUTH_TOKEN_ENV_KEY] = token
+    _clear_poisoned_api_key_in_process()
+    _persist_token_to_env_files(token)
+    print(f"[setup-token] token persisted from CLI credentials (len={len(token)})")
+    return token
 
 
 def _resolve_claude_cli_path() -> str:
@@ -534,6 +569,15 @@ async def claude_setup_token():
         async def wait_done(proc: asyncio.subprocess.Process) -> None:
             returncode = await proc.wait()
             print(f"[setup-token] process exited (returncode={returncode})")
+            # Persist from the authoritative credentials file here — wait_done
+            # always runs on exit, even if the SSE client already disconnected
+            # and the generator's "done" handler never runs. This makes the
+            # token survive regardless of TERM/escape corruption in the stream.
+            if returncode == 0:
+                try:
+                    _persist_token_from_cli_credentials()
+                except Exception as e:  # never let cleanup depend on this
+                    print(f"[setup-token] credentials persist (wait_done) failed: {e}")
             await queue.put(("done", returncode))
             # Also clean up directly in case the SSE stream already closed
             # and nobody is consuming the queue anymore.
@@ -633,15 +677,12 @@ async def claude_setup_token():
                     continue
                 kind, value = item
                 if kind == "done":
-                    # If we never saw the token in stdout, try reading from CLI credentials file
-                    # (CLI may write there on success without printing the token.)
+                    # Belt-and-suspenders: wait_done() already persisted from the
+                    # credentials file on a clean exit; repeat here (idempotent) in
+                    # case this branch wins the race. Covers the token whenever the
+                    # streamed PTY output was too corrupted for the regex capture.
                     if value == 0:
-                        fallback_token = _read_token_from_cli_credentials()
-                        if fallback_token:
-                            os.environ[_OAUTH_TOKEN_ENV_KEY] = fallback_token
-                            _clear_poisoned_api_key_in_process()
-                            _persist_token_to_env_files(fallback_token)
-                            print(f"[setup-token] token persisted from CLI credentials (len={len(fallback_token)})")
+                        _persist_token_from_cli_credentials()
                     clear_session()
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
                     break
