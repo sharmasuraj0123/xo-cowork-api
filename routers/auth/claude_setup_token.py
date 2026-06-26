@@ -599,8 +599,15 @@ async def claude_setup_token():
 
         try:
             env = os.environ.copy()
+            # Pin TERM so the CLI's terminal output is deterministic regardless of
+            # how the API was launched. ttyd sets TERM=xterm-256color (the known-good
+            # path); the Coder startup_script leaves it unset, which changes the
+            # escape sequences the CLI emits and was a source of capture corruption.
+            # setdefault (not a hardcode) supplies a value only when the launcher gave
+            # none, so an explicitly-set TERM is still respected.
+            env.setdefault("TERM", "xterm-256color")
             use_pty = _pty_wanted()
-            print(f"[setup-token] spawning process (use_pty={use_pty})")
+            print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')})")
             if use_pty:
                 master_fd, slave_fd = _pty.openpty()
                 try:
