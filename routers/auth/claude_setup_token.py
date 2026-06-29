@@ -1,6 +1,12 @@
 """
-Claude Code CLI setup-token flow: run `claude setup-token` and stream output;
-support pasted OAuth code when redirect fails (e.g. user on different machine).
+Claude Code CLI "connect" flow behind the /claude/setup-token endpoints.
+
+By default this now runs `claude auth login` (interactive sign-in) rather than
+`claude setup-token`; the endpoint paths, SSE event contract, and paste-callback
+are unchanged so the deployed frontend keeps working as-is. `auth login` writes
+its own self-refreshing ~/.claude/.credentials.json, which we read to persist
+CLAUDE_CODE_OAUTH_TOKEN (no terminal token-scraping). Set
+CLAUDE_CONNECT_MODE=setup-token to fall back to the legacy token-print flow.
 
 On Unix, the CLI is spawned with a pseudo-terminal (PTY) so Ink can enable raw mode
 on stdin (piped stdin from the API is not a TTY and would error). Set
@@ -272,6 +278,24 @@ def _resolve_claude_cli_path() -> str:
         if found:
             return found
     return path
+
+
+def _connect_subcommand_args() -> list[str]:
+    """CLI subcommand this connect flow runs.
+
+    Defaults to ``auth login`` (interactive sign-in): the CLI writes its own
+    self-refreshing ``~/.claude/.credentials.json``, which the claude_code
+    adapter reads natively and which we also mirror into CLAUDE_CODE_OAUTH_TOKEN
+    from that file (no terminal token-scraping). The same SSE + paste-callback
+    contract the deployed frontend already uses is preserved unchanged.
+
+    Set ``CLAUDE_CONNECT_MODE=setup-token`` to fall back to the legacy
+    token-print flow without a code change.
+    """
+    mode = (os.getenv("CLAUDE_CONNECT_MODE") or "login").strip().lower()
+    if mode in ("setup-token", "setup_token", "token"):
+        return ["setup-token"]
+    return ["auth", "login", "--claudeai"]
 
 
 CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_TIMEOUT", "300"))
@@ -607,14 +631,15 @@ async def claude_setup_token():
             # none, so an explicitly-set TERM is still respected.
             env.setdefault("TERM", "xterm-256color")
             use_pty = _pty_wanted()
-            print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')})")
+            connect_args = _connect_subcommand_args()
+            print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')}, cmd={connect_args})")
             if use_pty:
                 master_fd, slave_fd = _pty.openpty()
                 try:
                     _set_pty_winsize(slave_fd)
                     process = await asyncio.create_subprocess_exec(
                         cli_path,
-                        "setup-token",
+                        *connect_args,
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
@@ -645,7 +670,7 @@ async def claude_setup_token():
             else:
                 process = await asyncio.create_subprocess_exec(
                     cli_path,
-                    "setup-token",
+                    *connect_args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     stdin=asyncio.subprocess.PIPE,
