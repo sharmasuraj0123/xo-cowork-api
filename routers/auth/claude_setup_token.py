@@ -1,12 +1,34 @@
 """
-Claude Code CLI setup-token flow: run `claude setup-token` and stream output;
-support pasted OAuth code when redirect fails (e.g. user on different machine).
+Connect Claude — drive ``claude auth login --claudeai`` and stream its output via SSE.
 
-On Unix, the CLI is spawned with a pseudo-terminal (PTY) so Ink can enable raw mode
-on stdin (piped stdin from the API is not a TTY and would error). Set
-CLAUDE_SETUP_TOKEN_USE_PTY=0 to force the legacy pipe mode (usually broken for Ink).
+The endpoint paths (``/claude/setup-token`` and ``/claude/setup-token/callback``)
+and the SSE event shapes are unchanged for frontend backward-compatibility; only
+the backend mechanism changed. We no longer scrape or persist any token: the CLI
+writes its own self-refreshing ``~/.claude/.credentials.json`` on success, and the
+authoritative "connected" check stays ``claude auth status --json`` → ``loggedIn``.
 
-On success, persists CLAUDE_CODE_OAUTH_TOKEN to .env and sets it in process env.
+Flow:
+  POST /claude/setup-token (SSE)
+    1. Spawn ``claude auth login --claudeai`` under a PTY. Its manual-code prompt
+       reads stdin via readline; a plain stdin pipe was ignored in practice, so we
+       drive a PTY master.
+    2. The CLI prints a clean authorize URL ("…visit: https://claude.com/cai/…");
+       we extract it and emit it as the ``auth_url`` event.
+    3. The user opens the URL, authorizes, and Claude's page displays a
+       ``code#state`` blob to paste.
+  POST /claude/setup-token/callback
+    4. Normalize the pasted value to ``code#state`` and write it (plain bytes + CR)
+       to the PTY master. An "Invalid code…" line is *retryable* — the CLI keeps
+       waiting for another line, so we keep the session alive for another paste.
+    5. On exit 0 (reached only after the CLI writes credentials and prints
+       "Login successful.") we emit ``done`` directly — we do NOT gate it on an
+       extra ``claude auth status --json`` spawn, which would delay the event.
+       For older frontends that detect success by scraping stdout, a recognized
+       success line is also emitted as ``stdout``. On exit 1 we surface the CLI's
+       "Login failed: …" line as an ``error``.
+
+On Unix the CLI is spawned with a pseudo-terminal (PTY). Set
+CLAUDE_SETUP_TOKEN_USE_PTY=0 to force the legacy pipe mode.
 """
 
 import asyncio
@@ -18,11 +40,11 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Optional, AsyncGenerator
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
-# PTY lets Ink/Claude Code use raw mode on stdin (piped stdin is not a TTY and throws).
+# PTY lets the CLI read its manual-code prompt from a real terminal (a plain
+# stdin pipe was ignored in practice and the process blocked).
 try:
     import fcntl
     import struct
@@ -39,24 +61,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
-# OAuth token in CLI output: full token is ~108 chars; CLI may wrap at 80 chars so we merge continuation lines
-_OAUTH_TOKEN_PATTERN = re.compile(r"sk-ant-(?:oat01|api03|api04)-\S+")
-_MIN_FULL_TOKEN_LEN = 100  # tokens are ~108 chars; if we get less, expect a continuation line
-_CONTINUATION_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")  # next line is rest of token (no spaces)
-
-
-# Strip CSI, OSC (incl. the OSC-8 hyperlink the CLI wraps the OAuth URL in) and
-# two-char escapes. Without OSC stripping the raw escape bytes reach the frontend
-# and corrupt the authorize link (%1B%5D8…/%07, duplicated params).
+# Strip CSI, OSC (incl. the OSC-8 hyperlink the CLI may wrap a URL in) and
+# two-char escapes so terminal bytes never reach the frontend or corrupt the
+# captured authorize URL. The nF-class rule strips the charset-designation reset
+# ESC ( B ("\x1b(B") that the 2-char rule misses (its intermediate byte "(" 0x28
+# is outside the @-_ range).
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_2CHAR_RE = re.compile(r"\x1b[@-Z\\-_]")
-# nF-class escapes: ESC + one or more intermediate bytes (0x20-0x2F) + a final
-# byte (0x30-0x7E). The most common is the charset-designation reset ESC ( B
-# ("\x1b(B" -> %1B%28B once URL-encoded). The 2-char regex above misses these
-# because the intermediate byte "(" (0x28) is outside its @-_ range, so without
-# this the escape leaks into the OAuth URL and corrupts the captured token
-# (e.g. a partial strip leaves the trailing "B"; sk-ant-oat... -> sk-ant-...).
 _ANSI_NF_RE = re.compile(r"\x1b[\x20-\x2f]+[\x30-\x7e]")
 
 
@@ -69,19 +81,28 @@ def _strip_ansi(line: str) -> str:
     return line.replace("\x07", "")
 
 
-_AUTH_URL_RE = re.compile(r"https://claude\.ai/oauth/authorize\?[^\s\"'<>\x00-\x1f]+")
+# The CLI prints the authorize URL on a "…visit: <url>" line. Capture the URL
+# after the "visit:" marker so we stay host-agnostic: Claude Code v2.1.195 uses
+# https://claude.com/cai/oauth/authorize (older builds used claude.ai/oauth/...).
+_VISIT_URL_RE = re.compile(r"visit:\s*(https://[^\s\"'<>\x00-\x1f]+)", re.IGNORECASE)
+# Fallback: a bare OAuth authorize URL anywhere in the text (any host/path).
+_AUTH_URL_RE = re.compile(r"https://[^\s\"'<>\x00-\x1f]+/oauth/authorize\?[^\s\"'<>\x00-\x1f]+")
 
 
 def _extract_auth_url(text: str) -> Optional[str]:
     """Return a clean, param-deduplicated OAuth authorize URL from `text`, or None.
 
-    Redraws can repeat the URL (and each query param) several times; we keep the
-    first value of each param so the rebuilt link is the canonical one.
+    Prefers the URL printed after the "visit:" marker; falls back to a bare
+    authorize URL. Rebuilds the query keeping the first value of each param so a
+    redraw that repeats params can't produce a doubled link.
     """
-    match = _AUTH_URL_RE.search(text)
-    if not match:
+    match = _VISIT_URL_RE.search(text)
+    raw: Optional[str] = match.group(1) if match else None
+    if raw is None:
+        fallback = _AUTH_URL_RE.search(text)
+        raw = fallback.group(0) if fallback else None
+    if not raw:
         return None
-    raw = match.group(0)
     second = raw.find("https://", len("https://"))  # drop a concatenated redraw
     if second != -1:
         raw = raw[:second]
@@ -94,174 +115,6 @@ def _extract_auth_url(text: str) -> Optional[str]:
     if not deduped:
         return None
     return urlunsplit((split.scheme, split.netloc, split.path, urlencode(deduped), ""))
-
-
-def _extract_oauth_token(line: str) -> Optional[str]:
-    """If line contains a Claude OAuth token, return it; else None."""
-    plain = _strip_ansi(line).strip()
-    match = _OAUTH_TOKEN_PATTERN.search(plain)
-    return match.group(0) if match else None
-
-
-def _is_continuation_line(line: str) -> bool:
-    """True if line looks like the rest of a wrapped token (no spaces, token chars only)."""
-    plain = _strip_ansi(line).strip()
-    return bool(plain and not plain.startswith("sk-ant-") and _CONTINUATION_PATTERN.fullmatch(plain))
-
-
-def _merge_and_extract_token(partial: str, continuation: str) -> Optional[str]:
-    """Merge partial token line + continuation line and return full token if valid."""
-    combined = (partial + continuation).strip()
-    match = _OAUTH_TOKEN_PATTERN.search(combined)
-    return match.group(0) if match and len(match.group(0)) >= _MIN_FULL_TOKEN_LEN else None
-
-
-def _project_env_path() -> str:
-    """Project root .env (same repo as this router), so persist works regardless of cwd.
-
-    This file lives at ``routers/auth/claude_setup_token.py`` — three levels below
-    the repo root — so we anchor to ``parents[2]``. (It was ``parent.parent`` when
-    the module lived at ``routers/claude_setup_token.py``; the #79 rename moved it
-    one level deeper, which silently retargeted persistence to a dead ``routers/.env``
-    that ``load_dotenv()`` never reads.)"""
-    return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parents[2] / ".env")
-
-
-def _agent_env_path() -> str:
-    """The active agent's ``.env`` (resolved from its manifest — e.g. the
-    openclaw gateway's ``~/.openclaw/.env``). The Claude OAuth token is mirrored
-    here so the active agent's runtime can read it."""
-    from services.cowork_agent.registry.agent_registry import get_active_agent
-    return str(get_active_agent().env_file)
-
-
-def _read_token_from_cli_credentials() -> Optional[str]:
-    """
-    After setup-token succeeds, the CLI may write the token to a credentials file
-    instead of (or in addition to) printing it. Read from known locations.
-    """
-    candidates = [
-        Path.home() / ".claude" / "credentials.json",
-        Path.home() / ".claude" / ".credentials.json",
-        Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "claude" / "credentials.json",
-    ]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            # Nested formats seen in the wild
-            token = None
-            if isinstance(data, dict):
-                token = (
-                    data.get("claudeAiOauth", {}).get("accessToken")
-                    or data.get("accessToken")
-                    or (data.get("credentials", {}) or {}).get("accessToken")
-                )
-            if token and isinstance(token, str) and len(token) > 20:
-                return token
-        except (OSError, json.JSONDecodeError, TypeError):
-            continue
-    return None
-
-
-def _upsert_env_key(env_path: str, key: str, value: str) -> None:
-    """Insert or update a single KEY="value" in a .env file. Creates file if missing."""
-    if not os.path.isfile(env_path):
-        os.makedirs(os.path.dirname(env_path), exist_ok=True)
-        with open(env_path, "w") as f:
-            f.write(f'{key}="{value}"\n')
-        return
-    lines: list[str] = []
-    found = False
-    with open(env_path, "r") as f:
-        for raw in f:
-            if raw.strip().startswith(f"{key}="):
-                lines.append(f'{key}="{value}"\n')
-                found = True
-            else:
-                lines.append(raw)
-    if not found:
-        lines.append(f'\n{key}="{value}"\n')
-    with open(env_path, "w") as f:
-        f.writelines(lines)
-
-
-# An OAuth token (sk-ant-oat...) is not a valid ANTHROPIC_API_KEY; storing it
-# there makes the CLI pick API-key auth and fail with "invalid api key" on the
-# cowork chat path. Persist only the OAuth var and clear a poisoned API key.
-_OAUTH_TOKEN_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
-_CONFLICTING_API_KEY_ENV = "ANTHROPIC_API_KEY"
-
-
-def _is_oauth_token_value(value: Optional[str]) -> bool:
-    """True for an OAuth token or the sk-ant-none placeholder (never a real API key)."""
-    normalized = (value or "").strip().strip('"').strip("'")
-    return normalized.startswith("sk-ant-oat") or normalized == "sk-ant-none"
-
-
-def _clear_poisoned_api_key_in_file(env_path: str) -> None:
-    """Drop ANTHROPIC_API_KEY from a .env file if it holds an OAuth token / placeholder."""
-    if not os.path.isfile(env_path):
-        return
-    with open(env_path, "r") as f:
-        lines = f.readlines()
-    kept: list[str] = []
-    changed = False
-    for raw in lines:
-        stripped = raw.strip()
-        if stripped.startswith(f"{_CONFLICTING_API_KEY_ENV}="):
-            _, _, value = stripped.partition("=")
-            if _is_oauth_token_value(value):
-                changed = True
-                continue
-        kept.append(raw)
-    if changed:
-        with open(env_path, "w") as f:
-            f.writelines(kept)
-
-
-def _clear_poisoned_api_key_in_process() -> None:
-    """Remove an OAuth-token-valued ANTHROPIC_API_KEY from the running process env."""
-    if _is_oauth_token_value(os.environ.get(_CONFLICTING_API_KEY_ENV)):
-        os.environ.pop(_CONFLICTING_API_KEY_ENV, None)
-
-
-def _persist_token_to_env_files(token: str) -> None:
-    """Persist CLAUDE_CODE_OAUTH_TOKEN to the project + active-agent .env files,
-    clearing any legacy OAuth-token-valued ANTHROPIC_API_KEY along the way."""
-    env_paths = [_project_env_path(), _agent_env_path()]
-    for env_path in env_paths:
-        try:
-            _upsert_env_key(env_path, _OAUTH_TOKEN_ENV_KEY, token)
-        except OSError as e:
-            print(f"[setup-token] Failed to write {_OAUTH_TOKEN_ENV_KEY} to {env_path}: {e}")
-        try:
-            _clear_poisoned_api_key_in_file(env_path)
-        except OSError as e:
-            print(f"[setup-token] Failed to clear {_CONFLICTING_API_KEY_ENV} in {env_path}: {e}")
-
-
-def _persist_token_from_cli_credentials() -> Optional[str]:
-    """Read the token the CLI wrote to ~/.claude/.credentials.json and persist it.
-
-    This is the authoritative, terminal-noise-free source: ``setup-token`` always
-    writes the token here on success, whereas the streamed PTY output can be
-    corrupted by escape/cursor sequences (which silently breaks the regex-based
-    capture and leaves ``.env`` unwritten). Idempotent — safe to call more than
-    once; skips work if the env already holds this exact token. Returns the token
-    on success, else None."""
-    token = _read_token_from_cli_credentials()
-    if not token:
-        return None
-    if os.environ.get(_OAUTH_TOKEN_ENV_KEY) == token:
-        return token  # already persisted this run; nothing to do
-    os.environ[_OAUTH_TOKEN_ENV_KEY] = token
-    _clear_poisoned_api_key_in_process()
-    _persist_token_to_env_files(token)
-    print(f"[setup-token] token persisted from CLI credentials (len={len(token)})")
-    return token
 
 
 def _resolve_claude_cli_path() -> str:
@@ -279,10 +132,15 @@ CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_TIMEOUT",
 _setup_token_lock = asyncio.Lock()
 _setup_token_process: Optional[asyncio.subprocess.Process] = None
 _setup_token_stdin: Optional[asyncio.StreamWriter] = None
-# When using a PTY, stdin is not a StreamWriter; we write OAuth paste payloads here.
+# When using a PTY, stdin is not a StreamWriter; we write the pasted code here.
 _setup_token_pty_master: Optional[int] = None
 _setup_token_session_id: Optional[str] = None
 _setup_token_ready: Optional[asyncio.Event] = None
+# Remember the most recently finished session so a frontend retry / double-submit
+# of the callback *after* the login already completed returns 200 (idempotent)
+# instead of a 409 the UI would render as a failure.
+_last_completed_session_id: Optional[str] = None
+_last_completed_ok: bool = False
 
 
 def _pty_wanted() -> bool:
@@ -291,8 +149,8 @@ def _pty_wanted() -> bool:
 
 
 def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 1000) -> None:
-    """Best-effort terminal size for the child. A wide width stops Ink from
-    wrapping the long OAuth URL across lines (which corrupts capture)."""
+    """Best-effort terminal size for the child. A wide width stops any wrapping
+    of the long authorize URL across lines (which would corrupt extraction)."""
     if not _HAS_PTY:
         return
     try:
@@ -302,31 +160,39 @@ def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 1000) -> None:
         pass
 
 
-_BRACKETED_PASTE_START = b"\x1b[200~"
-_BRACKETED_PASTE_END = b"\x1b[201~"
+def _disable_pty_echo(slave_fd: int) -> None:
+    """Turn off terminal echo on the child PTY. In the default (cooked) line
+    discipline the master would otherwise echo back everything written to it —
+    including the pasted ``code#state`` — which would put the one-time
+    authorization code into server logs and the SSE stream. The CLI's readline
+    still receives the input; only the echo is suppressed. Best-effort."""
+    if not _HAS_PTY:
+        return
+    try:
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[3] = attrs[3] & ~termios.ECHO  # lflags &= ~ECHO
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+    except OSError:
+        pass
 
 
 async def _write_setup_token_stdin(text_bytes: bytes) -> None:
-    """Write user-pasted OAuth code to the running setup-token CLI (pipe or PTY).
+    """Write the pasted ``code#state`` to the running ``claude auth login`` CLI.
 
-    The CLI enables bracketed paste mode (ESC[?2004h), so we must wrap the
-    content in ESC[200~ ... ESC[201~ for Ink's usePaste hook to receive it.
-    After the paste, we send Enter (\\r) to submit.
+    The CLI reads its manual-code prompt with ``readline`` on stdin and consumes
+    a single line. Unlike the old Ink setup-token UI this is NOT bracketed paste:
+    write the bytes plainly and submit with Enter (``\\r``). A plain stdin pipe was
+    ignored in practice, so the PTY master is the real channel.
     """
     global _setup_token_stdin, _setup_token_pty_master
     if _setup_token_pty_master is not None:
-        paste_payload = _BRACKETED_PASTE_START + text_bytes + _BRACKETED_PASTE_END
-        print(f"[setup-token] writing bracketed paste to PTY master ({len(text_bytes)}B text, {len(paste_payload)}B total)")
-        written = await asyncio.to_thread(os.write, _setup_token_pty_master, paste_payload)
+        print(f"[setup-token] writing code to PTY master ({len(text_bytes)}B + CR)")
+        written = await asyncio.to_thread(os.write, _setup_token_pty_master, text_bytes + b"\r")
         print(f"[setup-token] PTY os.write returned {written}")
-        await asyncio.sleep(0.15)
-        print("[setup-token] writing Enter (\\r) to PTY master")
-        await asyncio.to_thread(os.write, _setup_token_pty_master, b"\r")
         return
     if _setup_token_stdin is not None:
-        paste_payload = _BRACKETED_PASTE_START + text_bytes + _BRACKETED_PASTE_END + b"\r"
-        print(f"[setup-token] writing bracketed paste to PIPE stdin ({len(paste_payload)}B)")
-        _setup_token_stdin.write(paste_payload)
+        print(f"[setup-token] writing code to PIPE stdin ({len(text_bytes)}B + CR)")
+        _setup_token_stdin.write(text_bytes + b"\r")
         await _setup_token_stdin.drain()
         return
     print("[setup-token] ERROR: no stdin channel available")
@@ -348,7 +214,7 @@ router = APIRouter(prefix="/claude", tags=["claude-setup-token"])
 
 
 class ClaudeSetupTokenCallbackBody(BaseModel):
-    """Body for pasting OAuth code when redirect fails (e.g. user on different machine)."""
+    """Body for pasting the OAuth code shown by Claude's authorize page."""
     code: str  # Paste the full string from the browser, e.g. "code#state"
     session_id: str  # Must match the session_id emitted by the setup-token SSE stream
 
@@ -356,7 +222,8 @@ class ClaudeSetupTokenCallbackBody(BaseModel):
 def _normalize_callback_code(raw_value: str) -> str:
     """
     Accept multiple callback formats and normalize to the `code#state` format
-    that Claude Code expects in its interactive prompt.
+    that ``claude auth login`` expects in its manual-entry prompt (it does
+    ``m.trim().split("#")`` and requires BOTH halves).
     """
     value = (raw_value or "").strip()
     if not value:
@@ -389,12 +256,12 @@ def _normalize_callback_code(raw_value: str) -> str:
 @router.post("/setup-token/callback")
 async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
     """
-    Send the pasted OAuth code to the running `claude setup-token` process.
+    Send the pasted OAuth code to the running ``claude auth login`` process.
 
-    When the user authorizes in the browser and the redirect fails (e.g. they're on a
-    different machine), Anthropic shows a "Paste this into Claude Code" page. The user
-    copies that string and the frontend sends it here; we write it to the CLI's stdin
-    so the flow can complete and the token is streamed back.
+    After the user authorizes in the browser, Claude's page shows a ``code#state``
+    string. The frontend posts it here; we normalize it and write it to the CLI
+    (via the PTY) so the login can complete. An "Invalid code…" line from the CLI
+    is retryable — the session stays alive so the user can paste again.
 
     Requires `session_id` from the SSE stream to ensure the callback targets the
     correct running session.
@@ -404,6 +271,13 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
     print(f"[setup-token] callback received (session_id={body.session_id})")
 
     if _setup_token_process is None or _setup_token_session_id is None:
+        # The session may have already finished. If this is a retry of a session
+        # that completed successfully (the SSE `done` can race a frontend that
+        # re-posts the callback), report success idempotently instead of a 409
+        # the UI would render as a failure.
+        if body.session_id == _last_completed_session_id and _last_completed_ok:
+            print("[setup-token] callback for an already-succeeded session → 200 (idempotent)")
+            return {"ok": True, "message": "Login already completed", "session_id": body.session_id}
         print("[setup-token] callback rejected: no active session")
         raise HTTPException(
             status_code=409,
@@ -423,7 +297,7 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
 
     ready_event = _setup_token_ready
     if ready_event is not None and not ready_event.is_set():
-        print("[setup-token] callback waiting for CLI readiness (raw mode)...")
+        print("[setup-token] callback waiting for CLI readiness...")
         try:
             await asyncio.wait_for(ready_event.wait(), timeout=30.0)
             print("[setup-token] CLI is ready for input")
@@ -464,12 +338,9 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
             print(f"[setup-token] callback normalized (raw_len={len((body.code or '').strip())} normalized_len={len(normalized)})")
             text_payload = normalized.encode("utf-8")
             pid = _setup_token_process.pid if _setup_token_process else None
-            print(f"[setup-token] sending bracketed paste ({len(text_payload)}B) to CLI (pid={pid})")
+            print(f"[setup-token] sending code ({len(text_payload)}B) to CLI (pid={pid})")
             await _write_setup_token_stdin(text_payload)
             print("[setup-token] callback payload sent successfully")
-            await asyncio.sleep(1.0)
-            rc = _setup_token_process.returncode if _setup_token_process else "gone"
-            print(f"[setup-token] post-write check: process returncode={rc}")
             return {"ok": True, "message": "Code sent to CLI", "session_id": _setup_token_session_id}
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             _setup_token_process = None
@@ -484,15 +355,15 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
 @router.post("/setup-token")
 async def claude_setup_token():
     """
-    Run `claude setup-token` and stream stdout/stderr to the client via SSE.
+    Run ``claude auth login --claudeai`` and stream stdout/stderr via SSE.
 
-    The CLI prints an OAuth URL; the frontend shows it so the user can open it and
-    authorize. If the redirect goes to the user's localhost (different machine),
-    Anthropic shows "Paste this into Claude Code" — the user copies that string and
-    the frontend sends it to POST /claude/setup-token/callback so we can complete the flow.
+    The CLI prints an authorize URL; the frontend shows it so the user can open it
+    and authorize. Claude's page then shows a ``code#state`` string — the user
+    copies it and the frontend posts it to POST /claude/setup-token/callback so we
+    can complete the login. On success the CLI writes its own self-refreshing
+    ``~/.claude/.credentials.json``; we persist nothing.
 
-    Uses a PTY on Unix by default so Claude Code (Ink) does not fail with
-    "Raw mode is not supported on the current process.stdin".
+    Uses a PTY on Unix by default so the CLI's manual-code prompt reads input.
     """
     global _setup_token_process, _setup_token_stdin, _setup_token_pty_master
     cli_path = _resolve_claude_cli_path()
@@ -500,10 +371,11 @@ async def claude_setup_token():
 
     async def generate() -> AsyncGenerator[str, None]:
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
+        global _last_completed_session_id, _last_completed_ok
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
-        token_buffer: Optional[str] = None
         auth_url_sent = False
+        last_failure_line: Optional[str] = None  # most recent "Login failed: …" line
         session_id = str(uuid.uuid4())
         ready_event = asyncio.Event()
 
@@ -569,15 +441,6 @@ async def claude_setup_token():
         async def wait_done(proc: asyncio.subprocess.Process) -> None:
             returncode = await proc.wait()
             print(f"[setup-token] process exited (returncode={returncode})")
-            # Persist from the authoritative credentials file here — wait_done
-            # always runs on exit, even if the SSE client already disconnected
-            # and the generator's "done" handler never runs. This makes the
-            # token survive regardless of TERM/escape corruption in the stream.
-            if returncode == 0:
-                try:
-                    _persist_token_from_cli_credentials()
-                except Exception as e:  # never let cleanup depend on this
-                    print(f"[setup-token] credentials persist (wait_done) failed: {e}")
             await queue.put(("done", returncode))
             # Also clean up directly in case the SSE stream already closed
             # and nobody is consuming the queue anymore.
@@ -602,9 +465,9 @@ async def claude_setup_token():
             # Pin TERM so the CLI's terminal output is deterministic regardless of
             # how the API was launched. ttyd sets TERM=xterm-256color (the known-good
             # path); the Coder startup_script leaves it unset, which changes the
-            # escape sequences the CLI emits and was a source of capture corruption.
-            # setdefault (not a hardcode) supplies a value only when the launcher gave
-            # none, so an explicitly-set TERM is still respected.
+            # escape sequences the CLI emits. setdefault (not a hardcode) supplies a
+            # value only when the launcher gave none, so an explicitly-set TERM is
+            # still respected.
             env.setdefault("TERM", "xterm-256color")
             use_pty = _pty_wanted()
             print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')})")
@@ -612,9 +475,12 @@ async def claude_setup_token():
                 master_fd, slave_fd = _pty.openpty()
                 try:
                     _set_pty_winsize(slave_fd)
+                    _disable_pty_echo(slave_fd)  # keep the pasted code out of logs/SSE
                     process = await asyncio.create_subprocess_exec(
                         cli_path,
-                        "setup-token",
+                        "auth",
+                        "login",
+                        "--claudeai",
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
@@ -645,7 +511,9 @@ async def claude_setup_token():
             else:
                 process = await asyncio.create_subprocess_exec(
                     cli_path,
-                    "setup-token",
+                    "auth",
+                    "login",
+                    "--claudeai",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     stdin=asyncio.subprocess.PIPE,
@@ -684,45 +552,54 @@ async def claude_setup_token():
                     continue
                 kind, value = item
                 if kind == "done":
-                    # Belt-and-suspenders: wait_done() already persisted from the
-                    # credentials file on a clean exit; repeat here (idempotent) in
-                    # case this branch wins the race. Covers the token whenever the
-                    # streamed PTY output was too corrupted for the regex capture.
-                    if value == 0:
-                        _persist_token_from_cli_credentials()
+                    returncode = value
+                    # `claude auth login` writes ~/.claude/.credentials.json and
+                    # prints "Login successful." only on a successful exchange,
+                    # then exits 0 — so exit 0 is authoritative. Emit `done`
+                    # immediately rather than first blocking on a `claude auth
+                    # status --json` subprocess: that extra `claude` spawn can take
+                    # several seconds on a cold box, delaying this event past the
+                    # frontend's "verifying" wait — the frontend then retried the
+                    # callback (→ 409 → "failed") even though login had succeeded.
+                    # The connected tile re-runs `claude auth status --json`
+                    # authoritatively, so we don't gate the event on it here.
+                    _last_completed_session_id = session_id
+                    _last_completed_ok = returncode == 0
                     clear_session()
-                    yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
+                    if returncode == 0:
+                        print("[setup-token] login successful (exit 0)")
+                        # Compat shim for the currently-deployed frontend, which
+                        # detects success by scraping stdout for the legacy
+                        # `claude setup-token` string and ignores this `done`
+                        # event. `claude auth login` never prints that string, so
+                        # without this line the dialog sits in "verifying" until
+                        # its 7s timeout and then shows a (false) error. Emit the
+                        # recognized line as a normal stdout event so the unchanged
+                        # frontend goes green; `done` below stays the real signal
+                        # for any client that reads it.
+                        yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
+                    else:
+                        err_msg = last_failure_line or "Login failed. Please try again."
+                        print(f"[setup-token] login failed (returncode={returncode})")
+                        yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
                     break
-                # On success, CLI may print the OAuth token (~108 chars); CLI often wraps at 80 chars
-                if kind == "stdout":
-                    def persist_token(t: str) -> None:
-                        os.environ[_OAUTH_TOKEN_ENV_KEY] = t
-                        _clear_poisoned_api_key_in_process()
-                        _persist_token_to_env_files(t)
-                        print(f"[setup-token] token persisted (len={len(t)})")
 
-                    if token_buffer is not None:
-                        if _is_continuation_line(value):
-                            merged = _merge_and_extract_token(token_buffer, value)
-                            if merged:
-                                persist_token(merged)
-                                token_buffer = None
-                        else:
-                            if token_buffer.startswith("sk-ant-") and len(token_buffer) >= _MIN_FULL_TOKEN_LEN:
-                                persist_token(token_buffer)
-                            token_buffer = None
-
-                    if token_buffer is None:
-                        token = _extract_oauth_token(value)
-                        if token:
-                            if len(token) >= _MIN_FULL_TOKEN_LEN:
-                                persist_token(token)
-                            else:
-                                token_buffer = token
-
-                # Forward escape-free text so the frontend never re-encodes
-                # terminal bytes into the link. Emit the OAuth URL once, cleaned.
+                # Forward escape-free text so the frontend never re-encodes terminal
+                # bytes into the link. Emit the authorize URL once, cleaned.
                 clean_line = _strip_ansi(value)
+                stripped = clean_line.strip()
+                # Substring (not startswith): with PTY echo off the non-terminated
+                # "Paste code here if prompted > " prompt can prefix the next line.
+                if "Login failed" in stripped:
+                    # Capture from the marker so a prompt prefix is dropped from the
+                    # message surfaced as `error` on exit 1.
+                    last_failure_line = stripped[stripped.find("Login failed"):]
+                if "Invalid code" in stripped:
+                    # Retryable: the CLI keeps waiting for another line, so we keep
+                    # the session alive (do NOT kill/clear). The line itself streams
+                    # to the UI below as a normal stdout/stderr event.
+                    print("[setup-token] CLI reported invalid code (retryable; session kept alive)")
                 if kind == "stdout":
                     auth_url = _extract_auth_url(clean_line)
                     if auth_url:
