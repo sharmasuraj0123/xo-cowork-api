@@ -515,6 +515,7 @@ async def claude_setup_token():
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
+        watchdog_task: Optional[asyncio.Task] = None  # reaps an abandoned process (see _deadline_watchdog)
         auth_url_sent = False
         session_id = str(uuid.uuid4())
         ready_event = asyncio.Event()
@@ -595,7 +596,37 @@ async def claude_setup_token():
             # and nobody is consuming the queue anymore.
             clear_session()
 
+        async def _deadline_watchdog(proc: asyncio.subprocess.Process) -> None:
+            """Reap an abandoned login independent of the SSE connection.
+
+            The in-loop timeout only fires while the SSE generator is being
+            iterated; if the client disconnects before authorizing, the process
+            is intentionally kept alive (so a late paste can still finish) and
+            nothing else bounds it. This task does: after the deadline, if the
+            process is still running, kill it and clear the session.
+
+            Cannot interfere with a healthy session: on normal completion the
+            process has already exited (``returncode`` set) so the guard below is
+            False, and ``clear_session`` only clears globals when they still point
+            at *this* process. It is also cancelled by ``clear_session`` on every
+            normal cleanup path, so it never lingers or double-fires.
+            """
+            try:
+                await asyncio.sleep(CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                return
+            if proc.returncode is None:
+                print("[setup-token] watchdog: deadline reached, reaping abandoned process")
+                try:
+                    proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+                clear_session()
+
         def clear_session() -> None:
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+
             async def _clear():
                 global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
                 async with _setup_token_lock:
@@ -674,6 +705,10 @@ async def claude_setup_token():
                 asyncio.create_task(read_stderr(process))
                 asyncio.create_task(wait_done(process))
 
+            # Independent reaper: bounds an abandoned process even if the SSE
+            # client disconnects (the in-loop deadline only runs while connected).
+            watchdog_task = asyncio.create_task(_deadline_watchdog(process))
+
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
             print(f"[setup-token] session started (session_id={session_id})")
 
@@ -703,6 +738,14 @@ async def claude_setup_token():
                     # streamed PTY output was too corrupted for the regex capture.
                     if value == 0:
                         _persist_token_from_cli_credentials()
+                        # The deployed frontend detects success by matching the
+                        # legacy `claude setup-token` phrase "Authentication token
+                        # created successfully" in stdout. `claude auth login`
+                        # prints "Login successful." instead, so emit a synthetic
+                        # line the existing frontend recognizes (must precede the
+                        # 'done' event, which closes the client's stream). See
+                        # xo-swarm setup-token-dialog.tsx::isAuthSuccess.
+                        yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
                     clear_session()
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
                     break
