@@ -264,8 +264,15 @@ def _connect_subcommand_args() -> list[str]:
     OAuth sign-in). The CLI writes its own self-refreshing
     ``~/.claude/.credentials.json`` (read natively by the claude_code adapter);
     on a clean exit we also mirror the token into CLAUDE_CODE_OAUTH_TOKEN from
-    that file. No terminal token-scraping."""
-    return ["auth", "login", "--claudeai"]
+    that file. No terminal token-scraping.
+
+    Set CLAUDE_LOGIN_DEBUG=1 to prepend the CLI's global ``-d`` flag, which surfaces
+    the underlying request/response detail (e.g. the body behind a 400) in the
+    streamed output and server logs."""
+    args = ["auth", "login", "--claudeai"]
+    if os.getenv("CLAUDE_LOGIN_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on"):
+        args = ["-d"] + args
+    return args
 
 
 CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_TIMEOUT", "300"))
@@ -300,27 +307,39 @@ _BRACKETED_PASTE_START = b"\x1b[200~"
 _BRACKETED_PASTE_END = b"\x1b[201~"
 
 
-async def _write_setup_token_stdin(text_bytes: bytes) -> None:
-    """Write user-pasted OAuth code to the running setup-token CLI (pipe or PTY).
+def _bracketed_paste_wanted() -> bool:
+    """Whether to wrap the pasted code in bracketed-paste markers (ESC[200~..ESC[201~).
 
-    The CLI enables bracketed paste mode (ESC[?2004h), so we must wrap the
-    content in ESC[200~ ... ESC[201~ for Ink's usePaste hook to receive it.
-    After the paste, we send Enter (\\r) to submit.
+    The legacy `claude setup-token` Ink screen enabled bracketed-paste mode and
+    its usePaste hook *required* the markers. But `claude auth login`'s
+    "Paste code here" prompt does NOT appear to enable bracketed-paste mode — so
+    the markers get captured as part of the code and the OAuth exchange fails
+    with HTTP 400. Default off (send the raw code). Set
+    CLAUDE_SETUP_TOKEN_BRACKETED_PASTE=1 to restore the wrapping.
     """
+    return os.getenv("CLAUDE_SETUP_TOKEN_BRACKETED_PASTE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _write_setup_token_stdin(text_bytes: bytes) -> None:
+    """Write the user-pasted OAuth code to the running CLI (pipe or PTY), then
+    send Enter (\\r) to submit. Bracketed-paste wrapping is controlled by
+    ``_bracketed_paste_wanted()`` (default raw — see its docstring)."""
     global _setup_token_stdin, _setup_token_pty_master
+    wrap = _bracketed_paste_wanted()
+    code_payload = (
+        _BRACKETED_PASTE_START + text_bytes + _BRACKETED_PASTE_END if wrap else text_bytes
+    )
     if _setup_token_pty_master is not None:
-        paste_payload = _BRACKETED_PASTE_START + text_bytes + _BRACKETED_PASTE_END
-        print(f"[setup-token] writing bracketed paste to PTY master ({len(text_bytes)}B text, {len(paste_payload)}B total)")
-        written = await asyncio.to_thread(os.write, _setup_token_pty_master, paste_payload)
+        print(f"[setup-token] writing paste to PTY master (bracketed={wrap}, {len(text_bytes)}B text, {len(code_payload)}B payload)")
+        written = await asyncio.to_thread(os.write, _setup_token_pty_master, code_payload)
         print(f"[setup-token] PTY os.write returned {written}")
         await asyncio.sleep(0.15)
         print("[setup-token] writing Enter (\\r) to PTY master")
         await asyncio.to_thread(os.write, _setup_token_pty_master, b"\r")
         return
     if _setup_token_stdin is not None:
-        paste_payload = _BRACKETED_PASTE_START + text_bytes + _BRACKETED_PASTE_END + b"\r"
-        print(f"[setup-token] writing bracketed paste to PIPE stdin ({len(paste_payload)}B)")
-        _setup_token_stdin.write(paste_payload)
+        print(f"[setup-token] writing paste to PIPE stdin (bracketed={wrap}, {len(code_payload) + 1}B)")
+        _setup_token_stdin.write(code_payload + b"\r")
         await _setup_token_stdin.drain()
         return
     print("[setup-token] ERROR: no stdin channel available")
