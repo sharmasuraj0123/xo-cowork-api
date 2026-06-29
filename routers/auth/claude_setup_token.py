@@ -1,18 +1,19 @@
 """
-Claude Code CLI "connect" flow behind the /claude/setup-token endpoints.
+Claude sign-in flow behind the /claude/setup-token endpoints.
 
-By default this now runs `claude auth login` (interactive sign-in) rather than
-`claude setup-token`; the endpoint paths, SSE event contract, and paste-callback
-are unchanged so the deployed frontend keeps working as-is. `auth login` writes
-its own self-refreshing ~/.claude/.credentials.json, which we read to persist
-CLAUDE_CODE_OAUTH_TOKEN (no terminal token-scraping). Set
-CLAUDE_CONNECT_MODE=setup-token to fall back to the legacy token-print flow.
+Runs `claude auth login` (interactive OAuth sign-in). The endpoint paths, SSE
+event contract, and paste-callback are unchanged so the deployed frontend keeps
+working as-is. `auth login` writes its own self-refreshing
+~/.claude/.credentials.json, which the claude_code adapter reads natively; on a
+clean exit we also mirror the token into CLAUDE_CODE_OAUTH_TOKEN from that file
+(no terminal token-scraping).
 
-On Unix, the CLI is spawned with a pseudo-terminal (PTY) so Ink can enable raw mode
-on stdin (piped stdin from the API is not a TTY and would error). Set
+Supports both OAuth completions: if the browser loopback reaches the CLI it logs
+in automatically; otherwise the user pastes the code via the /callback endpoint.
+
+On Unix the CLI is spawned with a pseudo-terminal (PTY) so Ink can enable raw mode
+on stdin (piped stdin is not a TTY and would error). Set
 CLAUDE_SETUP_TOKEN_USE_PTY=0 to force the legacy pipe mode (usually broken for Ink).
-
-On success, persists CLAUDE_CODE_OAUTH_TOKEN to .env and sets it in process env.
 """
 
 import asyncio
@@ -45,12 +46,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
-# OAuth token in CLI output: full token is ~108 chars; CLI may wrap at 80 chars so we merge continuation lines
-_OAUTH_TOKEN_PATTERN = re.compile(r"sk-ant-(?:oat01|api03|api04)-\S+")
-_MIN_FULL_TOKEN_LEN = 100  # tokens are ~108 chars; if we get less, expect a continuation line
-_CONTINUATION_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")  # next line is rest of token (no spaces)
-
-
 # Strip CSI, OSC (incl. the OSC-8 hyperlink the CLI wraps the OAuth URL in) and
 # two-char escapes. Without OSC stripping the raw escape bytes reach the frontend
 # and corrupt the authorize link (%1B%5D8…/%07, duplicated params).
@@ -75,7 +70,11 @@ def _strip_ansi(line: str) -> str:
     return line.replace("\x07", "")
 
 
-_AUTH_URL_RE = re.compile(r"https://claude\.ai/oauth/authorize\?[^\s\"'<>\x00-\x1f]+")
+# Host-agnostic: `claude setup-token` used claude.ai/oauth/authorize, but
+# `claude auth login` uses claude.com/cai/oauth/authorize. Anchor on the
+# `/oauth/authorize?` path so either (and any future host) is captured and
+# param-deduplicated rather than leaking a raw, redraw-corrupted URL.
+_AUTH_URL_RE = re.compile(r"https://[^\s\"'<>\x00-\x1f]*?/oauth/authorize\?[^\s\"'<>\x00-\x1f]+")
 
 
 def _extract_auth_url(text: str) -> Optional[str]:
@@ -100,26 +99,6 @@ def _extract_auth_url(text: str) -> Optional[str]:
     if not deduped:
         return None
     return urlunsplit((split.scheme, split.netloc, split.path, urlencode(deduped), ""))
-
-
-def _extract_oauth_token(line: str) -> Optional[str]:
-    """If line contains a Claude OAuth token, return it; else None."""
-    plain = _strip_ansi(line).strip()
-    match = _OAUTH_TOKEN_PATTERN.search(plain)
-    return match.group(0) if match else None
-
-
-def _is_continuation_line(line: str) -> bool:
-    """True if line looks like the rest of a wrapped token (no spaces, token chars only)."""
-    plain = _strip_ansi(line).strip()
-    return bool(plain and not plain.startswith("sk-ant-") and _CONTINUATION_PATTERN.fullmatch(plain))
-
-
-def _merge_and_extract_token(partial: str, continuation: str) -> Optional[str]:
-    """Merge partial token line + continuation line and return full token if valid."""
-    combined = (partial + continuation).strip()
-    match = _OAUTH_TOKEN_PATTERN.search(combined)
-    return match.group(0) if match and len(match.group(0)) >= _MIN_FULL_TOKEN_LEN else None
 
 
 def _project_env_path() -> str:
@@ -281,20 +260,11 @@ def _resolve_claude_cli_path() -> str:
 
 
 def _connect_subcommand_args() -> list[str]:
-    """CLI subcommand this connect flow runs.
-
-    Defaults to ``auth login`` (interactive sign-in): the CLI writes its own
-    self-refreshing ``~/.claude/.credentials.json``, which the claude_code
-    adapter reads natively and which we also mirror into CLAUDE_CODE_OAUTH_TOKEN
-    from that file (no terminal token-scraping). The same SSE + paste-callback
-    contract the deployed frontend already uses is preserved unchanged.
-
-    Set ``CLAUDE_CONNECT_MODE=setup-token`` to fall back to the legacy
-    token-print flow without a code change.
-    """
-    mode = (os.getenv("CLAUDE_CONNECT_MODE") or "login").strip().lower()
-    if mode in ("setup-token", "setup_token", "token"):
-        return ["setup-token"]
+    """The CLI subcommand this flow runs: ``claude auth login`` (interactive
+    OAuth sign-in). The CLI writes its own self-refreshing
+    ``~/.claude/.credentials.json`` (read natively by the claude_code adapter);
+    on a clean exit we also mirror the token into CLAUDE_CODE_OAUTH_TOKEN from
+    that file. No terminal token-scraping."""
     return ["auth", "login", "--claudeai"]
 
 
@@ -526,7 +496,6 @@ async def claude_setup_token():
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
-        token_buffer: Optional[str] = None
         auth_url_sent = False
         session_id = str(uuid.uuid4())
         ready_event = asyncio.Event()
@@ -718,33 +687,6 @@ async def claude_setup_token():
                     clear_session()
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
                     break
-                # On success, CLI may print the OAuth token (~108 chars); CLI often wraps at 80 chars
-                if kind == "stdout":
-                    def persist_token(t: str) -> None:
-                        os.environ[_OAUTH_TOKEN_ENV_KEY] = t
-                        _clear_poisoned_api_key_in_process()
-                        _persist_token_to_env_files(t)
-                        print(f"[setup-token] token persisted (len={len(t)})")
-
-                    if token_buffer is not None:
-                        if _is_continuation_line(value):
-                            merged = _merge_and_extract_token(token_buffer, value)
-                            if merged:
-                                persist_token(merged)
-                                token_buffer = None
-                        else:
-                            if token_buffer.startswith("sk-ant-") and len(token_buffer) >= _MIN_FULL_TOKEN_LEN:
-                                persist_token(token_buffer)
-                            token_buffer = None
-
-                    if token_buffer is None:
-                        token = _extract_oauth_token(value)
-                        if token:
-                            if len(token) >= _MIN_FULL_TOKEN_LEN:
-                                persist_token(token)
-                            else:
-                                token_buffer = token
-
                 # Forward escape-free text so the frontend never re-encodes
                 # terminal bytes into the link. Emit the OAuth URL once, cleaned.
                 clean_line = _strip_ansi(value)
