@@ -37,6 +37,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional
 
 import httpx
 
+from .config_paths import RCLONE_CONFIG_PATH, ensure_rclone_config_migrated
 from .rclone_oauth_lock import (
     cancel_all_active_oauth,
     has_active_oauth,
@@ -49,13 +50,7 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-# rclone config file — stored inside the project directory, shared by every
-# connector (gdrive, onedrive, …).
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RCLONE_CONFIG_PATH = os.getenv(
-    "RCLONE_CONFIG",
-    os.path.join(_PROJECT_ROOT, "rclone.conf"),
-)
+ensure_rclone_config_migrated()
 
 # rclone's OAuth callback port — hardcoded by the providers' OAuth client
 # registration (embedded in rclone's bundled credentials).
