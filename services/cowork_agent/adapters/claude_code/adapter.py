@@ -276,13 +276,14 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         #      "Connect Claude" (`claude auth login`) flow. The CLI auto-refreshes
         #      it via its refresh token, so it is the durable, self-healing source.
         #   2. An explicit ANTHROPIC_API_KEY — a deliberate API-billing alternative.
-        # ANTHROPIC_API_KEY outranks the subscription login in the CLI's precedence
-        # chain, so when a usable native login is present we drop the API-key vars
-        # from the subprocess env — otherwise an `sk-ant-api03…` key would silently
-        # bill the API instead of using the user's subscription. With no native
-        # login we leave the API key intact so explicit API-key mode still works.
+        # Both ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN outrank the subscription
+        # login in the CLI's precedence chain, so when a usable native login is
+        # present we drop them from the subprocess env — otherwise a leftover/fanned
+        # token (prod fans the API key into CLAUDE_CODE_OAUTH_TOKEN) would override
+        # the fresh login and silently bill the API or fail auth. With no native
+        # login we leave these intact so explicit API-key mode still works.
         if self._has_usable_native_login():
-            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY"):
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
                 env.pop(key, None)
         return env
 

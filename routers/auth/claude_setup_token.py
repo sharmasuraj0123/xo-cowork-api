@@ -371,7 +371,6 @@ async def claude_setup_token():
 
     async def generate() -> AsyncGenerator[str, None]:
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
-        global _last_completed_session_id, _last_completed_ok
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
         auth_url_sent = False
@@ -439,8 +438,15 @@ async def claude_setup_token():
             print("[setup-token] PTY reader thread exiting")
 
         async def wait_done(proc: asyncio.subprocess.Process) -> None:
+            global _last_completed_session_id, _last_completed_ok
             returncode = await proc.wait()
             print(f"[setup-token] process exited (returncode={returncode})")
+            # Record completion here — wait_done() always runs on process exit,
+            # whereas the SSE loop's `done` branch is skipped if the client
+            # disconnected exactly at completion. Setting the idempotency flags
+            # here keeps a callback retry after such a disconnect a 200, not a 409.
+            _last_completed_session_id = session_id
+            _last_completed_ok = returncode == 0
             await queue.put(("done", returncode))
             # Also clean up directly in case the SSE stream already closed
             # and nobody is consuming the queue anymore.
@@ -502,7 +508,7 @@ async def claude_setup_token():
                     _setup_token_ready = ready_event
                 _reader_thread = threading.Thread(
                     target=_pty_reader_thread,
-                    args=(master_fd, asyncio.get_event_loop()),
+                    args=(master_fd, asyncio.get_running_loop()),
                     daemon=True,
                     name=f"pty-reader-{session_id[:8]}",
                 )
@@ -563,8 +569,8 @@ async def claude_setup_token():
                     # callback (→ 409 → "failed") even though login had succeeded.
                     # The connected tile re-runs `claude auth status --json`
                     # authoritatively, so we don't gate the event on it here.
-                    _last_completed_session_id = session_id
-                    _last_completed_ok = returncode == 0
+                    # (Completion/idempotency flags are recorded in wait_done(),
+                    # the always-run path — see above.)
                     clear_session()
                     if returncode == 0:
                         print("[setup-token] login successful (exit 0)")
