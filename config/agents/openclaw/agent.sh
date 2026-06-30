@@ -249,9 +249,9 @@ enable_channels() {
     #   only OpenAI     → openai
     #   only Anthropic  → anthropic
     #   both / neither  → anthropic (default)
-    local primary_model="anthropic/claude-opus-4-6"
+    local primary_model="anthropic/claude-opus-4-8"
     if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        primary_model="openai/gpt-5.4"
+        primary_model="openai/gpt-5.5"
     fi
     log "Primary model provider: $primary_model"
 
