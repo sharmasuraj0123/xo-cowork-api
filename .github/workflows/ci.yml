@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: Import parity + lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match the deployment runtime (Dockerfile: python:3.12-slim, prod 3.12.3).
+          python-version: "3.12.3"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest ruff
+
+      # Blocking: real-bug rules only — syntax errors (E9), broken
+      # asserts/comparisons (F63), statement errors (F7), undefined names
+      # (F82). Catches problems the import test can't reach (function bodies
+      # the import never runs, files server never imports). Must stay green.
+      - name: Lint — bug-class (blocking)
+        run: ruff check --select E9,F63,F7,F82 .
+
+      # Report-only: unused imports (F401) / unused locals (F841). Surfaces
+      # the pre-existing cleanup backlog as annotations without failing the
+      # build. Flip to blocking after a dedicated cleanup pass.
+      - name: Lint — cleanup-class (report only)
+        run: ruff check --select F401,F841 --exit-zero .
+
+      # Imports `server` under each AGENT_NAME and asserts the app assembles
+      # with routes registered. Install-free: never enters the lifespan block.
+      - name: Import + route-parity smoke test
+        run: pytest tests/test_import_parity.py -q
