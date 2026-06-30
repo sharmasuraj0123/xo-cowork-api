@@ -10,6 +10,7 @@ on first sight).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable
 
 from services.cowork_agent.project_layout import (
@@ -45,7 +46,6 @@ def iter_project_xo_dirs() -> Iterable[tuple[str, "Path"]]:
     keep ``Path`` out of the public type surface where it isn't
     needed.
     """
-    from pathlib import Path
     from services.cowork_agent.project_layout import xo_dir
 
     for pid in list_project_ids():
