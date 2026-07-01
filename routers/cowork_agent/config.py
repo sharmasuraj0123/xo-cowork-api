@@ -24,6 +24,7 @@ from services.cowork_agent.helpers import _mask_sensitive
 from services.cowork_agent.registry.agent_env import upsert_env_entry
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.adapters.loader import try_load_capability
+from services.cowork_agent.openrouter_settings import write_openrouter_settings
 
 router = APIRouter()
 
@@ -68,19 +69,14 @@ async def _run_provider_provisioning(provider_id: str, argvs: list[list[str]]) -
 
 @router.post("/api/config/providers/{provider_id}/key")
 async def save_provider_key(provider_id: str, request: Request):
-    """Persist a provider API key and kick off the agent's CLI chain.
+    """Persist a provider API key and configure the target.
 
-    Returns 200 as soon as the key is safely written to the agent's env
-    file. The CLI chain runs in the background; its output is appended to
-    the agent's provisioning log for later inspection.
+    For ``openrouter`` this points Claude Code at OpenRouter by writing its own
+    settings file (``~/.claude/settings.json``) — independent of which agent is
+    active, so the key actually reaches the ``claude`` CLI. If the active agent
+    *also* defines a recipe for the provider, that per-agent CLI chain still runs
+    in the background (so hermes/openclaw are unaffected).
     """
-    recipe = _AGENT.providers.get(provider_id)
-    if recipe is None:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": f"Unsupported provider: {provider_id}"},
-        )
-
     try:
         body = await request.json()
     except Exception:
@@ -89,6 +85,27 @@ async def save_provider_key(provider_id: str, request: Request):
     api_key = (body.get("api_key") or "").strip() if isinstance(body, dict) else ""
     if not api_key:
         return JSONResponse(status_code=400, content={"detail": "api_key is required"})
+
+    # OpenRouter configures the Claude Code CLI itself (settings.json env block),
+    # regardless of the active agent. This is also what makes the provider
+    # "supported" for agents (like claude_code) that define no provider recipe.
+    configured_claude = False
+    if provider_id == "openrouter":
+        model = (body.get("model") or "").strip() if isinstance(body, dict) else ""
+        try:
+            write_openrouter_settings(api_key, model=model or None)
+        except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
+            return JSONResponse(status_code=500, content={"detail": f"Failed to configure Claude Code: {e}"})
+        configured_claude = True
+
+    recipe = _AGENT.providers.get(provider_id)
+    if recipe is None:
+        if configured_claude:
+            return {"ok": True, "provider": provider_id, "target": "claude_code_settings"}
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Unsupported provider: {provider_id}"},
+        )
 
     try:
         upsert_env_entry(recipe["env_key"], api_key)
@@ -105,7 +122,7 @@ async def save_provider_key(provider_id: str, request: Request):
 
     asyncio.create_task(_run_provider_provisioning(provider_id, argvs))
 
-    return {"ok": True, "provider": provider_id, "provisioning": "started"}
+    return {"ok": True, "provider": provider_id, "provisioning": "started", "claude_code_settings": configured_claude}
 
 
 # ── Model listing ────────────────────────────────────────────────────────────

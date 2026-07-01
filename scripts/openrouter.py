@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Point Claude Code at OpenRouter (or back to Anthropic) by editing settings.json.
 
-This is a standalone utility — no server, no AGENT_NAME, no xo-cowork-api runtime
-involved. It writes the OpenRouter ``env`` block into Claude Code's own settings
-file (``~/.claude/settings.json`` by default), which the ``claude`` CLI reads
-natively on every run. See OpenRouter's "Claude Code integration" docs.
+Standalone CLI over ``services/cowork_agent/openrouter_settings`` — no server, no
+AGENT_NAME, no xo-cowork-api runtime involved. It writes the OpenRouter ``env``
+block into Claude Code's own settings file (``~/.claude/settings.json`` by default),
+which the ``claude`` CLI reads natively on every run. The same helper backs the
+"API Keys" Save flow in the server, so both paths behave identically.
 
 Only the OpenRouter-related keys in the ``env`` block are managed; every other
 setting (theme, model, effortLevel, other env vars, …) is preserved.
@@ -22,7 +23,7 @@ Examples:
       --sonnet qwen/qwen3-next-80b-a3b-instruct:free \\
       --haiku meta-llama/llama-3.2-3b-instruct:free
 
-  python3 scripts/openrouter.py --show     # print current provider + models
+  python3 scripts/openrouter.py --show     # print current provider + model
   python3 scripts/openrouter.py --off      # revert to native Anthropic
 """
 
@@ -32,65 +33,21 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
-DEFAULT_SETTINGS = "~/.claude/settings.json"
-DEFAULT_BASE_URL = "https://openrouter.ai/api"          # no /v1; the CLI appends it
-DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# Allow running as a plain script (`python3 scripts/openrouter.py`) without the
+# venv: put the repo root on sys.path so the pure-stdlib helper imports cleanly.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# The env keys this script owns. --off removes exactly these; everything else in
-# the env block (and every other top-level setting) is left untouched.
-BASE_URL_KEY = "ANTHROPIC_BASE_URL"
-AUTH_TOKEN_KEY = "ANTHROPIC_AUTH_TOKEN"
-API_KEY_KEY = "ANTHROPIC_API_KEY"
-TIER_KEYS = {
-    "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "subagent": "CLAUDE_CODE_SUBAGENT_MODEL",
-}
-MANAGED_KEYS = [BASE_URL_KEY, AUTH_TOKEN_KEY, API_KEY_KEY, *TIER_KEYS.values()]
-
-
-def _mask(token: str) -> str:
-    token = (token or "").strip()
-    if len(token) <= 10:
-        return "set" if token else "(none)"
-    return f"{token[:8]}…{token[-4:]}"
-
-
-def _load_settings(path: Path) -> dict:
-    if not path.exists() or not path.read_text(encoding="utf-8").strip():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        sys.exit(f"error: {path} is not valid JSON ({exc}). Fix or remove it, then retry.")
-    if not isinstance(data, dict):
-        sys.exit(f"error: {path} does not contain a JSON object.")
-    return data
-
-
-def _write_settings(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def _show(env: dict) -> None:
-    base = (env.get(BASE_URL_KEY) or "").strip()
-    on = base == DEFAULT_BASE_URL and bool((env.get(AUTH_TOKEN_KEY) or "").strip())
-    if on:
-        print("provider: openrouter")
-        print(f"  base url: {base}")
-        print(f"  key:      {_mask(env.get(AUTH_TOKEN_KEY))}")
-        for label, key in TIER_KEYS.items():
-            val = (env.get(key) or "").strip()
-            if val:
-                print(f"  {label:8s}: {val}")
-    else:
-        print("provider: anthropic (native) — OpenRouter not configured in settings.json")
+from services.cowork_agent.openrouter_settings import (  # noqa: E402
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    DEFAULT_SETTINGS,
+    clear_openrouter_settings,
+    current_api_key,
+    mask,
+    read_openrouter_state,
+    write_openrouter_settings,
+)
 
 
 def main() -> None:
@@ -112,51 +69,44 @@ def main() -> None:
     p.add_argument("--show", action="store_true", help="Print the current provider/model and exit.")
     args = p.parse_args()
 
-    path = Path(os.path.expanduser(args.settings))
-    settings = _load_settings(path)
-    env = settings.get("env")
-    if not isinstance(env, dict):
-        env = {}
+    path = os.path.expanduser(args.settings)
 
     if args.show:
-        _show(env)
+        st = read_openrouter_state(settings_path=path)
+        if st["connected"]:
+            print("provider: openrouter")
+            print(f"  base url: {DEFAULT_BASE_URL}")
+            print(f"  model:    {st['model']}")
+        else:
+            print("provider: anthropic (native) — OpenRouter not configured in settings.json")
         return
 
     if args.off:
-        removed = [k for k in MANAGED_KEYS if k in env]
-        for k in removed:
-            env.pop(k, None)
-        settings["env"] = env
-        if not env:                       # tidy up an empty env block
-            settings.pop("env", None)
-        _write_settings(path, settings)
-        print(f"✓ OpenRouter disabled in {path} (removed {len(removed)} keys). Claude Code now uses native Anthropic.")
+        try:
+            clear_openrouter_settings(settings_path=path)
+        except (json.JSONDecodeError, ValueError) as e:
+            sys.exit(f"error: {path} is not valid JSON ({e}). Fix or remove it, then retry.")
+        print(f"✓ OpenRouter disabled in {path}. Claude Code now uses native Anthropic.")
         return
 
-    # ── enable / update ──────────────────────────────────────────────────────
     # Key resolution: --key  >  $OPENROUTER_API_KEY  >  existing settings value.
-    key = (args.key or os.environ.get("OPENROUTER_API_KEY") or env.get(AUTH_TOKEN_KEY) or "").strip()
+    key = (args.key or os.environ.get("OPENROUTER_API_KEY") or current_api_key(settings_path=path) or "").strip()
     if not key:
         sys.exit("error: no OpenRouter key. Pass --key sk-or-…, set $OPENROUTER_API_KEY, "
                  "or run once with --key so it's stored in settings.json.")
     if not key.startswith("sk-or-"):
-        print(f"warning: key does not look like an OpenRouter key (expected sk-or-…): {_mask(key)}", file=sys.stderr)
+        print(f"warning: key does not look like an OpenRouter key (expected sk-or-…): {mask(key)}", file=sys.stderr)
+
+    per_tier = {"opus": args.opus, "sonnet": args.sonnet, "haiku": args.haiku, "subagent": args.subagent}
+    try:
+        write_openrouter_settings(key, model=args.model, per_tier=per_tier,
+                                  base_url=args.base_url, settings_path=path)
+    except (json.JSONDecodeError, ValueError) as e:
+        sys.exit(f"error: {path} is not valid JSON ({e}). Fix or remove it, then retry.")
 
     default_model = (args.model or "").strip() or DEFAULT_MODEL
-    per_tier = {"opus": args.opus, "sonnet": args.sonnet, "haiku": args.haiku, "subagent": args.subagent}
-
-    env[BASE_URL_KEY] = args.base_url
-    env[AUTH_TOKEN_KEY] = key
-    env[API_KEY_KEY] = ""                 # must be present-but-empty for OpenRouter
-    for label, key_name in TIER_KEYS.items():
-        override = (per_tier[label] or "").strip()
-        env[key_name] = override or default_model
-
-    settings["env"] = env
-    _write_settings(path, settings)
-
     print(f"✓ Claude Code pointed at OpenRouter via {path}")
-    print(f"  key:   {_mask(key)}")
+    print(f"  key:   {mask(key)}")
     print(f"  model: {default_model}" + (" (with per-tier overrides)" if any(per_tier.values()) else ""))
     print("  run `claude` (or restart your Claude Code session) to use it; `--show` to re-check, `--off` to revert.")
 
