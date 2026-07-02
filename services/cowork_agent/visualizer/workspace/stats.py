@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from services.cowork_agent.project_layout import workspace_xo_dir, xo_dir
+from services.cowork_agent.project_layout import project_runtime_dir, workspace_runtime_dir
 from services.cowork_agent.visualizer.atomic_write import write_json_atomic
 from services.cowork_agent.visualizer.reader import read_json
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
@@ -134,7 +134,7 @@ def apply() -> bool:
     by_day: dict[str, dict] = {}
 
     for pid in list_project_ids():
-        st = read_json(xo_dir(pid) / "stats.json")
+        st = read_json(project_runtime_dir(pid) / "stats.json")
         if not isinstance(st, dict):
             continue
         r = st.get("rolling") or {}
@@ -174,5 +174,5 @@ def apply() -> bool:
         "by_runtime": by_runtime,
         "by_day": by_day,
     }
-    write_json_atomic(workspace_xo_dir() / "stats.json", payload)
+    write_json_atomic(workspace_runtime_dir() / "stats.json", payload)
     return True

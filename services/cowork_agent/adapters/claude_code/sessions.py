@@ -20,7 +20,10 @@ from pathlib import Path
 from services.cowork_agent.helpers import derive_title_native_claude, parse_jsonl
 from services.cowork_agent.engine.messages import convert_native_claude_messages
 from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import (
+    sessions_dir as _xo_sessions_dir,
+    xo_projects_root,
+)
 
 # claude_code stores its session metadata under xo-projects (.xo/sessions),
 # so the generic project-tied scan applies to it.
@@ -117,7 +120,7 @@ def _persist_session_directory(session_id: str, directory: str) -> bool:
         for agent_dir in projects_root.iterdir():
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            idx_path = _resolve_index_path(_xo_sessions_dir(agent_dir.name))
             if idx_path and _try_index(idx_path):
                 return True
 

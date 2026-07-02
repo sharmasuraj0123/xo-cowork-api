@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from services.cowork_agent.project_layout import workspace_xo_dir, xo_projects_root
+from services.cowork_agent.project_layout import workspace_runtime_dir, xo_projects_root
 from services.cowork_agent.visualizer.atomic_write import write_json_atomic
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
 
@@ -21,7 +21,7 @@ def _now_iso() -> str:
 
 def apply() -> bool:
     """Refresh ``workspace.json``. Returns ``True``."""
-    wxo = workspace_xo_dir()
+    wxo = workspace_runtime_dir()
     payload = {
         "schema": 1,
         "updated_at": _now_iso(),

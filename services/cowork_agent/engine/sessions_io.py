@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 from services.cowork_agent.helpers import iso_now, ms_to_iso
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import sessions_dir as _sessions_dir, xo_projects_root
 
 
 # ── Index filename resolution (new name + legacy fallback) ────────────────────
@@ -153,7 +153,7 @@ def load_all_sessions() -> list[dict]:
             for agent_dir in sorted(projects_root.iterdir()):
                 if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                     continue
-                _ingest_project_sessions_dir(agent_dir / ".xo" / "sessions", agent_dir.name, agent_dir)
+                _ingest_project_sessions_dir(_sessions_dir(agent_dir.name), agent_dir.name, agent_dir)
 
     # Native (non-project) sessions from the active backend's own store
     # (a per-agent on-disk dir, a state db, etc.); backends without one return
@@ -189,7 +189,7 @@ def find_session_file(session_id: str) -> Path | None:
         for agent_dir in projects_root.iterdir():
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            idx_path = _resolve_index_path(_sessions_dir(agent_dir.name))
             if not idx_path:
                 continue
             try:
@@ -232,7 +232,7 @@ def find_session_backend(session_id: str) -> str | None:
         for agent_dir in projects_root.iterdir():
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            idx_path = _resolve_index_path(_sessions_dir(agent_dir.name))
             if not idx_path:
                 continue
             try:

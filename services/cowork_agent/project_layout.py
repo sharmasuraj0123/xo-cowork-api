@@ -1,26 +1,33 @@
 """
-Canonical project layout for ~/xo-projects/<name>/.
+Canonical project layout — split across two tiers by where files live on disk.
 
-A project is just a folder. It is backend-agnostic: any agent (claude_code,
-openclaw, future tools) can launch against it. The on-disk shape is what
-makes the agent perform well — this module owns it.
+A project is just a folder, backend-agnostic: any agent can launch against it.
+This module owns the on-disk shape and is the **one place** the synced-vs-runtime
+tier decision is made — no adapter encodes paths or tiers (see
+docs/xo-runtime-tier-restructure.md). It names no specific agent.
 
-    ~/xo-projects/<name>/
-    ├── AGENTS.md            stable prefix, universal contract
-    ├── OBJECTIVES.md        north-star outcomes
-    ├── WORKSPACE.md         current state of play
-    ├── CLAUDE.md            one-line pointer to AGENTS.md
-    └── .xo/
-        ├── project.json     {name, display_name, description, created_at}
-        ├── memory/{semantic,episodic,procedural,working}/
-        ├── sessions/        sessionslist.json (metadata only) + compressed/ + index.md
-        ├── artifacts/{drafts,final}/
-        ├── state/           SOUL.md, STATUS.md, IDENTITY.md, USER.md
-        ├── skills/{user-built,learned}/
-        └── context/         config.json, cache.md
+    ~/xo-projects/<name>/              ← the project tree (committed / shareable)
+    ├── AGENTS.md                      DOX root rail
+    ├── CLAUDE.md                      one-line pointer to AGENTS.md
+    ├── memory/                        committed cognition (SIBLING of .xo/)
+    └── .xo/                           SYNCED contract only — safe to commit wholesale
+        ├── project.json               identity {pid, name, owner_user_id, created_at}
+        ├── peers.json                 collaborator roster (a separate service writes it)
+        └── todos.json                 the A2A coordination surface
+
+    ~/.xo/                             ← the runtime HOME (machine-local, NEVER synced)
+    ├── registry.json                  pid ↔ folder ↔ runtime ↔ sessions
+    ├── <pid>/                         per-project runtime, keyed by project.json:pid
+    │   ├── activity.json  stats.json  timeline.jsonl(+rotations)
+    │   ├── sync.json      remote-head.json   (the relay seam)
+    │   └── sessions/{sessionslist,sessions-augment}.json
+    └── workspace/                     cross-project aggregation (was ~/xo-projects/.xo/)
+
+Keeping runtime physically outside every project tree makes share-safety a
+filesystem invariant rather than a .gitignore policy.
 
 Concerns:
-- path resolution (env-driven root, every subfolder)
+- path resolution for both tiers (env-driven roots; runtime keyed by pid)
 - idempotent scaffolding (re-running fills in missing pieces, never clobbers)
 - project metadata read/write
 - filesystem-driven listing (no backend coupling)
@@ -85,15 +92,78 @@ def xo_projects_root() -> Path:
     return root
 
 
-def workspace_xo_dir() -> Path:
-    """Workspace-tier ``.xo/`` directory at ``~/xo-projects/.xo/``.
+# ── Runtime home (machine-local; never synced) ─────────────────────────────────
+#
+# Machine-local telemetry lives OUTSIDE every project tree, in a home store keyed
+# by ``project.json:pid``. This makes share-safety a filesystem invariant rather
+# than a ``.gitignore`` policy: runtime cannot be committed, tarred, or leaked
+# through a missing ``.git/`` because it is not in the project tree at all. See
+# docs/xo-runtime-tier-restructure.md.
+#
+# These helpers are pure path math and name NO agent — the tier decision belongs
+# here, never in an adapter.
 
-    Mirrors the per-project ``.xo/`` shape but aggregates across all
-    projects. Materialised by the watcher's workspace tier (see
-    docs/watcher-design.md §3.2). Does not auto-create on read — the
-    watcher creates it explicitly on its first tick.
+
+def xo_runtime_root() -> Path:
+    """Machine-local runtime home, ``~/.xo`` by default.
+
+    Sourced from ``XO_RUNTIME_ROOT``; created on read so callers never
+    guard for first-run. Never synced — keyed per project by ``pid``.
     """
-    return xo_projects_root() / ".xo"
+    raw = (os.getenv("XO_RUNTIME_ROOT", "") or "").strip() or "~/.xo"
+    root = Path(raw).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def runtime_dir(pid: str) -> Path:
+    """Per-project runtime directory ``~/.xo/<pid>/`` (pid-keyed)."""
+    return xo_runtime_root() / pid
+
+
+def runtime_sessions_dir(pid: str) -> Path:
+    """Per-project runtime sessions directory ``~/.xo/<pid>/sessions/``."""
+    return runtime_dir(pid) / "sessions"
+
+
+def workspace_runtime_dir() -> Path:
+    """Workspace-tier runtime aggregation at ``~/.xo/workspace/``.
+
+    Was ``~/xo-projects/.xo/``. It is itself machine-local telemetry, so
+    it moves into the runtime home alongside the per-project stores.
+    """
+    return xo_runtime_root() / "workspace"
+
+
+# ── Name → runtime key resolution (the one place that reads project.json) ──────
+
+
+def runtime_key(name: str) -> str:
+    """Resolve a project folder name to its runtime-store key.
+
+    The key is ``project.json:pid`` once the watcher has minted it. Until
+    then (template not yet filled, or no ``project.json``) we fall back to
+    the normalized folder name. The fallback is transitional: it only
+    applies in the brief pre-mint window on a brand-new project, and the
+    startup migration + per-tick registry reconcile it. Runtime is
+    machine-local, so a short-lived folder-name key is harmless.
+    """
+    meta = load_project(name)
+    if isinstance(meta, dict):
+        pid = meta.get("pid")
+        if pid and not meta.get("_template", False):
+            return str(pid)
+    return normalize_agent_id(name)
+
+
+def project_runtime_dir(name: str) -> Path:
+    """Runtime directory for a project given its folder name."""
+    return runtime_dir(runtime_key(name))
+
+
+def project_runtime_sessions_dir(name: str) -> Path:
+    """Runtime sessions directory for a project given its folder name."""
+    return runtime_sessions_dir(runtime_key(name))
 
 
 # ── Per-project paths ─────────────────────────────────────────────────────────
@@ -108,27 +178,15 @@ def xo_dir(name: str) -> Path:
 
 
 def sessions_dir(name: str) -> Path:
-    return xo_dir(name) / "sessions"
+    """Sessions directory for a project.
 
-
-def memory_dir(name: str) -> Path:
-    return xo_dir(name) / "memory"
-
-
-def state_dir(name: str) -> Path:
-    return xo_dir(name) / "state"
-
-
-def artifacts_dir(name: str) -> Path:
-    return xo_dir(name) / "artifacts"
-
-
-def skills_dir(name: str) -> Path:
-    return xo_dir(name) / "skills"
-
-
-def context_dir(name: str) -> Path:
-    return xo_dir(name) / "context"
+    Runtime tier: ``sessions/`` is machine-local telemetry, so it lives in the
+    runtime home ``~/.xo/<pid>/sessions/`` — never in the project tree. Every
+    adapter/engine/watcher reader and writer resolves through this one helper, so
+    the tier decision is made here once and stays agent-agnostic. Resolution is by
+    ``project.json:pid`` (see :func:`runtime_key`).
+    """
+    return project_runtime_sessions_dir(name)
 
 
 def project_metadata_path(name: str) -> Path:
@@ -151,8 +209,11 @@ def scaffold_project(
     existing files are never overwritten; missing files and directories are
     added.
 
-    ``sessions/sessions.json`` is always ensured — it is a system requirement
-    not present in the user template.
+    The project ``.xo/`` holds only the synced contract (``project.json`` +,
+    written by other services, ``peers.json``/``todos.json``). The session index
+    (``sessions/sessionslist.json``) is machine-local runtime state and is created
+    lazily by the adapters under the runtime home ``~/.xo/<pid>/sessions/`` — never
+    seeded into the project tree here.
 
     Returns the project metadata dict (created or already present).
     """
@@ -164,14 +225,6 @@ def scaffold_project(
     xdir.mkdir(parents=True, exist_ok=True)
 
     _copy_template(_template_dir(), pdir)
-
-    # sessionslist.json is a system file the harness reads/writes; not in the template.
-    # It holds session metadata only — messages stay in the provider's own storage.
-    sessions_dir = xdir / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    sessions_json = sessions_dir / "sessionslist.json"
-    if not sessions_json.exists():
-        sessions_json.write_text("{}\n", encoding="utf-8")
 
     return _upsert_metadata(pid, display_name=display_name, description=description)
 

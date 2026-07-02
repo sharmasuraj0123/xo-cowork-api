@@ -10,11 +10,12 @@ This is principle P3 from docs/bff-endpoints-design.md: one place to
 look when you need to know which on-disk location a frontend "noun"
 maps to.
 
-Visualizer scopes are read-only handles over ``<project>/.xo/`` (per
-project) and ``~/xo-projects/.xo/`` (workspace tier). They delegate
-all JSON reads to ``services/cowork_agent/visualizer/reader.py`` —
-the only module that opens visualizer state files. See
-docs/watcher-design.md §6.0.
+Visualizer scopes are read-only handles split across two tiers: the
+SYNCED contract in the project tree (``<project>/.xo/``) and machine-local
+runtime telemetry in the home store (``~/.xo/<pid>/`` per project,
+``~/.xo/workspace/`` for the workspace tier). They delegate all JSON reads
+to ``services/cowork_agent/visualizer/reader.py`` — the only module that
+opens visualizer state files. See docs/xo-runtime-tier-restructure.md.
 """
 
 from __future__ import annotations
@@ -70,16 +71,27 @@ class SecretsScope:
 class _XoReader:
     """Shared read helpers for both visualizer scopes.
 
-    Concrete subclasses set ``_xo_root`` to the root of the ``.xo/``
-    directory they read from (per-project or workspace-tier).
+    Two read roots, mirroring the on-disk tier split (see
+    docs/xo-runtime-tier-restructure.md):
+
+    * ``_xo_root`` — the SYNCED contract in the project tree
+      (``<project>/.xo/``). Today only ``todos.json`` is read from here.
+    * ``_runtime_root`` — machine-local telemetry in the runtime home
+      (``~/.xo/<pid>/`` per project, ``~/.xo/workspace/`` for the workspace
+      tier). Everything else is read from here.
+
+    The BFF runs on the same machine as the runtime store, so reading the
+    home root is no different from reading the project tree.
     """
 
     _xo_root: Path
+    _runtime_root: Path
 
-    # The five files the BFF endpoints read from. Closed set; any new
-    # endpoint that wants a different file must extend this list AND
-    # the corresponding reader. P4 / P6 — the route layer can't ask
-    # for an arbitrary path.
+    # The files the BFF endpoints read from. Closed set; any new endpoint
+    # that wants a different file must extend this list AND the
+    # corresponding reader. P4 / P6 — the route layer can't ask for an
+    # arbitrary path. ``_TODOS`` resolves under the synced ``_xo_root``;
+    # the rest resolve under ``_runtime_root``.
     _STATS:           str = "stats.json"
     _TODOS:           str = "todos.json"
     _ACTIVITY:        str = "activity.json"
@@ -88,13 +100,13 @@ class _XoReader:
     _SESSIONS_AUG:    str = "sessions/sessions-augment.json"
 
     def read_stats(self) -> Optional[dict]:
-        return visualizer_reader.read_json(self._xo_root / self._STATS)
+        return visualizer_reader.read_json(self._runtime_root / self._STATS)
 
     def read_todos(self) -> Optional[dict]:
         return visualizer_reader.read_json(self._xo_root / self._TODOS)
 
     def read_activity(self) -> Optional[dict]:
-        return visualizer_reader.read_json(self._xo_root / self._ACTIVITY)
+        return visualizer_reader.read_json(self._runtime_root / self._ACTIVITY)
 
     def read_timeline(
         self,
@@ -104,7 +116,7 @@ class _XoReader:
         types: Optional[frozenset[str]] = None,
     ) -> list[dict]:
         return visualizer_reader.read_jsonl_tail_reverse(
-            self._xo_root / self._TIMELINE,
+            self._runtime_root / self._TIMELINE,
             limit=limit,
             before_ts=before,
             types=types,
@@ -115,10 +127,10 @@ class _XoReader:
 
         Returns the flat ``{<composite_key>: <merged_row>}`` map the
         BFF endpoints serve. Empty dict if the adapter has never
-        written a row for this scope.
+        written a row for this scope. Both files are runtime tier.
         """
-        base = visualizer_reader.read_json(self._xo_root / self._SESSIONSLIST)
-        aug = visualizer_reader.read_json(self._xo_root / self._SESSIONS_AUG)
+        base = visualizer_reader.read_json(self._runtime_root / self._SESSIONSLIST)
+        aug = visualizer_reader.read_json(self._runtime_root / self._SESSIONS_AUG)
         return visualizer_reader.merge_sessionslist(base, aug)
 
     def read_one_session(self, identifier: str) -> Optional[tuple[str, dict]]:
@@ -168,7 +180,12 @@ class VisualizerScope(_XoReader):
 
     def __init__(self, project_id: str) -> None:
         self.project_id = normalize_agent_id(project_id)
+        # Synced contract stays in the project tree; runtime telemetry is in the
+        # home store keyed by project.json:pid. When project.json doesn't exist
+        # yet, runtime_key falls back to the folder name → empty reads → the
+        # routes' existing zero/empty payloads.
         self._xo_root = project_layout.xo_dir(self.project_id)
+        self._runtime_root = project_layout.project_runtime_dir(self.project_id)
 
     def project_exists(self) -> bool:
         """Whether the project directory exists on disk.
@@ -204,21 +221,24 @@ class VisualizerScope(_XoReader):
 
 
 class WorkspaceVisualizerScope(_XoReader):
-    """Read-only handle over ``~/xo-projects/.xo/`` (workspace tier).
+    """Read-only handle over ``~/.xo/workspace/`` (workspace tier).
 
-    Aggregate-of-all-projects view. The workspace ``.xo/`` is
+    Aggregate-of-all-projects view. The workspace runtime store is
     materialised by the watcher's workspace tier (see
-    docs/watcher-design.md §3.2). Until the watcher's first tick,
+    docs/xo-runtime-tier-restructure.md). Until the watcher's first tick,
     every read returns ``None`` / empty and the routes fall through
     to zero/empty payloads.
     """
 
     def __init__(self) -> None:
-        self._xo_root = project_layout.workspace_xo_dir()
+        # The workspace tier is entirely machine-local aggregation — there is no
+        # synced contract here, so both roots point at the runtime home.
+        self._xo_root = project_layout.workspace_runtime_dir()
+        self._runtime_root = self._xo_root
 
     def read_workspace(self) -> Optional[dict]:
-        """``~/xo-projects/.xo/workspace.json`` — discovered project list."""
-        return visualizer_reader.read_json(self._xo_root / "workspace.json")
+        """``~/.xo/workspace/workspace.json`` — discovered project list."""
+        return visualizer_reader.read_json(self._runtime_root / "workspace.json")
 
 
 # ── Resolver ──────────────────────────────────────────────────────────────────

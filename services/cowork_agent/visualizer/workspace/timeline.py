@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from services.cowork_agent.project_layout import workspace_xo_dir
+from services.cowork_agent.project_layout import workspace_runtime_dir
 from services.cowork_agent.visualizer.atomic_write import append_jsonl
 
 
@@ -44,5 +44,5 @@ def apply(events: Iterable[dict], *, project_id: str) -> bool:
             lines.append(tagged)
     if not lines:
         return False
-    append_jsonl(workspace_xo_dir() / _WORKSPACE_TIMELINE, lines)
+    append_jsonl(workspace_runtime_dir() / _WORKSPACE_TIMELINE, lines)
     return True

@@ -19,7 +19,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import (
+    project_dir as _xo_project_dir,
+    sessions_dir as _xo_sessions_dir,
+)
 from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR
 
 
@@ -93,8 +96,7 @@ def tee_exchange(
         return
     agent_id = xo_agent_id
 
-    xo = xo_projects_root() / agent_id / ".xo"
-    sessions_dir = xo / "sessions"
+    sessions_dir = _xo_sessions_dir(agent_id)
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -116,7 +118,7 @@ def tee_exchange(
     entry.update({
         "sessionId": session_id,
         "nativeSessionId": session_id,
-        "directory": str(xo.parent),
+        "directory": str(_xo_project_dir(agent_id)),
         "backend": "openclaw",
         "updatedAt": now_ms,
     })

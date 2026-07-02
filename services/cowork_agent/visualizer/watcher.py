@@ -19,7 +19,7 @@ from collections import defaultdict
 from typing import Optional
 
 from services.cowork_agent.registry.agent_registry import get_active_agent
-from services.cowork_agent.project_layout import xo_dir
+from services.cowork_agent.project_layout import project_runtime_dir, xo_dir
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import UsageObserved
 from services.cowork_agent.visualizer.sinks import (
@@ -50,6 +50,7 @@ from services.cowork_agent.visualizer.workspace import (
     workspace_json,
 )
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
+from services.cowork_agent.visualizer import registry
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +118,18 @@ class Watcher:
         # timeline last so its emitted lines can be fanned to the
         # workspace timeline.
         for project_id, project_events in events_by_project.items():
-            x = xo_dir(project_id)
+            # Two roots per project: the SYNCED contract stays in the project
+            # tree (<project>/.xo/), machine-local telemetry goes to the runtime
+            # home (~/.xo/<pid>/). fill_identity runs FIRST so the pid exists
+            # before we resolve the runtime root (which is keyed by it).
+            synced = xo_dir(project_id)
             try:
-                project_json.fill_identity(x, project_id)
-                sessions_augment.apply(x, project_events)
-                todos.apply(x, project_events)
-                stats.apply(x, project_events)
-                timeline_lines = timeline.apply(x, project_events)
+                project_json.fill_identity(synced, project_id)
+                runtime = project_runtime_dir(project_id)
+                sessions_augment.apply(runtime, project_events)
+                todos.apply(synced, project_events)
+                stats.apply(runtime, project_events)
+                timeline_lines = timeline.apply(runtime, project_events)
             except Exception:
                 logger.exception("sink batch failed for project %s", project_id)
                 continue
@@ -162,8 +168,10 @@ class Watcher:
             except Exception:
                 logger.exception("identity fill failed for %s", pid)
             try:
+                # activity is machine-local runtime → runtime home (resolved
+                # after fill_identity so the pid key is available).
                 activity.apply(
-                    xo_dir(pid),
+                    project_runtime_dir(pid),
                     presence_by_project.get(pid, []),
                     model_by_session=self.model_by_session,
                 )
@@ -180,6 +188,13 @@ class Watcher:
             ws_sessions_augment.apply()
         except Exception:
             logger.exception("workspace tier failed")
+
+        # Refresh the machine-local pid↔folder↔runtime registry. Cheap (one
+        # JSON read per project), and keeps the reverse-lookup/GC map current.
+        try:
+            registry.build_registry()
+        except Exception:
+            logger.exception("registry refresh failed")
 
     # ── Async runner ────────────────────────────────────────────────────
 
@@ -213,8 +228,17 @@ _watcher: Optional[Watcher] = None
 async def start_watcher() -> None:
     """Construct (once) and run the watcher loop. Designed to be
     spawned as an asyncio task from FastAPI's lifespan handler.
+
+    Runs the one-time runtime-tier migration (old flat ``<project>/.xo/``
+    telemetry → ``~/.xo/<pid>/``) before the first tick, off the event loop.
+    Idempotent and non-fatal.
     """
     global _watcher
     if _watcher is None:
         _watcher = Watcher()
+        try:
+            from services.cowork_agent.visualizer import migrate
+            await asyncio.to_thread(migrate.migrate_runtime_layout)
+        except Exception:
+            logger.exception("runtime-tier migration failed (non-fatal)")
     await _watcher.run()

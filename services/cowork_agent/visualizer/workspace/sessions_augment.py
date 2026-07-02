@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from services.cowork_agent.project_layout import workspace_xo_dir, xo_dir
+from services.cowork_agent.project_layout import sessions_dir, workspace_runtime_dir
 from services.cowork_agent.visualizer.atomic_write import write_json_atomic
 from services.cowork_agent.visualizer.reader import read_json
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
@@ -22,7 +22,7 @@ def _now_iso() -> str:
 def apply() -> bool:
     sessions: dict[str, dict] = {}
     for pid in list_project_ids():
-        aug = read_json(xo_dir(pid) / "sessions" / "sessions-augment.json")
+        aug = read_json(sessions_dir(pid) / "sessions-augment.json")
         if not isinstance(aug, dict):
             continue
         for key, row in (aug.get("sessions") or {}).items():
@@ -34,5 +34,5 @@ def apply() -> bool:
         "updated_at": _now_iso(),
         "sessions": sessions,
     }
-    write_json_atomic(workspace_xo_dir() / "sessions" / "sessions-augment.json", payload)
+    write_json_atomic(workspace_runtime_dir() / "sessions" / "sessions-augment.json", payload)
     return True

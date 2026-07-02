@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Iterator
 
-from services.cowork_agent.project_layout import xo_dir
+from services.cowork_agent.project_layout import sessions_dir
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ def iter_sessionslist_rows(backend: str) -> Iterator[tuple[str, str, dict]]:
     so this reader sees a consistent snapshot per project per call.
     """
     for project_id in list_project_ids():
-        sl_path = xo_dir(project_id) / "sessions" / "sessionslist.json"
+        sl_path = sessions_dir(project_id) / "sessionslist.json"
         if not sl_path.is_file():
             continue
         try:

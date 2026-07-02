@@ -21,7 +21,10 @@ from pathlib import Path
 from services.cowork_agent.helpers import derive_title, iso_now, ms_to_iso, parse_jsonl
 from services.cowork_agent.engine.messages import convert_messages
 from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import (
+    sessions_dir as _xo_sessions_dir,
+    xo_projects_root,
+)
 from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR
 
 # openclaw tees project sessions into xo-projects AND keeps native sessions
@@ -183,7 +186,7 @@ def find_session_key(session_id: str) -> str | None:
         for agent_dir in projects_root.iterdir():
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            idx_path = _resolve_index_path(_xo_sessions_dir(agent_dir.name))
             if not idx_path:
                 continue
             try:

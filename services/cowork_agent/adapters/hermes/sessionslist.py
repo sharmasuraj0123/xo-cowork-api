@@ -25,7 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import (
+    project_dir as _xo_project_dir,
+    sessions_dir as _xo_sessions_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +70,7 @@ def write_session_row(
     if not agent_id or not native_session_id:
         return
     try:
-        project_dir = xo_projects_root() / agent_id
-        sessions_dir = project_dir / ".xo" / "sessions"
+        sessions_dir = _xo_sessions_dir(agent_id)
         index_path = sessions_dir / "sessionslist.json"
 
         try:
@@ -94,7 +96,7 @@ def write_session_row(
         index[composite] = {
             "sessionId": our_session_id or native_session_id,
             "nativeSessionId": native_session_id,
-            "directory": str(project_dir),
+            "directory": str(_xo_project_dir(agent_id)),
             "backend": "hermes",
             "updatedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
             "usage": usage,
