@@ -21,8 +21,8 @@
   },
   "channels": {
     "enabled": false,
-    "telegram": { "enabled": true },
-    "slack": { "enabled": true }
+    "telegram": { "enabled": false },
+    "slack": { "enabled": false }
   },
   "secrets": { "enabled": true }
 }
