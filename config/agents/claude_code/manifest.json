@@ -32,5 +32,14 @@
   "flags": {
     "dangerously_skip_permissions": true,
     "output_format": "stream-json"
+  },
+  "providers": {
+    "openrouter": {
+      "settings_env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_AUTH_TOKEN": "{api_key}",
+        "ANTHROPIC_API_KEY": ""
+      }
+    }
   }
 }
