@@ -50,7 +50,9 @@
       "env_key": "OPENROUTER_API_KEY",
       "commands": [
         {"template": "config_set", "params": {"path": "model.provider", "value": "openrouter"}},
-        {"template": "config_set", "params": {"path": "model.default",  "value": "anthropic/claude-sonnet-4"}}
+        {"template": "config_set", "params": {"path": "model.default",  "value": "anthropic/claude-opus-4.8"}},
+        {"template": "config_set", "params": {"path": "model.base_url", "value": "https://openrouter.ai/api/v1"}},
+        {"template": "config_set", "params": {"path": "model.api_mode", "value": "chat_completions"}}
       ]
     },
     "kimi": {

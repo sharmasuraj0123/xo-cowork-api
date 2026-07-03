@@ -176,8 +176,8 @@ validate_env() {
         export TELEGRAM_ENABLED=false
         warnings=1
     fi
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-        log_warn "No model provider key set (ANTHROPIC_API_KEY or OPENAI_API_KEY). Gateway will start but agents won't work without a model."
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+        log_warn "No model provider key set (ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY). Gateway will start but agents won't work without a model."
         warnings=1
     fi
 
@@ -872,6 +872,41 @@ GUARDEOF
 }
 
 # ==============================================================
+# Setup: Wire OpenRouter as a model via the openclaw CLI
+# ==============================================================
+# Uses the CLI config commands (mirrors manifest.json's plugin_enable /
+# models_set templates) rather than hand-writing openclaw.json. No auth
+# profile is created — the openrouter plugin reads OPENROUTER_API_KEY from the
+# environment. Runs after install_cli so the `openclaw` binary is available.
+configure_openrouter() {
+    [ -z "${OPENROUTER_API_KEY:-}" ] && return 0
+    if ! command -v openclaw &>/dev/null; then
+        log_warn "openclaw CLI not found — skipping OpenRouter model setup"
+        return 0
+    fi
+
+    log "Enabling OpenRouter plugin via CLI..."
+    openclaw config set plugins.entries.openrouter.enabled true \
+        || log_warn "Failed to enable openrouter plugin"
+
+    # Make OpenRouter the primary model only when it's the selected provider:
+    #   - no Anthropic/OpenAI key present (OpenRouter is the only provider), or
+    #   - explicitly forced via OPENCLAW_PRIMARY_MODEL=openrouter/<model>.
+    local set_primary=0
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+        set_primary=1
+    fi
+    case "${OPENCLAW_PRIMARY_MODEL:-}" in openrouter/*) set_primary=1 ;; esac
+
+    if [ "$set_primary" = "1" ]; then
+        local or_model="${OPENCLAW_PRIMARY_MODEL:-openrouter/auto}"
+        log "Setting primary model to ${or_model} via CLI..."
+        openclaw models set "$or_model" \
+            || log_warn "Failed to set OpenRouter primary model"
+    fi
+}
+
+# ==============================================================
 # Setup: Full setup + start
 # ==============================================================
 run_setup() {
@@ -881,6 +916,7 @@ run_setup() {
     install_env
     enable_channels
     install_cli
+    configure_openrouter
     install_openclaw_peer_deps
     log "Running config doctor..."
     if openclaw doctor --fix --yes 2>/dev/null; then
