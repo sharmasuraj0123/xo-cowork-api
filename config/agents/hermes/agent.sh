@@ -402,9 +402,9 @@ configure_hermes() {
     }
 
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-8 https://api.anthropic.com
     elif [ -n "${OPENAI_API_KEY:-}" ]; then
-        _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+        _configure_model custom OPENAI_API_KEY gpt-5.5 https://api.openai.com/v1
     elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
         _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-opus-4.8 https://openrouter.ai/api/v1 chat_completions
     else

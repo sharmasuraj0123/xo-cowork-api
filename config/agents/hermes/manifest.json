@@ -34,7 +34,7 @@
       "env_key": "ANTHROPIC_API_KEY",
       "commands": [
         {"template": "config_set", "params": {"path": "model.provider", "value": "anthropic"}},
-        {"template": "config_set", "params": {"path": "model.default",  "value": "claude-opus-4-6"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "claude-opus-4-8"}},
         {"template": "config_set", "params": {"path": "model.base_url", "value": "https://api.anthropic.com"}}
       ]
     },
@@ -42,7 +42,7 @@
       "env_key": "OPENAI_API_KEY",
       "commands": [
         {"template": "config_set", "params": {"path": "model.provider", "value": "custom"}},
-        {"template": "config_set", "params": {"path": "model.default",  "value": "gpt-5.4"}},
+        {"template": "config_set", "params": {"path": "model.default",  "value": "gpt-5.5"}},
         {"template": "config_set", "params": {"path": "model.base_url", "value": "https://api.openai.com/v1"}}
       ]
     },
