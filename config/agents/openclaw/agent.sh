@@ -245,13 +245,19 @@ enable_channels() {
     # Ensure WhatsApp credentials directory exists
     mkdir -p "$OPENCLAW_DIR/credentials/whatsapp/default"
 
-    # Determine primary model by which API keys are present:
-    #   only OpenAI     → openai
-    #   only Anthropic  → anthropic
-    #   both / neither  → anthropic (default)
+    # Determine primary model by which API keys are present (precedence:
+    # Anthropic > OpenAI > OpenRouter):
+    #   only OpenAI            → openai
+    #   only OpenRouter        → openrouter/auto
+    #   only Anthropic / both / neither → anthropic (default)
+    # configure_openrouter() re-asserts this via the CLI (and honors
+    # OPENCLAW_PRIMARY_MODEL); setting it here too keeps the file sane even if
+    # that later CLI step fails.
     local primary_model="anthropic/claude-opus-4-6"
     if [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
         primary_model="openai/gpt-5.4"
+    elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        primary_model="openrouter/auto"
     fi
     log "Primary model provider: $primary_model"
 
