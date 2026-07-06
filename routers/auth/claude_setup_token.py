@@ -128,6 +128,8 @@ def _resolve_claude_cli_path() -> str:
 
 
 CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_TIMEOUT", "300"))
+# Seconds of SSE silence between keepalive comments (env override is for tests).
+SSE_HEARTBEAT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_HEARTBEAT", "15"))
 
 
 def _mark_onboarding_complete() -> None:
@@ -183,6 +185,25 @@ _setup_token_ready: Optional[asyncio.Event] = None
 # instead of a 409 the UI would render as a failure.
 _last_completed_session_id: Optional[str] = None
 _last_completed_ok: bool = False
+# The CURRENT SSE consumer's queue. A second POST /claude/setup-token while a
+# login is in flight ATTACHES to the session (same session_id/CLI/PTY) instead
+# of orphaning it: it swaps this queue (last stream wins) and the superseded
+# stream ends itself with a terminal event. Producers route through _deliver().
+_setup_token_queue: Optional[asyncio.Queue] = None
+# Cached authorize URL so an attaching stream can replay it immediately.
+_setup_token_auth_url: Optional[str] = None
+# monotonic() at spawn — the overall deadline stays anchored to the ORIGINAL
+# session start even across attaches.
+_setup_token_started_at: Optional[float] = None
+
+
+def _deliver(session_id: str, item: tuple) -> None:
+    """Route a producer event (PTY/pipe reader, exit watcher) to the current
+    consumer queue. Runs on the event loop (via call_soon_threadsafe from the
+    reader thread). Stragglers from a session that is no longer the active one
+    (a finished session that was taken over) are dropped."""
+    if _setup_token_session_id == session_id and _setup_token_queue is not None:
+        _setup_token_queue.put_nowait(item)
 
 
 def _pty_wanted() -> bool:
@@ -309,6 +330,7 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
     correct running session.
     """
     global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
+    global _setup_token_queue, _setup_token_auth_url, _setup_token_started_at
 
     print(f"[setup-token] callback received (session_id={body.session_id})")
 
@@ -320,14 +342,22 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
         if body.session_id == _last_completed_session_id and _last_completed_ok:
             print("[setup-token] callback for an already-succeeded session → 200 (idempotent)")
             return {"ok": True, "message": "Login already completed", "session_id": body.session_id}
-        print("[setup-token] callback rejected: no active session")
+        print(
+            f"[setup-token] callback rejected: no active session "
+            f"(last_completed={_last_completed_session_id}, last_ok={_last_completed_ok} — "
+            f"a mismatching last_completed here means the server restarted mid-login)"
+        )
         raise HTTPException(
             status_code=409,
             detail="No setup-token session active. Start one with POST /claude/setup-token first.",
         )
 
     if body.session_id != _setup_token_session_id:
-        print(f"[setup-token] callback rejected: session mismatch (active={_setup_token_session_id}, got={body.session_id})")
+        active_age = time.monotonic() - (_setup_token_started_at or time.monotonic())
+        print(
+            f"[setup-token] callback rejected: session mismatch "
+            f"(active={_setup_token_session_id} age={active_age:.0f}s, got={body.session_id})"
+        )
         raise HTTPException(
             status_code=409,
             detail=(
@@ -369,6 +399,9 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
             _setup_token_stdin = None
             _setup_token_session_id = None
             _setup_token_ready = None
+            _setup_token_queue = None
+            _setup_token_auth_url = None
+            _setup_token_started_at = None
             _close_setup_token_pty_master()
             print("[setup-token] callback rejected: process already finished")
             raise HTTPException(
@@ -413,8 +446,10 @@ async def claude_setup_token():
 
     async def generate() -> AsyncGenerator[str, None]:
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
+        global _setup_token_queue, _setup_token_auth_url, _setup_token_started_at
         queue: asyncio.Queue = asyncio.Queue()
         process: Optional[asyncio.subprocess.Process] = None
+        attach = False
         auth_url_sent = False
         last_failure_line: Optional[str] = None  # most recent "Login failed: …" line
         session_id = str(uuid.uuid4())
@@ -431,7 +466,7 @@ async def claude_setup_token():
                     ready_event.set()
                     print("[setup-token] CLI ready (first stdout received)")
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
-                await queue.put(("stdout", text))
+                _deliver(session_id, ("stdout", text))
 
         async def read_stderr(proc: asyncio.subprocess.Process) -> None:
             if proc.stderr is None:
@@ -441,7 +476,7 @@ async def claude_setup_token():
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
-                await queue.put(("stderr", text))
+                _deliver(session_id, ("stderr", text))
 
         def _pty_reader_thread(master_fd: int, loop: asyncio.AbstractEventLoop) -> None:
             """Read PTY master in a plain OS thread — completely decoupled from asyncio.
@@ -467,7 +502,7 @@ async def claude_setup_token():
                         stripped = _strip_ansi(text).strip()
                         if stripped:
                             print(f"[setup-token] PTY> {stripped[:200]}")
-                        loop.call_soon_threadsafe(queue.put_nowait, ("stdout", text))
+                        loop.call_soon_threadsafe(_deliver, session_id, ("stdout", text))
             except OSError as e:
                 print(f"[setup-token] PTY read ended: {e}")
             if buf:
@@ -476,13 +511,22 @@ async def claude_setup_token():
                     stripped = _strip_ansi(tail).strip()
                     if stripped:
                         print(f"[setup-token] PTY> {stripped[:200]}")
-                    loop.call_soon_threadsafe(queue.put_nowait, ("stdout", tail))
+                    loop.call_soon_threadsafe(_deliver, session_id, ("stdout", tail))
             print("[setup-token] PTY reader thread exiting")
 
         async def wait_done(proc: asyncio.subprocess.Process) -> None:
             global _last_completed_session_id, _last_completed_ok
             returncode = await proc.wait()
-            print(f"[setup-token] process exited (returncode={returncode})")
+            if returncode < 0:
+                # Negative = killed by a signal, i.e. something OUTSIDE the flow
+                # (server restart via pkill -P, deploy, OOM) — the discriminator
+                # for "error appeared mid-login for no visible reason".
+                print(
+                    f"[setup-token] process exited (returncode={returncode} — "
+                    f"killed by signal {-returncode}; external restart/kill?)"
+                )
+            else:
+                print(f"[setup-token] process exited (returncode={returncode})")
             # Record completion here — wait_done() always runs on process exit,
             # whereas the SSE loop's `done` branch is skipped if the client
             # disconnected exactly at completion. Setting the idempotency flags
@@ -494,7 +538,7 @@ async def claude_setup_token():
                 # interactive TUI checks — without this, terminal `claude` on a
                 # fresh workspace still shows its login screen.
                 await asyncio.to_thread(_mark_onboarding_complete)
-            await queue.put(("done", returncode))
+            _deliver(session_id, ("done", returncode))
             # Also clean up directly in case the SSE stream already closed
             # and nobody is consuming the queue anymore.
             clear_session()
@@ -502,104 +546,169 @@ async def claude_setup_token():
         def clear_session() -> None:
             async def _clear():
                 global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
+                global _setup_token_queue, _setup_token_auth_url, _setup_token_started_at
                 async with _setup_token_lock:
                     if _setup_token_process is process:
                         _setup_token_process = None
                         _setup_token_stdin = None
                         _setup_token_session_id = None
                         _setup_token_ready = None
+                        _setup_token_queue = None
+                        _setup_token_auth_url = None
+                        _setup_token_started_at = None
                         _close_setup_token_pty_master()
                         print("[setup-token] session cleared")
 
             asyncio.create_task(_clear())
 
         try:
-            env = os.environ.copy()
-            # The login must not be steered by ambient token env: the workspace pod
-            # injects ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (real values in
-            # prod, empty in dev), and the CLI weighs env tokens above the native
-            # login. `claude auth login` performs its own OAuth exchange and writes
-            # credentials.json regardless, so strip the token vars for parity with
-            # the chat path's sanitized env.
-            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-                env.pop(key, None)
-            # Pin TERM so the CLI's terminal output is deterministic regardless of
-            # how the API was launched. ttyd sets TERM=xterm-256color (the known-good
-            # path); the Coder startup_script leaves it unset, which changes the
-            # escape sequences the CLI emits. setdefault (not a hardcode) supplies a
-            # value only when the launcher gave none, so an explicitly-set TERM is
-            # still respected.
-            env.setdefault("TERM", "xterm-256color")
-            use_pty = _pty_wanted()
-            print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')})")
-            if use_pty:
-                master_fd, slave_fd = _pty.openpty()
-                try:
-                    _set_pty_winsize(slave_fd)
-                    _disable_pty_echo(slave_fd)  # keep the pasted code out of logs/SSE
-                    process = await asyncio.create_subprocess_exec(
-                        cli_path,
-                        "auth",
-                        "login",
-                        "--claudeai",
-                        stdin=slave_fd,
-                        stdout=slave_fd,
-                        stderr=slave_fd,
-                        env=env,
+            async with _setup_token_lock:
+                if _setup_token_process is not None and _setup_token_process.returncode is None:
+                    # A login is already in flight (dialog re-mount, double
+                    # submit, or a retry after an SSE drop). ATTACH to it
+                    # instead of orphaning it: same session_id, same CLI, same
+                    # PTY — a paste against the original session_id still
+                    # works. Only the consumer queue moves (last stream wins);
+                    # the superseded stream notices and ends with a terminal
+                    # event.
+                    attach = True
+                    process = _setup_token_process
+                    session_id = _setup_token_session_id or session_id
+                    age = time.monotonic() - (_setup_token_started_at or time.monotonic())
+                    print(
+                        f"[setup-token] attaching stream to active session "
+                        f"{session_id} (pid={process.pid}, age={age:.0f}s)"
                     )
-                except BaseException:
-                    for fd in (slave_fd, master_fd):
+                    # Hand over events the previous stream never consumed (its
+                    # client may have dropped between produce and consume) —
+                    # otherwise an unconsumed auth_url or even a `done` would be
+                    # stranded in the abandoned queue.
+                    old_queue = _setup_token_queue
+                    _setup_token_queue = queue
+                    if old_queue is not None:
+                        while True:
+                            try:
+                                queue.put_nowait(old_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+                else:
+                    if _setup_token_process is not None:
+                        # A finished session that was never consumed/cleared —
+                        # take it over cleanly instead of leaking its PTY fd.
+                        print(
+                            f"[setup-token] taking over finished session "
+                            f"{_setup_token_session_id} "
+                            f"(returncode={_setup_token_process.returncode})"
+                        )
+                        _close_setup_token_pty_master()
+                    env = os.environ.copy()
+                    # The login must not be steered by ambient token env: the workspace pod
+                    # injects ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (real values in
+                    # prod, empty in dev), and the CLI weighs env tokens above the native
+                    # login. `claude auth login` performs its own OAuth exchange and writes
+                    # credentials.json regardless, so strip the token vars for parity with
+                    # the chat path's sanitized env.
+                    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+                        env.pop(key, None)
+                    # Pin TERM so the CLI's terminal output is deterministic regardless of
+                    # how the API was launched. ttyd sets TERM=xterm-256color (the known-good
+                    # path); the Coder startup_script leaves it unset, which changes the
+                    # escape sequences the CLI emits. setdefault (not a hardcode) supplies a
+                    # value only when the launcher gave none, so an explicitly-set TERM is
+                    # still respected.
+                    env.setdefault("TERM", "xterm-256color")
+                    use_pty = _pty_wanted()
+                    print(f"[setup-token] spawning process (use_pty={use_pty}, TERM={env.get('TERM')})")
+                    if use_pty:
+                        master_fd, slave_fd = _pty.openpty()
                         try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                    raise
-                os.close(slave_fd)
-                async with _setup_token_lock:
-                    _setup_token_process = process
-                    _setup_token_stdin = None
-                    _setup_token_pty_master = master_fd
-                    _setup_token_session_id = session_id
-                    _setup_token_ready = ready_event
-                _reader_thread = threading.Thread(
-                    target=_pty_reader_thread,
-                    args=(master_fd, asyncio.get_running_loop()),
-                    daemon=True,
-                    name=f"pty-reader-{session_id[:8]}",
-                )
-                _reader_thread.start()
-                asyncio.create_task(wait_done(process))
-            else:
-                process = await asyncio.create_subprocess_exec(
-                    cli_path,
-                    "auth",
-                    "login",
-                    "--claudeai",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    stdin=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-                async with _setup_token_lock:
-                    _setup_token_process = process
-                    _setup_token_stdin = process.stdin
-                    _setup_token_pty_master = None
-                    _setup_token_session_id = session_id
-                    _setup_token_ready = ready_event
-                asyncio.create_task(read_stdout(process))
-                asyncio.create_task(read_stderr(process))
-                asyncio.create_task(wait_done(process))
+                            _set_pty_winsize(slave_fd)
+                            _disable_pty_echo(slave_fd)  # keep the pasted code out of logs/SSE
+                            process = await asyncio.create_subprocess_exec(
+                                cli_path,
+                                "auth",
+                                "login",
+                                "--claudeai",
+                                stdin=slave_fd,
+                                stdout=slave_fd,
+                                stderr=slave_fd,
+                                env=env,
+                            )
+                        except BaseException:
+                            for fd in (slave_fd, master_fd):
+                                try:
+                                    os.close(fd)
+                                except OSError:
+                                    pass
+                            raise
+                        os.close(slave_fd)
+                        _setup_token_process = process
+                        _setup_token_stdin = None
+                        _setup_token_pty_master = master_fd
+                        _setup_token_session_id = session_id
+                        _setup_token_ready = ready_event
+                        _setup_token_queue = queue
+                        _setup_token_auth_url = None
+                        _setup_token_started_at = time.monotonic()
+                        _reader_thread = threading.Thread(
+                            target=_pty_reader_thread,
+                            args=(master_fd, asyncio.get_running_loop()),
+                            daemon=True,
+                            name=f"pty-reader-{session_id[:8]}",
+                        )
+                        _reader_thread.start()
+                        asyncio.create_task(wait_done(process))
+                    else:
+                        process = await asyncio.create_subprocess_exec(
+                            cli_path,
+                            "auth",
+                            "login",
+                            "--claudeai",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            stdin=asyncio.subprocess.PIPE,
+                            env=env,
+                        )
+                        _setup_token_process = process
+                        _setup_token_stdin = process.stdin
+                        _setup_token_pty_master = None
+                        _setup_token_session_id = session_id
+                        _setup_token_ready = ready_event
+                        _setup_token_queue = queue
+                        _setup_token_auth_url = None
+                        _setup_token_started_at = time.monotonic()
+                        asyncio.create_task(read_stdout(process))
+                        asyncio.create_task(read_stderr(process))
+                        asyncio.create_task(wait_done(process))
 
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-            print(f"[setup-token] session started (session_id={session_id})")
+            if attach:
+                cached_url = _setup_token_auth_url
+                if cached_url:
+                    # Replay the authorize URL so the attaching dialog can render
+                    # immediately (still at most one auth_url per stream).
+                    auth_url_sent = True
+                    yield f"data: {json.dumps({'type': 'auth_url', 'url': cached_url})}\n\n"
+                print(f"[setup-token] stream attached (session_id={session_id}, url_replayed={auth_url_sent})")
+            else:
+                print(f"[setup-token] session started (session_id={session_id})")
 
-            _SSE_HEARTBEAT_INTERVAL = 15  # seconds between keepalive comments
-            _deadline = time.monotonic() + CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS
+            # Deadline stays anchored to the ORIGINAL session start, even for
+            # streams that attached later.
+            _deadline = (_setup_token_started_at or time.monotonic()) + CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS
 
             while True:
+                if _setup_token_queue is not queue:
+                    # A newer stream attached (last one wins) or the session was
+                    # cleared while this stream idled. End THIS stream with its
+                    # terminal event — the login session itself is untouched and
+                    # a paste against the same session_id still works.
+                    print(f"[setup-token] stream superseded (session_id={session_id})")
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'This connection was superseded by a newer one; the login session is still active.'})}\n\n"
+                    break
                 try:
                     item = await asyncio.wait_for(
-                        queue.get(), timeout=_SSE_HEARTBEAT_INTERVAL
+                        queue.get(), timeout=SSE_HEARTBEAT_SECONDS
                     )
                 except asyncio.TimeoutError:
                     if time.monotonic() >= _deadline:
@@ -664,6 +773,7 @@ async def claude_setup_token():
                 if kind == "stdout":
                     auth_url = _extract_auth_url(clean_line)
                     if auth_url:
+                        _setup_token_auth_url = auth_url  # cache for attach replay
                         if auth_url_sent:
                             continue  # drop duplicate redraws of the same URL
                         auth_url_sent = True
@@ -685,7 +795,14 @@ async def claude_setup_token():
             # wait_done() when the process exits naturally, or in clear_session().
             if process is not None and process.returncode is not None:
                 clear_session()
-            print("[setup-token] SSE generator finished")
+            rc = process.returncode if process is not None else None
+            # returncode=None here means the client disconnected while the CLI
+            # was still waiting — pair this line with a subsequent "attaching
+            # stream" line to see a frontend that reconnects after a drop.
+            print(
+                f"[setup-token] SSE generator finished (session_id={session_id}, "
+                f"attach={attach}, auth_url_sent={auth_url_sent}, returncode={rc})"
+            )
 
     return StreamingResponse(
         generate(),
