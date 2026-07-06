@@ -468,6 +468,14 @@ async def claude_setup_token():
 
         try:
             env = os.environ.copy()
+            # The login must not be steered by ambient token env: the workspace pod
+            # injects ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (real values in
+            # prod, empty in dev), and the CLI weighs env tokens above the native
+            # login. `claude auth login` performs its own OAuth exchange and writes
+            # credentials.json regardless, so strip the token vars for parity with
+            # the chat path's sanitized env.
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+                env.pop(key, None)
             # Pin TERM so the CLI's terminal output is deterministic regardless of
             # how the API was launched. ttyd sets TERM=xterm-256color (the known-good
             # path); the Coder startup_script leaves it unset, which changes the

@@ -181,6 +181,88 @@ check_claude_cli() {
 }
 
 # ==============================================================
+# Step 5 — Interactive-shell login guard (~/.bashrc on the PVC).
+# The workspace pod env injects ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN
+# into every shell (ttyd, code-server, exec), and the Claude CLI weighs env
+# tokens ABOVE the native login in ~/.claude/.credentials.json. After
+# "Connect Claude" succeeds, a plain `claude` in the terminal would still
+# use the env token and look logged-out. The API's chat path already strips
+# these vars (adapter._subprocess_env); this guard gives interactive shells
+# the same precedence.
+#
+# ~/.bashrc lives on the PVC so the guard survives workspace restarts even
+# though /opt/xo-cowork-api is reset from the image; this script re-runs on
+# every boot and rewrites the managed block, so image updates ship guard
+# updates too. Details: docs/connect-claude-login-issues-investigation.md (S1).
+# ==============================================================
+install_login_guard() {
+    local rc="$HOME/.bashrc"
+    local begin='# >>> xo-cowork claude_code login guard >>>'
+    local end='# <<< xo-cowork claude_code login guard <<<'
+
+    if ! touch "$rc" 2>/dev/null; then
+        log_warn "cannot write $rc — interactive login guard not installed"
+        return 0
+    fi
+
+    if grep -qF "$begin" "$rc"; then
+        if grep -qF "$end" "$rc"; then
+            # Refresh: drop the old managed block so this image's version lands.
+            sed -i '/^# >>> xo-cowork claude_code login guard >>>$/,/^# <<< xo-cowork claude_code login guard <<<$/d' "$rc"
+        else
+            log_warn "login guard block in $rc is missing its end marker — appending a fresh block (bash uses the last definition)"
+        fi
+    fi
+
+    cat >> "$rc" <<'GUARD'
+# >>> xo-cowork claude_code login guard >>>
+# Managed by config/agents/claude_code/setup.sh — rewritten on every
+# xo-cowork-api boot; edits inside this block will be lost.
+# When a native Claude login exists (~/.claude/.credentials.json, written by
+# "Connect Claude"), strip the pod-injected token env vars for `claude`
+# invocations — the CLI would otherwise prefer them over the fresh login.
+# Without a native login, pass the env through so explicit API-key use works.
+claude() {
+    if [ -s "$HOME/.claude/.credentials.json" ]; then
+        env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_OAUTH_API_KEY claude "$@"
+    else
+        command claude "$@"
+    fi
+}
+# <<< xo-cowork claude_code login guard <<<
+GUARD
+    log_success "interactive-shell login guard installed in ~/.bashrc"
+
+    # Login shells (bash -l) read ~/.bash_profile / ~/.profile, NOT ~/.bashrc.
+    # A fresh PVC has no rc files at all, so without this chain a login shell
+    # would never load the guard. Mirror the Ubuntu skeleton: make the login rc
+    # source ~/.bashrc. Managed with the same marker pattern; skipped when the
+    # user's login rc already references .bashrc.
+    local login_rc="$HOME/.profile"
+    [ -f "$HOME/.bash_profile" ] && login_rc="$HOME/.bash_profile"
+    if [ -f "$login_rc" ] && grep -q '\.bashrc' "$login_rc"; then
+        log "login shell rc ($login_rc) already sources ~/.bashrc"
+        return 0
+    fi
+    if ! touch "$login_rc" 2>/dev/null; then
+        log_warn "cannot write $login_rc — login shells will not load the guard"
+        return 0
+    fi
+    if ! grep -qF '# >>> xo-cowork bashrc chain >>>' "$login_rc"; then
+        cat >> "$login_rc" <<'CHAIN'
+# >>> xo-cowork bashrc chain >>>
+# Managed by config/agents/claude_code/setup.sh: login shells source ~/.bashrc
+# (standard Ubuntu skeleton behavior) so PVC-managed shell config loads there too.
+if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+# <<< xo-cowork bashrc chain <<<
+CHAIN
+        log_success "login-shell → ~/.bashrc chain installed in $login_rc"
+    fi
+}
+
+# ==============================================================
 # Main
 # ==============================================================
 log "Starting claude_code agent bootstrap"
@@ -188,5 +270,6 @@ install_apt_prereqs
 install_node
 write_env_file
 check_claude_cli
+install_login_guard
 log_success "claude_code agent bootstrap complete"
 exit 0
