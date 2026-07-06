@@ -129,6 +129,48 @@ def _resolve_claude_cli_path() -> str:
 
 CLAUDE_SETUP_TOKEN_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_SETUP_TOKEN_TIMEOUT", "300"))
 
+
+def _mark_onboarding_complete() -> None:
+    """Ensure ``~/.claude.json`` records ``hasCompletedOnboarding: true``.
+
+    The interactive CLI gates its first-run UI on this onboarding state, not on
+    credentials: with a valid ``~/.claude/.credentials.json`` but no completed
+    onboarding, the TUI still walks theme selection and a "Select login method"
+    screen (verified on v2.1.201 with isolated homes), so on a fresh workspace a
+    terminal ``claude`` looks logged-out right after a successful Connect
+    Claude. ``claude auth login`` writes only the credentials file, so we merge
+    the flag here on login success. Existing keys are preserved; an unreadable
+    file is left untouched (the CLI owns this file — never clobber it).
+    """
+    path = os.path.expanduser("~/.claude.json")
+    data: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[setup-token] ~/.claude.json unreadable ({e}); leaving it untouched")
+        return
+    if data.get("hasCompletedOnboarding") is True:
+        return
+    data["hasCompletedOnboarding"] = True
+    tmp_path = f"{path}.setup-token.tmp"
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+        print("[setup-token] marked onboarding complete in ~/.claude.json")
+    except OSError as e:
+        print(f"[setup-token] could not update ~/.claude.json: {e}")
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
 _setup_token_lock = asyncio.Lock()
 _setup_token_process: Optional[asyncio.subprocess.Process] = None
 _setup_token_stdin: Optional[asyncio.StreamWriter] = None
@@ -447,6 +489,11 @@ async def claude_setup_token():
             # here keeps a callback retry after such a disconnect a 200, not a 409.
             _last_completed_session_id = session_id
             _last_completed_ok = returncode == 0
+            if returncode == 0:
+                # The CLI wrote credentials but not the onboarding state the
+                # interactive TUI checks — without this, terminal `claude` on a
+                # fresh workspace still shows its login screen.
+                await asyncio.to_thread(_mark_onboarding_complete)
             await queue.put(("done", returncode))
             # Also clean up directly in case the SSE stream already closed
             # and nobody is consuming the queue anymore.
