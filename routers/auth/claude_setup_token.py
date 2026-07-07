@@ -451,6 +451,7 @@ async def claude_setup_token():
         process: Optional[asyncio.subprocess.Process] = None
         attach = False
         auth_url_sent = False
+        compat_success_sent = False  # legacy success shim emitted early (see below)
         last_failure_line: Optional[str] = None  # most recent "Login failed: …" line
         session_id = str(uuid.uuid4())
         ready_event = asyncio.Event()
@@ -747,7 +748,10 @@ async def claude_setup_token():
                         # recognized line as a normal stdout event so the unchanged
                         # frontend goes green; `done` below stays the real signal
                         # for any client that reads it.
-                        yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
+                        # Fallback only: if the success line was seen mid-stream we
+                        # already emitted this (earlier = faster); don't duplicate.
+                        if not compat_success_sent:
+                            yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
                         yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
                     else:
                         err_msg = last_failure_line or "Login failed. Please try again."
@@ -770,6 +774,18 @@ async def claude_setup_token():
                     # the session alive (do NOT kill/clear). The line itself streams
                     # to the UI below as a normal stdout/stderr event.
                     print("[setup-token] CLI reported invalid code (retryable; session kept alive)")
+                if not compat_success_sent and "Login successful" in stripped:
+                    # `claude auth login` prints "Login successful." right after the
+                    # OAuth exchange, a beat BEFORE the process exits. The deployed
+                    # frontend only recognizes the legacy compat string, so without
+                    # this the dialog waits for the exit-0 shim below — ~100–500 ms
+                    # of dead time. Emit the compat `stdout` event now; the raw line
+                    # still forwards normally below, and the exit-0 branch keeps the
+                    # emission as a fallback (deduped via this flag) in case a future
+                    # CLI reword makes this substring miss.
+                    compat_success_sent = True
+                    print("[setup-token] success line observed (early compat shim)")
+                    yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
                 if kind == "stdout":
                     auth_url = _extract_auth_url(clean_line)
                     if auth_url:
