@@ -1,14 +1,14 @@
 """
 Connect Claude — drive ``claude auth login --claudeai`` and stream its output via SSE.
 
-The endpoint paths (``/claude/setup-token`` and ``/claude/setup-token/callback``)
+The endpoint paths (``/connect/claude-code`` and ``/connect/claude-code/callback``)
 and the SSE event shapes are unchanged for frontend backward-compatibility; only
 the backend mechanism changed. We no longer scrape or persist any token: the CLI
 writes its own self-refreshing ``~/.claude/.credentials.json`` on success, and the
 authoritative "connected" check stays ``claude auth status --json`` → ``loggedIn``.
 
 Flow:
-  POST /claude/setup-token (SSE)
+  POST /connect/claude-code (SSE)
     1. Spawn ``claude auth login --claudeai`` under a PTY. Its manual-code prompt
        reads stdin via readline; a plain stdin pipe was ignored in practice, so we
        drive a PTY master.
@@ -16,7 +16,7 @@ Flow:
        we extract it and emit it as the ``auth_url`` event.
     3. The user opens the URL, authorizes, and Claude's page displays a
        ``code#state`` blob to paste.
-  POST /claude/setup-token/callback
+  POST /connect/claude-code/callback
     4. Normalize the pasted value to ``code#state`` and write it (plain bytes + CR)
        to the PTY master. An "Invalid code…" line is *retryable* — the CLI keeps
        waiting for another line, so we keep the session alive for another paste.
@@ -185,7 +185,7 @@ _setup_token_ready: Optional[asyncio.Event] = None
 # instead of a 409 the UI would render as a failure.
 _last_completed_session_id: Optional[str] = None
 _last_completed_ok: bool = False
-# The CURRENT SSE consumer's queue. A second POST /claude/setup-token while a
+# The CURRENT SSE consumer's queue. A second POST /connect/claude-code while a
 # login is in flight ATTACHES to the session (same session_id/CLI/PTY) instead
 # of orphaning it: it swaps this queue (last stream wins) and the superseded
 # stream ends itself with a terminal event. Producers route through _deliver().
@@ -273,7 +273,7 @@ def _close_setup_token_pty_master() -> None:
             pass
 
 
-router = APIRouter(prefix="/claude", tags=["claude-setup-token"])
+router = APIRouter(prefix="/connect", tags=["claude-setup-token"])
 
 
 class ClaudeSetupTokenCallbackBody(BaseModel):
@@ -316,7 +316,7 @@ def _normalize_callback_code(raw_value: str) -> str:
     return value
 
 
-@router.post("/setup-token/callback")
+@router.post("/claude-code/callback")
 async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
     """
     Send the pasted OAuth code to the running ``claude auth login`` process.
@@ -349,7 +349,7 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
         )
         raise HTTPException(
             status_code=409,
-            detail="No setup-token session active. Start one with POST /claude/setup-token first.",
+            detail="No setup-token session active. Start one with POST /connect/claude-code first.",
         )
 
     if body.session_id != _setup_token_session_id:
@@ -427,14 +427,14 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
             raise HTTPException(status_code=410, detail=f"Process stdin closed: {e}")
 
 
-@router.post("/setup-token")
+@router.post("/claude-code")
 async def claude_setup_token():
     """
     Run ``claude auth login --claudeai`` and stream stdout/stderr via SSE.
 
     The CLI prints an authorize URL; the frontend shows it so the user can open it
     and authorize. Claude's page then shows a ``code#state`` string — the user
-    copies it and the frontend posts it to POST /claude/setup-token/callback so we
+    copies it and the frontend posts it to POST /connect/claude-code/callback so we
     can complete the login. On success the CLI writes its own self-refreshing
     ``~/.claude/.credentials.json``; we persist nothing.
 

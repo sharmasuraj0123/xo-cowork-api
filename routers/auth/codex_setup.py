@@ -2,7 +2,7 @@
 OpenAI Codex CLI device-code login.
 
 Flow:
-  POST /codex/setup  -> SSE stream
+  POST /connect/codex  -> SSE stream
     1. Check if `codex` CLI (@openai/codex) is installed.
        If not, run `npm install -g @openai/codex` and stream install progress.
     2. Run `codex login --device-auth` via PTY.
@@ -495,7 +495,7 @@ def _ensure_node_on_path() -> None:
     Why: when the FastAPI process is launched outside an interactive shell
     (systemd, supervisor, coder-agent), nvm's shim never runs, so PATH lacks
     `~/.nvm/versions/node/<ver>/bin` and `shutil.which("npm")` returns None.
-    The /codex/setup endpoint then bails with "npm not found" before any
+    The /connect/codex endpoint then bails with "npm not found" before any
     install attempt can happen.
 
     Order of search: existing PATH → ~/.nvm/versions/node/<latest>/bin →
@@ -553,10 +553,10 @@ def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 120) -> None:
         pass
 
 
-router = APIRouter(prefix="/codex", tags=["codex-setup"])
+router = APIRouter(prefix="/connect", tags=["codex-setup"])
 
 
-@router.post("/setup")
+@router.post("/codex")
 async def codex_setup():
     """
     Run `codex login --device-auth` and stream its output via SSE.
