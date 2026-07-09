@@ -273,7 +273,10 @@ def _close_setup_token_pty_master() -> None:
             pass
 
 
-router = APIRouter(prefix="/connect", tags=["claude-setup-token"])
+# Canonical routes are /connect/*. The pre-rename /claude/setup-token* paths are
+# kept as hidden legacy aliases (include_in_schema=False) so an un-migrated
+# xo-swarm frontend keeps working — remove them once all clients call /connect/*.
+router = APIRouter(tags=["claude-setup-token"])
 
 
 class ClaudeSetupTokenCallbackBody(BaseModel):
@@ -316,7 +319,8 @@ def _normalize_callback_code(raw_value: str) -> str:
     return value
 
 
-@router.post("/claude-code/callback")
+@router.post("/connect/claude-code/callback")
+@router.post("/claude/setup-token/callback", include_in_schema=False)  # legacy alias
 async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
     """
     Send the pasted OAuth code to the running ``claude auth login`` process.
@@ -427,7 +431,8 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
             raise HTTPException(status_code=410, detail=f"Process stdin closed: {e}")
 
 
-@router.post("/claude-code")
+@router.post("/connect/claude-code")
+@router.post("/claude/setup-token", include_in_schema=False)  # legacy alias
 async def claude_setup_token():
     """
     Run ``claude auth login --claudeai`` and stream stdout/stderr via SSE.

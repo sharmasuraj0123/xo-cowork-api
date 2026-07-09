@@ -553,10 +553,14 @@ def _set_pty_winsize(slave_fd: int, rows: int = 24, cols: int = 120) -> None:
         pass
 
 
-router = APIRouter(prefix="/connect", tags=["codex-setup"])
+# Canonical route is /connect/codex. The pre-rename /codex/setup path is kept as
+# a hidden legacy alias (include_in_schema=False) so an un-migrated xo-swarm
+# frontend keeps working — remove it once all clients call /connect/codex.
+router = APIRouter(tags=["codex-setup"])
 
 
-@router.post("/codex")
+@router.post("/connect/codex")
+@router.post("/codex/setup", include_in_schema=False)  # legacy alias
 async def codex_setup():
     """
     Run `codex login --device-auth` and stream its output via SSE.
