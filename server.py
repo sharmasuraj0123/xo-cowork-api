@@ -711,6 +711,9 @@ async def gateway_restart():
 async def app_restart():
     """Restart the XO Cowork API app process via cowork-api.sh."""
     import subprocess
+    # Timestamped marker: a restart kills every in-flight subprocess (e.g. a
+    # pending auth login) — correlate this line with mid-flow failures.
+    print(f"[app] restart requested at {datetime.datetime.now().isoformat()} — killing process tree")
     script = (Path(__file__).resolve().parent / "cowork-api.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="App restart script not found")

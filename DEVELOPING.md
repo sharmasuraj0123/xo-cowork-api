@@ -248,7 +248,7 @@ The agent-modular refactor was finished and tidied:
   `claude_code_client.py` / `codex_code_client.py`).
 - **De-branched shared code** — `skill_installer.py` now resolves install
   targets from each manifest's `home_dir` (was hardcoded `~/.claude`/`~/.openclaw`);
-  the `claude/setup-token` and `codex/setup` auth routers write the token to the
+  the `connect/claude-code` and `connect/codex` auth routers write the token to the
   active agent's `env_file` (was hardcoded `~/.openclaw/.env`). Codex's
   openclaw-gateway config writes are intentionally left (old but needed; schema
   is openclaw-specific) and allowlisted.

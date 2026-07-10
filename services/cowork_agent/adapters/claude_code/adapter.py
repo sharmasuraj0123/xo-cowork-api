@@ -272,22 +272,19 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             if (env.get(key) or "").startswith("sk-ant-oat"):
                 env.pop(key, None)
         # Auth precedence for the spawned `claude`:
-        #   1. A native login (~/.claude/.credentials.json) — the CLI auto-refreshes
+        #   1. A native login (~/.claude/.credentials.json) — written by the
+        #      "Connect Claude" (`claude auth login`) flow. The CLI auto-refreshes
         #      it via its refresh token, so it is the durable, self-healing source.
-        #   2. CLAUDE_CODE_OAUTH_TOKEN — the static token captured by the
-        #      "Connect to Claude" (setup-token) flow and persisted to the agent's
-        #      env_file (~/.claude/.env). It cannot self-refresh.
-        # The running process loses the token across restarts: the project .env
-        # stores it empty and the `claude` CLI never reads the agent env_file. So
-        # when no token is present in the process env AND there is no usable native
-        # login, re-inject it from the env_file. We inject *only* when a login is
-        # absent so a stale token can never shadow a healthy, refreshing
-        # credentials.json (the CLI prefers credentials.json, but we don't rely on
-        # that undocumented precedence).
-        if not env.get("CLAUDE_CODE_OAUTH_TOKEN") and not self._has_usable_native_login():
-            token = self._oauth_token_from_agent_env_file()
-            if token:
-                env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        #   2. An explicit ANTHROPIC_API_KEY — a deliberate API-billing alternative.
+        # Both ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN outrank the subscription
+        # login in the CLI's precedence chain, so when a usable native login is
+        # present we drop them from the subprocess env — otherwise a leftover/fanned
+        # token (prod fans the API key into CLAUDE_CODE_OAUTH_TOKEN) would override
+        # the fresh login and silently bill the API or fail auth. With no native
+        # login we leave these intact so explicit API-key mode still works.
+        if self._has_usable_native_login():
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+                env.pop(key, None)
         return env
 
     def _agent_home_dir(self) -> Path:
@@ -322,19 +319,6 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             elif access and expires_at is None:
                 return True
         return False
-
-    def _oauth_token_from_agent_env_file(self) -> str | None:
-        """Read ``CLAUDE_CODE_OAUTH_TOKEN`` from the agent env_file (``~/.claude/.env``),
-        where the Connect-to-Claude flow persists it. Returns the value only if it
-        looks like an OAuth token (``sk-ant-oat``)."""
-        env_file = self.commands.get("env_file")
-        if not env_file:
-            return None
-        from services.cowork_agent.providers_status_lib import parse_env_file
-
-        values = parse_env_file(Path(os.path.expanduser(env_file)))
-        token = (values.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
-        return token if token.startswith("sk-ant-oat") else None
 
     # ── Convenience wrappers ───────────────────────────────────────────────────
 
