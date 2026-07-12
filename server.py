@@ -616,6 +616,11 @@ from routers.cowork_agent import all_routers as cowork_agent_routers
 for _r in cowork_agent_routers:
     app.include_router(_r)
 
+# Space: local workspace knowledge graph (static UI + server control widget).
+from routers.space import router as space_router, mount_space
+app.include_router(space_router)
+mount_space(app)
+
 # =============================================================================
 # Endpoints
 # =============================================================================
