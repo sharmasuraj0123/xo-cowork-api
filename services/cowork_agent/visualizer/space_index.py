@@ -50,6 +50,18 @@ MAX_LEAVES_PER_PROJECT = 400          # per-project output bound (newest-first)
 MAX_TOTAL_LEAVES = 1500               # whole-graph output bound (browser must render it)
 MAX_FILES_SCANNED_PER_PROJECT = 2000  # traversal bound (walk stops here)
 BUILD_DEADLINE_S = 10.0               # whole-build wall-clock bound
+MAX_LEAVES_PER_GROUP = 40             # bigger dirs split into per-subdir groups
+_MAX_GROUP_SPLIT_DEPTH = 4            # deepest path segment the split recurses to
+MAX_TIES = 60                         # cross-tie output bound
+
+# Cross-tie derivation bounds. Ties are derived facts, never editorial:
+# files that share commits, docs that name a file's path, test_x <-> x.
+_TIE_MIN_COCHANGES = 3                # pairs must share >= this many commits
+_TIE_MAX_FILES_PER_COMMIT = 20        # bulk commits are noise for co-change
+_TIE_MAX_COMMITS = 500                # most recent commits considered
+_TIE_MAX_DOCS_PER_PROJECT = 30        # docs scanned for path references
+_DOC_SCAN_BYTES = 65536               # max bytes read per doc
+_DOC_SCAN_EXT = {".md", ".rst", ".txt"}
 
 
 def _is_hidden(name: str) -> bool:
@@ -93,40 +105,53 @@ def _iter_files_pruned(base: Path):
 _GIT_TIMEOUT_S = 5
 
 
-def _git_facts(pdir: Path) -> tuple[dict[str, str], Optional[str]]:
-    """First-added date per file + the project's first-commit date, from
-    ``git log``. Any failure (not a repo, no git binary, no commits,
-    timeout) → empty facts, and callers fall back to mtime dates.
+def _git_facts(pdir: Path) -> tuple[dict[str, str], Optional[str], list[list[str]]]:
+    """Per-file first-appearance date, the project's first-commit date, and
+    each commit's file list (oldest first), from one ``git log``. Any failure
+    (not a repo, no git binary, no commits, timeout) → empty facts, and
+    callers fall back to mtime dates.
 
-    ``%x01`` makes git emit a control byte prefix on each commit-date line
-    so file-path lines can never be confused with dates."""
+    The full history (no ``--diff-filter``) serves two consumers at once: a
+    path's first appearance is its add date, and the per-commit file lists
+    feed co-change ties. ``%x01`` makes git emit a control byte prefix on
+    each commit-date line so file-path lines can never be confused with
+    dates."""
     try:
         out = subprocess.run(
             [
                 "git", "-C", str(pdir), "log",
-                "--reverse", "--date=short", "--diff-filter=A",
+                "--reverse", "--date=short",
                 "--pretty=format:%x01%ad", "--name-only",
             ],
             capture_output=True, text=True, timeout=_GIT_TIMEOUT_S,
         )
     except Exception:
-        return {}, None
+        return {}, None, []
     if out.returncode != 0:
-        return {}, None
+        return {}, None, []
 
     created: dict[str, str] = {}
     first_commit: Optional[str] = None
     current: Optional[str] = None
+    commits: list[list[str]] = []
+    files: list[str] = []
     for line in out.stdout.splitlines():
         if line.startswith("\x01"):
+            if current is not None:
+                commits.append(files)
             current = line[1:].strip()
+            files = []
             if first_commit is None:
                 first_commit = current
         elif line.strip() and current:
-            # oldest-first (--reverse): setdefault keeps the first add,
-            # surviving later delete/re-add churn.
-            created.setdefault(line.strip(), current)
-    return created, first_commit
+            rel = line.strip()
+            # oldest-first (--reverse): setdefault keeps the first
+            # appearance, surviving later delete/re-add churn.
+            created.setdefault(rel, current)
+            files.append(rel)
+    if current is not None:
+        commits.append(files)
+    return created, first_commit, commits
 
 
 def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], list[dict]]:
@@ -169,21 +194,48 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
     for d in subdirs:
         if scanned >= MAX_FILES_SCANNED_PER_PROJECT:
             break
-        gid = f"g_{pid}_{d.name}"
-        count = 0
+        collected: list[Path] = []
         for f in _iter_files_pruned(d):
             if scanned >= MAX_FILES_SCANNED_PER_PROJECT:
                 print(f"space_index: {pid}: scan budget hit "
                       f"({MAX_FILES_SCANNED_PER_PROJECT}); rest of project skipped")
                 break
-            add_leaf(gid, f.relative_to(pdir).as_posix(), f)
-            count += 1
+            collected.append(f)
             scanned += 1
-        if count:
+        if not collected:
+            continue
+
+        # A dir over the group cap splits into one group per subdir,
+        # recursing (bounded) while a bucket still exceeds the cap —
+        # balanced clusters render as constellations instead of one dense
+        # ball, and keep the force sim far from its stiffness limit. Files
+        # sitting directly at a split level stay in that level's group.
+        def emit_group(files: list[Path], depth: int, gid: str, label: str) -> None:
+            if len(files) > MAX_LEAVES_PER_GROUP and depth < _MAX_GROUP_SPLIT_DEPTH:
+                buckets: dict = {}
+                for f in files:
+                    parts = f.relative_to(pdir).parts
+                    seg = parts[depth] if len(parts) > depth + 1 else None
+                    buckets.setdefault(seg, []).append(f)
+                if set(buckets) != {None}:
+                    for seg in sorted(buckets, key=lambda s: (s is not None, s or "")):
+                        if seg is None:
+                            emit_final(buckets[None], gid, label)
+                        else:
+                            emit_group(buckets[seg], depth + 1,
+                                       f"{gid}__{seg}", f"{label} · {seg}")
+                    return
+            emit_final(files, gid, label)
+
+        def emit_final(files: list[Path], gid: str, label: str) -> None:
+            for f in files:
+                add_leaf(gid, f.relative_to(pdir).as_posix(), f)
             groups.append({
                 "id": gid, "cat": cat,
-                "label": d.name, "blurb": f"{count} files",
+                "label": label, "blurb": f"{len(files)} files",
             })
+
+        emit_group(collected, 1, f"g_{pid}_{d.name}", d.name)
 
     if len(leaves) > MAX_LEAVES_PER_PROJECT:
         dropped = len(leaves) - MAX_LEAVES_PER_PROJECT
@@ -192,6 +244,81 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
         print(f"space_index: {pid}: dropped {dropped} oldest leaves (cap {MAX_LEAVES_PER_PROJECT})")
 
     return groups, leaves
+
+
+def _build_ties(leaves: list[dict], commits_by_pid: dict[str, list[list[str]]]) -> list[dict]:
+    """Derived cross-ties between kept leaves, strongest first, capped.
+
+    Three honest derivations (no editorial content): files that repeatedly
+    share commits (git co-change), docs whose text names another file's
+    relative path, and test_x <-> x name pairing. Runs after every leaf cap
+    so a tie can never reference a dropped node — v3 crashes on unknown
+    edge endpoints."""
+    rel_to_id: dict[str, dict[str, str]] = {}
+    for leaf in leaves:
+        pid, rel = leaf["id"].split(":", 1)
+        rel_to_id.setdefault(pid, {})[rel] = leaf["id"]
+
+    seen: set = set()
+    cands: list[tuple[int, str, str, str]] = []  # (strength, s, t, label)
+
+    def add(strength: int, s: str, t: str, label: str) -> None:
+        key = tuple(sorted((s, t)))
+        if key not in seen:
+            seen.add(key)
+            cands.append((strength, s, t, label))
+
+    # 1. git co-change: pairs sharing >= _TIE_MIN_COCHANGES recent commits.
+    for pid, commits in commits_by_pid.items():
+        rels = rel_to_id.get(pid)
+        if not rels:
+            continue
+        counts: dict = {}
+        for files in commits[-_TIE_MAX_COMMITS:]:
+            if len(files) > _TIE_MAX_FILES_PER_COMMIT:
+                continue
+            kept = sorted({f for f in files if f in rels})
+            for i in range(len(kept)):
+                for j in range(i + 1, len(kept)):
+                    pair = (kept[i], kept[j])
+                    counts[pair] = counts.get(pair, 0) + 1
+        for (a, b), n in counts.items():
+            if n >= _TIE_MIN_COCHANGES:
+                add(n, rels[a], rels[b], f"changed together ×{n}")
+
+    # 2. docs referencing a file's relative path.
+    for pid, rels in rel_to_id.items():
+        scanned_docs = 0
+        for rel, lid in rels.items():
+            if Path(rel).suffix.lower() not in _DOC_SCAN_EXT:
+                continue
+            if scanned_docs >= _TIE_MAX_DOCS_PER_PROJECT:
+                break
+            scanned_docs += 1
+            try:
+                with open(project_dir(pid) / rel, encoding="utf-8", errors="ignore") as fp:
+                    text = fp.read(_DOC_SCAN_BYTES)
+            except OSError:
+                continue
+            for other_rel, oid in rels.items():
+                if oid != lid and other_rel in text:
+                    add(2, lid, oid, "references")
+
+    # 3. test_x <-> x pairing by filename.
+    for pid, rels in rel_to_id.items():
+        by_name: dict = {}
+        for rel, lid in rels.items():
+            by_name.setdefault(Path(rel).name, []).append(lid)
+        for rel, lid in rels.items():
+            name = Path(rel).name
+            if name.startswith("test_"):
+                for oid in by_name.get(name[5:], []):
+                    add(2, lid, oid, "tests")
+
+    cands.sort(key=lambda c: (-c[0], c[1], c[2]))
+    if len(cands) > MAX_TIES:
+        print(f"space_index: kept strongest {MAX_TIES} of {len(cands)} derived ties")
+    return [{"s": s, "t": t, "label": label} for _, s, t, label in cands[:MAX_TIES]]
 
 
 def build_space_data() -> dict:
@@ -204,6 +331,7 @@ def build_space_data() -> dict:
     groups: list[dict] = []
     leaves: list[dict] = []
     milestones: list[dict] = []
+    commits_by_pid: dict[str, list[list[str]]] = {}
 
     n = max(len(projects), 1)
     deadline = time.monotonic() + BUILD_DEADLINE_S
@@ -215,7 +343,7 @@ def build_space_data() -> dict:
         pid = str(meta["name"])
         cat = f"p_{pid}"
         display = str(meta.get("display_name") or pid)
-        created_dates, first_commit = _git_facts(project_dir(pid))
+        created_dates, first_commit, p_commits = _git_facts(project_dir(pid))
 
         try:
             p_groups, p_leaves = _walk_project(pid, cat, created_dates)
@@ -234,6 +362,7 @@ def build_space_data() -> dict:
         })
         groups.extend(p_groups)
         leaves.extend(p_leaves)
+        commits_by_pid[pid] = p_commits
         if first_commit:
             milestones.append({"d": first_commit, "t": f"{display} first commit"})
 
@@ -245,6 +374,8 @@ def build_space_data() -> dict:
         groups = [g for g in groups if g["id"] in kept_groups]
         print(f"space_index: dropped {dropped} oldest leaves workspace-wide "
               f"(cap {MAX_TOTAL_LEAVES}); empty groups pruned")
+
+    ties = _build_ties(leaves, commits_by_pid)
 
     today = date.today()
     if leaves:
@@ -273,7 +404,7 @@ def build_space_data() -> dict:
         "hubs": hubs,
         "groups": groups,
         "leaves": leaves,
-        "ties": [],
+        "ties": ties,
         "milestones": milestones,
     }
 

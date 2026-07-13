@@ -49,7 +49,7 @@ spring stiffness makes the original explicit-Euler sim diverge (positions hit
   "groups":     [ { "id", "cat", "label", "blurb" } ],          // one per top-level dir
   "leaves":     [ { "id", "group", "shape", "tag", "label",
                     "date", "blurb", "path" } ],                // one per file
-  "ties":       [ { "s", "t", "label" } ],      // cross-links; [] in v1
+  "ties":       [ { "s", "t", "label" } ],      // derived cross-links (see below)
   "milestones": [ { "d": "YYYY-MM-DD", "t": "caption" } ]       // first commits
 }
 ```
@@ -58,3 +58,8 @@ Shapes are semantic: `disc` = code, `ring` = document, `diamond` = everything
 else. Leaf `date` is the git first-added date when the project is a repo,
 else file mtime. Tree edges (leaf → cluster → project → root) are derived by
 the UI; only cross-ties are listed.
+
+Ties are derived facts, never editorial: files that repeatedly share commits
+("changed together ×N", from the same git log that dates the leaves), docs
+whose text names another file's relative path ("references"), and
+`test_x` ↔ `x` filename pairs ("tests"). Strongest first, capped at 60.

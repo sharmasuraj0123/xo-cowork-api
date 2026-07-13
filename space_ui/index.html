@@ -616,10 +616,18 @@ const HUB_ANGLE=DATA.hubAngles;
 const HUB_R=520;
 const root=byId.get('xo');root.fx=0;root.fy=0;
 HUBS.forEach(h=>{h.ax=Math.cos(HUB_ANGLE[h.cat])*HUB_R;h.ay=Math.sin(HUB_ANGLE[h.cat])*HUB_R;h.x=h.ax;h.y=h.ay;});
+/* Each project owns an equal sector of the circle; its cluster fan must stay
+   inside it. A fixed .5 rad step wraps the whole circle once a project has
+   ~13+ clusters (generated data easily does), seeding clusters in other
+   projects' territory — and the hub spring constrains distance, not angle,
+   so they never migrate home. Radius staggers to relieve arc crowding. */
+const SECTOR=Math.PI*2/Math.max(1,Object.keys(HUB_ANGLE).length);
 GROUPS.forEach(g=>{
   const sib=GROUPS.filter(x=>x.cat===g.cat),k=sib.indexOf(g),m=sib.length;
-  const a=HUB_ANGLE[g.cat]+(k-(m-1)/2)*.5;
-  g.x=Math.cos(a)*(HUB_R+170);g.y=Math.sin(a)*(HUB_R+170);
+  const step=Math.min(.5,SECTOR*.85/Math.max(1,m));
+  const a=HUB_ANGLE[g.cat]+(k-(m-1)/2)*step;
+  const r=HUB_R+170+(k%3)*70;
+  g.x=Math.cos(a)*r;g.y=Math.sin(a)*r;
 });
 LEAVES.forEach((l,i)=>{
   const g=byId.get(l.group);
@@ -682,7 +690,11 @@ function simTick(){
     if(_sp>60){n.vx*=60/_sp;n.vy*=60/_sp;}
     n.x+=n.vx;n.y+=n.vy;
   }
-  if(simAlpha>.02)simAlpha*=.9885;
+  /* Decay to a full stop instead of idling at .02 forever — a perpetual 2%
+     simmer keeps every force (incl. the centering bias) acting for eternity,
+     so the layout jiggles when zoomed and whole projects drift toward the
+     root. Interactions reheat() as before. */
+  if(simAlpha>.003)simAlpha*=.9885;else simAlpha=0;
 }
 const reheat=a=>{simAlpha=Math.max(simAlpha,a);};
 
@@ -906,6 +918,10 @@ let pulseN=null;
 /* ============================== GRAPH INTERACTION ============================== */
 let drag=null,pan=false,downX=0,downY=0,moved=false,lastX=0,lastY=0;
 const toWorld=(mx,my)=>({x:(mx-GW/2)/cam.k+cam.x,y:(my-GH/2)/cam.k+cam.y});
+/* Pointer events give viewport coordinates, but drawing/toWorld are in
+   canvas-local space and the canvas sits below the header — feed clientX/Y
+   in directly and every hit test lands one header-height off. */
+const evXY=e=>{const r=gcv.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];};
 function pick(mx,my){
   const w=toWorld(mx,my);
   let best=null,bd=1e9;
@@ -920,7 +936,7 @@ gcv.addEventListener('pointerdown',e=>{
   gcv.setPointerCapture(e.pointerId);
   dismissIntro();
   downX=lastX=e.clientX;downY=lastY=e.clientY;moved=false;
-  const n=pick(e.clientX,e.clientY);
+  const n=pick(...evXY(e));
   if(n&&n.type!=='root'){drag=n;n.fx=n.x;n.fy=n.y;}
   else pan=true;
   camAnim=null;
@@ -928,7 +944,7 @@ gcv.addEventListener('pointerdown',e=>{
 gcv.addEventListener('pointermove',e=>{
   if(drag){
     if(Math.hypot(e.clientX-downX,e.clientY-downY)>4)moved=true;
-    const w=toWorld(e.clientX,e.clientY);
+    const w=toWorld(...evXY(e));
     drag.fx=w.x;drag.fy=w.y;reheat(.3);
     hideHC();
   }else if(pan){
@@ -937,7 +953,7 @@ gcv.addEventListener('pointermove',e=>{
     lastX=e.clientX;lastY=e.clientY;
     hideHC();
   }else{
-    const n=pick(e.clientX,e.clientY);
+    const n=pick(...evXY(e));
     hoverId=n?n.id:null;
     gcv.style.cursor=n?'pointer':'default';
     if(n)showHC(n,e.clientX,e.clientY);else hideHC();
@@ -952,7 +968,7 @@ gcv.addEventListener('pointerup',e=>{
   }
   pan=false;
   if(moved)return;
-  const n=pick(e.clientX,e.clientY);
+  const n=pick(...evXY(e));
   const now=performance.now();
   if(now-lastUp<300){
     clearTimeout(clickT);clickT=null;lastUp=0;
@@ -1021,9 +1037,10 @@ gcv.addEventListener('wheel',e=>{
   e.preventDefault();dismissIntro();camAnim=null;
   const f=Math.exp(-e.deltaY*.0016);
   const nk=Math.max(.22,Math.min(5,cam.k*f));
-  const w=toWorld(e.clientX,e.clientY);
-  cam.x=w.x-(e.clientX-GW/2)/nk;
-  cam.y=w.y-(e.clientY-GH/2)/nk;
+  const [mx,my]=evXY(e);
+  const w=toWorld(mx,my);
+  cam.x=w.x-(mx-GW/2)/nk;
+  cam.y=w.y-(my-GH/2)/nk;
   cam.k=nk;
 },{passive:false});
 document.getElementById('crumb-clear').addEventListener('click',()=>{clearFocus();clearPath();});
