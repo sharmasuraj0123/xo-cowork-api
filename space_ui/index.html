@@ -803,7 +803,8 @@ function rList(el){
   const rows=SD.sessions.slice();
   const kf=s=>sortK==='tokens'?stok(s):sortK==='project'?s.project:(s[sortK]??0);
   rows.sort((a,b)=>{const x=kf(a),y=kf(b);return(x<y?-1:x>y?1:0)*sortD;});
-  el.innerHTML='<div class="scard"><div class="eyebrow2">'+rows.length+' sessions (all time)</div>'
+  const cap=SD.totals.sessions>rows.length?'newest '+rows.length+' of '+SD.totals.sessions+' sessions':rows.length+' sessions (all time)';
+  el.innerHTML='<div class="scard"><div class="eyebrow2">'+cap+'</div>'
     +'<table class="stbl"><tr>'+COLS.map(([k,l])=>'<th data-k="'+k+'">'+l+(k===sortK?(sortD<0?' ↓':' ↑'):'')+'</th>').join('')+'<th class="num">Sub-agents</th></tr>'
     +rows.map(s=>'<tr class="rowlink" data-sid="'+esc(s.id)+'">'
       +'<td style="white-space:nowrap">'+dtfmt(s.started_at)+'</td><td><b>'+esc(s.project)+'</b></td>'

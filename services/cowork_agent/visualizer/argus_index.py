@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Bounds — each constant is an assumption made explicit:
+MAX_SESSIONS = 500          # newest sessions shipped; the API runs in every
+                            # user's workspace, so payload and table size must
+                            # not grow without bound as history accumulates
 MAX_TOOLS_PER_SESSION = 10  # per-session tool rollup rows (detail card height)
 _BUSY_TIMEOUT_MS = 2000     # Argus writes while we read; brief waits ok
 _EXPECTED_SCHEMA = 6        # argus.db app_meta.schema_version this targets
@@ -145,8 +148,6 @@ def build_argus_stats(db_path: Path) -> dict:
             {"day": r["day"], "session_id": parent, "tokens": 0, "cost": 0.0})
         cur["tokens"] += r["tokens"]
         cur["cost"] += r["cost"]
-    daily_sessions = sorted(merged.values(),
-                            key=lambda r: (r["day"], r["session_id"]))
 
     parents = [s for s in raw if "/" not in s["id"]]
     parents.sort(key=lambda s: s["started_at"], reverse=True)
@@ -155,8 +156,17 @@ def build_argus_stats(db_path: Path) -> dict:
         if "/" in s["id"]:
             subs.setdefault(s["id"].split("/", 1)[0], []).append(s)
 
+    # Ship only the newest MAX_SESSIONS; totals below stay all-time truth.
+    # daily_sessions is filtered to the kept ids so every id the UI meets in
+    # a rollup resolves in its session lookup (no dangling references).
+    kept = parents[:MAX_SESSIONS]
+    kept_ids = {s["id"] for s in kept}
+    daily_sessions = sorted(
+        (r for r in merged.values() if r["session_id"] in kept_ids),
+        key=lambda r: (r["day"], r["session_id"]))
+
     sessions = []
-    for s in parents:
+    for s in kept:
         sessions.append({
             "id": s["id"],
             "project": (s["project_path"].rstrip("/").rsplit("/", 1)[-1]
