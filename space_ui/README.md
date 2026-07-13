@@ -36,18 +36,25 @@ to 60 units — generated data can put 100+ leaves in one cluster, whose summed
 spring stiffness makes the original explicit-Euler sim diverge (positions hit
 1e20 and the canvas goes blank).
 
-## Datasets
+## Sessions tab
 
-The page serves two datasets through one engine, chosen by URL param:
+The fourth topbar tab (`Graph | Timeline | Six Degrees | Sessions`) is an
+Argus telemetry dashboard: Claude Code session stats rendered as cards,
+tables, and hand-drawn canvas charts (no dependencies), re-skinned to the
+Space theme. It lives in its own closure, independent of the graph's
+`boot()` — either can fail without taking the other down.
 
-- `/space/` (default) — the xo-projects atlas (`data/space.json`).
-- `/space/?data=argus` — Claude Code session telemetry (`data/argus.json`,
-  generated from the Argus DB; `ARGUS_DB` env, default `~/.argus/argus.db`).
-  Hubs = projects, month-bucket groups, leaves = sessions (`disc`) and
-  subagent runs (`diamond`, tied "spawned by"). Same ten-key format below.
-
-The `Atlas | Argus` topbar toggle navigates between them; clicking the active
-one reloads (that is the refresh — data is rebuilt behind a 30 s server TTL).
+- Data: `GET /space/data/sessions.json`, one pre-aggregated payload built
+  live from the Argus DB (`ARGUS_DB` env, default `~/.argus/argus.db`) by
+  `services/cowork_agent/visualizer/argus_index.py`. Fetched lazily on
+  first open; the Refresh button re-fetches (server rebuilds behind the
+  same 30 s TTL).
+- Sub-views: Overview · Sessions (list → detail with sub-agents and
+  per-session tools) · Tools · Models · Trends · Prompts. The
+  `Today/7d/30d/All` window selector filters client-side over per-day
+  rollups shipped in the payload.
+- No alerts view by design; prompt full-text search is out of scope (the
+  Prompts view is a client-side filter over the latest 200).
 
 ## Data format
 

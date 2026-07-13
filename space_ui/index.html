@@ -30,9 +30,6 @@
   [hidden]{display:none!important}
 
   /* ---------------- topbar ---------------- */
-  .dstoggle{display:flex;gap:2px;background:#14161b;border:1px solid #23262d;border-radius:8px;padding:2px}
-  .dstoggle button{background:none;border:0;color:#b3ada0;font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer}
-  .dstoggle button.is-on{background:#23262d;color:#e9e4d9}
   .topbar{
     display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:20px;
     padding:0 18px;border-bottom:1px solid var(--line);
@@ -232,6 +229,54 @@
   }
   .pacts button:hover{color:var(--ink);border-color:#39404d;background:var(--bg-3)}
 
+  /* ---------------- sessions tab ---------------- */
+  #view-sessions{overflow-y:auto}
+  .sesswrap{max-width:1180px;margin:0 auto;padding:26px 26px 60px;font-family:var(--sans)}
+  .sess-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .sess-subnav,.sess-win{display:flex;gap:2px;background:var(--bg-2);border:1px solid var(--line);border-radius:9px;padding:3px}
+  .sess-subnav button{font-size:12.5px;color:var(--ink-2);padding:5px 12px;border-radius:6px}
+  .sess-subnav button.is-on{background:var(--bg-3);color:var(--ink)}
+  .sess-win button{font-size:12px;color:var(--ink-3);padding:4px 10px;border-radius:6px}
+  .sess-win button.is-on{background:var(--bg-3);color:var(--accent)}
+  .sess-spacer{flex:1}
+  .sess-refresh{font-size:13px;color:var(--ink-2);border:1px solid var(--line);border-radius:9px;padding:6px 12px}
+  .sess-refresh:hover{color:var(--accent);border-color:var(--accent)}
+  .scard{background:var(--bg-2);border:1px solid var(--line-soft);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+  .scard .eyebrow2{font:600 10.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:12px}
+  .sess-hero{display:flex;align-items:baseline;gap:26px;flex-wrap:wrap}
+  .sess-hero .big{font:600 44px/1 var(--serif);color:var(--accent)}
+  .sess-hero .unit{font:600 10.5px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3)}
+  .sess-hero .kv{color:var(--ink-2);font-size:13px}
+  .sess-hero .kv b{color:var(--ink)}
+  .sgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .sgrid .scard{margin-bottom:0}
+  .scards4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .scards4 .scard{margin:0}
+  .scards4 .v{font:600 24px/1.2 var(--serif);color:var(--ink)}
+  .scards4 .v.acc{color:var(--accent)}
+  .scards4 .s{font-size:11.5px;color:var(--ink-3);margin-top:4px}
+  table.stbl{width:100%;border-collapse:collapse;font-size:12.5px}
+  .stbl th{font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+  .stbl td{padding:8px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-2);vertical-align:top}
+  .stbl td b{color:var(--ink);font-weight:500}
+  .stbl tr.rowlink{cursor:pointer}
+  .stbl tr.rowlink:hover td{background:var(--bg-3)}
+  .stbl .num{text-align:right;font-family:var(--mono);font-size:11.5px}
+  .stbl .num.acc{color:var(--accent)}
+  .stbl .num.err{color:var(--err)}
+  .chip{font:500 10.5px/1 var(--mono);background:var(--bg-3);border:1px solid var(--line);border-radius:5px;padding:3px 6px;color:var(--ink-2);white-space:nowrap}
+  .sess-back{font-size:12.5px;color:var(--accent);margin-bottom:14px;display:inline-block;cursor:pointer}
+  .sess-note{color:var(--ink-3);font-size:12.5px;padding:26px 0;text-align:center}
+  .sess-err{border-left:3px solid var(--err);padding:14px 16px;background:var(--bg-2);border-radius:0 10px 10px 0;color:var(--ink-2)}
+  .sess-err b{color:var(--ink)}
+  .kvrow{display:grid;grid-template-columns:180px 1fr;font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line-soft)}
+  .kvrow dt{color:var(--ink-3)}
+  .kvrow dd{color:var(--ink-2);word-break:break-all}
+  .sess-filter{display:flex;gap:8px;margin-bottom:12px}
+  .sess-filter input,.sess-filter select{background:var(--bg-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12.5px;color:var(--ink);outline:none}
+  .sess-filter input{flex:1}
+  @media(max-width:900px){.sgrid{grid-template-columns:1fr}.scards4{grid-template-columns:1fr 1fr}}
+
   /* ---------------- timeline ---------------- */
   #view-time{display:flex;flex-direction:column;padding:20px 22px 6px}
   .thead{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap}
@@ -392,12 +437,9 @@
     <button id="tab-graph" class="is-on">Graph</button>
     <button id="tab-time">Timeline</button>
     <button id="tab-six">Six&nbsp;Degrees</button>
+    <button id="tab-sessions">Sessions</button>
   </div>
   <div class="tright">
-    <div class="dstoggle" title="Data source">
-      <button id="ds-atlas">Atlas</button>
-      <button id="ds-argus">Argus</button>
-    </div>
     <div class="rootpick">
       <button id="root-btn" title="Re-root the graph on any node">
         <span class="rlab">Root</span><b id="root-name">XO</b><span class="caret">&#9662;</span>
@@ -483,6 +525,11 @@
       </div>
     </div>
   </section>
+  <!-- SESSIONS (Argus telemetry dashboard; content rendered by the
+       sessions-tab closure below, independent of boot()) -->
+  <section class="view" id="view-sessions">
+    <div class="sesswrap" id="sesswrap"></div>
+  </section>
 </main>
 
 <!-- detail panel -->
@@ -514,15 +561,6 @@
 'use strict';
 
 /* ============================== SERVER WIDGET ============================== */
-/* dataset toggle — Atlas = data/space.json, Argus = data/argus.json (?data=).
-   Switching NAVIGATES instead of re-booting in place: all sim/listener state
-   lives inside boot() with no teardown path; a reload is the only clean
-   slate. Clicking the active button re-navigates the same URL — that IS the
-   refresh (server holds a 30s TTL). */
-const DS=new URLSearchParams(location.search).get('data')==='argus'?'argus':'atlas';
-document.getElementById('ds-'+DS).classList.add('is-on');
-document.getElementById('ds-atlas').addEventListener('click',()=>{location.href=location.pathname;});
-document.getElementById('ds-argus').addEventListener('click',()=>{location.href=location.pathname+'?data=argus';});
 const API_BASE=location.port==='5002'?'':'http://127.0.0.1:5002';
 const srvPip=document.getElementById('srv-pip');
 const srvText=document.getElementById('srv-text');
@@ -562,6 +600,347 @@ document.getElementById('srv-copy').addEventListener('click',()=>{
 });
 pollServer();
 setInterval(pollServer,5000);
+
+/* ============================== SESSIONS TAB ==============================
+   Argus telemetry dashboard (data: GET data/sessions.json, pre-aggregated
+   by the API). Independent of boot(): own lazy fetch on first open, own
+   error handling — a graph-data failure cannot take this tab down, and
+   vice versa. Window filtering happens here, client-side, over per-day
+   rollups. */
+(function(){
+const wrap=document.getElementById('sesswrap');
+const WINS=[['today','Today'],['7d','7 days'],['30d','30 days'],['all','All']];
+const WDAYS={today:1,'7d':7,'30d':30,all:null};
+const SUBS=[['overview','Overview'],['sessions','Sessions'],['tools','Tools'],['models','Models'],['trends','Trends'],['prompts','Prompts']];
+let SD=null,loading=false,failed=null,win='7d',sub='overview',sel=null,sortK='started_at',sortD=-1,pq='',pproj='';
+
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tok=n=>n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':String(Math.round(n));
+const usd=n=>'~$'+(n>=1000?Math.round(n).toLocaleString():n>=100?n.toFixed(0):n.toFixed(2));
+const dur=s=>{if(!s)return'—';const m=Math.floor(s/60),h=Math.floor(m/60);return h?h+'h '+String(m%60).padStart(2,'0')+'m':m+'m';};
+const dtfmt=iso=>iso?new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'—';
+const mshort=m=>(m||'').replace(/^claude-/,'')||'unknown';
+const stok=s=>s.fresh+s.output+s.cache_read+s.cache_write;
+const cutoff=()=>{const d=WDAYS[win];return d==null?'':new Date(Date.now()-d*864e5).toISOString().slice(0,10);};
+
+function fallbackView(){ /* boot() never ran (no graph data) — still show the tab */
+  ['view-graph','view-time','view-six','view-sessions'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.classList.toggle('is-active',id==='view-sessions');});
+  ['tab-graph','tab-time','tab-six','tab-sessions'].forEach(id=>
+    document.getElementById(id).classList.toggle('is-on',id==='tab-sessions'));
+}
+function open(){(window.__switchView||fallbackView)('sessions');if(!SD&&!loading)load();render();}
+document.getElementById('tab-sessions').addEventListener('click',open);
+
+function load(){
+  loading=true;failed=null;render();
+  fetch('data/sessions.json',{cache:'no-store'})
+    .then(r=>{if(!r.ok)throw new Error('http '+r.status);return r.json();})
+    .then(d=>{SD=d;loading=false;render();})
+    .catch(err=>{loading=false;failed=err.message;render();});
+}
+
+/* ---- tiny chart kit: canvas, Space theme, zero deps. Mouse math is
+   canvas-local (getBoundingClientRect) — the evXY lesson. ---- */
+function mkcv(host,h,wFix){
+  const w=wFix||Math.max(220,host.clientWidth-2);
+  const c=document.createElement('canvas');
+  const d=Math.min(2,devicePixelRatio||1);
+  c.width=w*d;c.height=h*d;c.style.width=w+'px';c.style.height=h+'px';
+  host.appendChild(c);
+  const x=c.getContext('2d');x.scale(d,d);
+  return[c,x,w,h];
+}
+function tipEl(host){
+  host.style.position='relative';
+  const t=document.createElement('div');
+  t.style.cssText='position:absolute;display:none;pointer-events:none;background:var(--bg-3);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--ink);z-index:5;white-space:nowrap';
+  host.appendChild(t);return t;
+}
+function drawArea(host,pts,unit){
+  if(!pts.length){host.innerHTML='<div class="sess-note">no data in this window</div>';return;}
+  const h=210,[c,x,w]=mkcv(host,h),P={l:46,r:12,t:12,b:22};
+  const vmax=Math.max(...pts.map(p=>p.v))||1;
+  const X=i=>P.l+(w-P.l-P.r)*(pts.length===1?.5:i/(pts.length-1));
+  const Y=v=>P.t+(h-P.t-P.b)*(1-v/vmax);
+  x.font='10px ui-monospace,monospace';
+  for(let g=0;g<=3;g++){const gy=P.t+(h-P.t-P.b)*g/3;
+    x.strokeStyle='#1b1f27';x.beginPath();x.moveTo(P.l,gy);x.lineTo(w-P.r,gy);x.stroke();
+    x.fillStyle='#7d786d';x.fillText(tok(vmax*(1-g/3)),4,gy+3);}
+  const st=Math.max(1,Math.floor(pts.length/8));
+  x.fillStyle='#7d786d';
+  for(let i=0;i<pts.length;i+=st)x.fillText(pts[i].d.slice(5),X(i)-12,h-6);
+  x.beginPath();pts.forEach((p,i)=>i?x.lineTo(X(i),Y(p.v)):x.moveTo(X(i),Y(p.v)));
+  x.strokeStyle='#a8d94f';x.lineWidth=1.8;x.stroke();
+  x.lineTo(X(pts.length-1),h-P.b);x.lineTo(X(0),h-P.b);x.closePath();
+  x.fillStyle='rgba(168,217,79,.12)';x.fill();
+  const tip=tipEl(host);
+  c.addEventListener('mousemove',e=>{
+    const r=c.getBoundingClientRect();
+    const f=(w-P.l-P.r)/Math.max(1,pts.length-1);
+    const i=Math.max(0,Math.min(pts.length-1,Math.round((e.clientX-r.left-P.l)/f)));
+    tip.style.display='block';tip.style.left=(e.clientX-r.left+12)+'px';tip.style.top=(e.clientY-r.top-10)+'px';
+    tip.textContent=pts[i].d+' · '+tok(pts[i].v)+' '+(unit||'tokens');});
+  c.addEventListener('mouseleave',()=>tip.style.display='none');
+}
+function drawHeat(host,byDay,weeks){
+  weeks=weeks||16;
+  const cs=16,gap=3,left=34,top=6;
+  const today=new Date(),dow=(today.getDay()+6)%7;
+  const end=new Date(today.getTime()+(6-dow)*864e5);
+  const start=new Date(end.getTime()-(weeks*7-1)*864e5);
+  let vmax=1;byDay.forEach(v=>{if(v>vmax)vmax=v;});
+  const[c,x]=mkcv(host,top+7*(cs+gap)+16,left+weeks*(cs+gap)+6);
+  x.font='9.5px ui-monospace,monospace';x.fillStyle='#7d786d';
+  ['Mon','','Wed','','Fri','','Sun'].forEach((l,r)=>l&&x.fillText(l,2,top+r*(cs+gap)+11));
+  const cells=[];
+  for(let i=0;i<weeks*7;i++){
+    const d=new Date(start.getTime()+i*864e5);
+    if(d>today)break;
+    const key=d.toISOString().slice(0,10),v=byDay.get(key)||0;
+    const px=left+Math.floor(i/7)*(cs+gap),py=top+(i%7)*(cs+gap);
+    x.fillStyle=v?'rgba(168,217,79,'+(0.15+0.85*Math.sqrt(v/vmax)).toFixed(3)+')':'#14171d';
+    x.fillRect(px,py,cs,cs);
+    cells.push({px,py,key,v});
+  }
+  const tip=tipEl(host);
+  c.addEventListener('mousemove',e=>{
+    const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+    const hit=cells.find(q=>mx>=q.px&&mx<q.px+cs&&my>=q.py&&my<q.py+cs);
+    if(hit){tip.style.display='block';tip.style.left=(mx+12)+'px';tip.style.top=(my-8)+'px';
+      tip.textContent=hit.key+' · '+tok(hit.v)+' tokens';}
+    else tip.style.display='none';});
+  c.addEventListener('mouseleave',()=>tip.style.display='none');
+}
+function drawBars(host,items){
+  if(!items.length){host.innerHTML='<div class="sess-note">no data</div>';return;}
+  const rh=26,[c,x,w]=mkcv(host,items.length*rh+8),lw=150;
+  const vmax=items[0].v||1;
+  x.font='11px system-ui,sans-serif';
+  items.forEach((it,i)=>{
+    const y=6+i*rh;
+    x.fillStyle='#b3ada0';x.textAlign='right';x.fillText(it.label,lw-8,y+13,lw-14);
+    const bw=Math.max(2,(w-lw-70)*it.v/vmax);
+    x.fillStyle='rgba(168,217,79,.75)';x.fillRect(lw,y+3,bw,rh-10);
+    x.fillStyle='#7d786d';x.textAlign='left';x.fillText(tok(it.v),lw+bw+8,y+13);
+  });
+}
+
+/* ---- render dispatcher ---- */
+function render(){
+  if(loading){wrap.innerHTML='<div class="sess-note">loading data/sessions.json…</div>';return;}
+  if(failed){
+    wrap.innerHTML='<div class="sess-err"><b>Could not load data/sessions.json</b> ('+esc(failed)+'). '
+      +'The API builds it live from the Argus DB (env <b>ARGUS_DB</b>, default <b>~/.argus/argus.db</b>). '
+      +'<button class="sess-refresh" id="sess-retry">Retry</button></div>';
+    document.getElementById('sess-retry').addEventListener('click',load);return;
+  }
+  if(!SD){wrap.innerHTML='<div class="sess-note">Open this tab to load session telemetry.</div>';return;}
+  const showWin=(sub==='overview'||sub==='tools');
+  wrap.innerHTML='<div class="sess-head">'
+    +'<div class="sess-subnav">'+SUBS.map(([k,l])=>'<button data-sub="'+k+'" class="'+(k===sub?'is-on':'')+'">'+l+'</button>').join('')+'</div>'
+    +'<div class="sess-spacer"></div>'
+    +(showWin?'<div class="sess-win">'+WINS.map(([k,l])=>'<button data-win="'+k+'" class="'+(k===win?'is-on':'')+'">'+l+'</button>').join('')+'</div>':'')
+    +'<button class="sess-refresh" id="sess-refresh" title="Re-fetch (server rebuilds behind its 30s cache)">&#8635; Refresh</button>'
+    +'</div><div id="sess-body"></div>';
+  wrap.querySelectorAll('[data-sub]').forEach(b=>b.addEventListener('click',()=>{sub=b.dataset.sub;sel=null;render();}));
+  wrap.querySelectorAll('[data-win]').forEach(b=>b.addEventListener('click',()=>{win=b.dataset.win;render();}));
+  document.getElementById('sess-refresh').addEventListener('click',()=>{SD=null;load();});
+  const el=document.getElementById('sess-body');
+  if(sub==='overview')rOverview(el);
+  else if(sub==='sessions'){if(sel)rDetail(el);else rList(el);}
+  else if(sub==='tools')rTools(el);
+  else if(sub==='models')rModels(el);
+  else if(sub==='trends')rTrends(el);
+  else rPrompts(el);
+}
+
+/* ---- Overview ---- */
+function rOverview(el){
+  const co=cutoff();
+  const dm=SD.daily_models.filter(r=>r.day>=co);
+  const ds=SD.daily_sessions.filter(r=>r.day>=co);
+  const tokens=dm.reduce((a,r)=>a+r.tokens,0),cost=dm.reduce((a,r)=>a+r.cost,0);
+  const nsess=new Set(ds.map(r=>r.session_id)).size;
+  const byDay=new Map();dm.forEach(r=>byDay.set(r.day,(byDay.get(r.day)||0)+r.tokens));
+  const days=[...byDay.keys()].sort().map(d=>({d,v:byDay.get(d)}));
+  const byModel=new Map();dm.forEach(r=>byModel.set(r.model,(byModel.get(r.model)||0)+r.tokens));
+  const models=[...byModel.entries()].sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const per=new Map();
+  ds.forEach(r=>{const p=per.get(r.session_id)||{t:0,c:0};p.t+=r.tokens;p.c+=r.cost;per.set(r.session_id,p);});
+  const meta=new Map(SD.sessions.map(s=>[s.id,s]));
+  const top=[...per.entries()].map(([id,p])=>({id,t:p.t,c:p.c,m:meta.get(id)}))
+    .filter(r=>r.m).sort((a,b)=>b.t-a.t).slice(0,10);
+  el.innerHTML='<div class="scard"><div class="sess-hero">'
+    +'<div><span class="big">'+tok(tokens)+'</span> <span class="unit">TOKENS</span></div>'
+    +'<div class="kv"><b>'+usd(cost)+'</b> estimated</div>'
+    +'<div class="kv"><b>'+nsess+'</b> sessions</div>'
+    +'<div class="kv"><b>'+(nsess?tok(tokens/nsess):'0')+'</b> tok/session</div>'
+    +'</div></div>'
+    +'<div class="scard"><div class="eyebrow2">Tokens over time</div><div id="ch-area"></div></div>'
+    +'<div class="sgrid">'
+    +'<div class="scard" style="overflow-x:auto"><div class="eyebrow2">Daily heatmap (last 16 weeks, all time)</div><div id="ch-heat"></div></div>'
+    +'<div class="scard"><div class="eyebrow2">Top models by tokens (window)</div><div id="ch-models"></div></div>'
+    +'</div>'
+    +'<div class="scard" style="margin-top:16px"><div class="eyebrow2">Top sessions in window</div>'+topTable(top)+'</div>';
+  drawArea(document.getElementById('ch-area'),days);
+  const allByDay=new Map();SD.daily_models.forEach(r=>allByDay.set(r.day,(allByDay.get(r.day)||0)+r.tokens));
+  drawHeat(document.getElementById('ch-heat'),allByDay);
+  drawBars(document.getElementById('ch-models'),models.map(([m,v])=>({label:mshort(m),v})));
+  el.querySelectorAll('[data-sid]').forEach(tr=>tr.addEventListener('click',()=>{sel=tr.dataset.sid;sub='sessions';render();}));
+}
+function topTable(rows){
+  if(!rows.length)return'<div class="sess-note">no sessions in this window</div>';
+  return'<table class="stbl"><tr><th>Started</th><th>Project</th><th>Model</th><th class="num">Tokens (win)</th><th class="num">Cost (win)</th></tr>'
+    +rows.map(r=>'<tr class="rowlink" data-sid="'+esc(r.id)+'"><td>'+dtfmt(r.m.started_at)+'</td>'
+    +'<td><b>'+esc(r.m.project)+'</b></td><td><span class="chip">'+esc(mshort(r.m.model))+'</span></td>'
+    +'<td class="num acc">'+tok(r.t)+'</td><td class="num">'+usd(r.c)+'</td></tr>').join('')+'</table>';
+}
+
+/* ---- Sessions list + detail ---- */
+const COLS=[['started_at','Started'],['project','Project'],['model','Model'],['tokens','Tokens'],['cost','Cost'],['turns','Turns'],['duration_sec','Duration']];
+function rList(el){
+  const rows=SD.sessions.slice();
+  const kf=s=>sortK==='tokens'?stok(s):sortK==='project'?s.project:(s[sortK]??0);
+  rows.sort((a,b)=>{const x=kf(a),y=kf(b);return(x<y?-1:x>y?1:0)*sortD;});
+  el.innerHTML='<div class="scard"><div class="eyebrow2">'+rows.length+' sessions (all time)</div>'
+    +'<table class="stbl"><tr>'+COLS.map(([k,l])=>'<th data-k="'+k+'">'+l+(k===sortK?(sortD<0?' ↓':' ↑'):'')+'</th>').join('')+'<th class="num">Sub-agents</th></tr>'
+    +rows.map(s=>'<tr class="rowlink" data-sid="'+esc(s.id)+'">'
+      +'<td style="white-space:nowrap">'+dtfmt(s.started_at)+'</td><td><b>'+esc(s.project)+'</b></td>'
+      +'<td><span class="chip">'+esc(mshort(s.model))+'</span></td>'
+      +'<td class="num acc">'+tok(stok(s))+'</td><td class="num">'+usd(s.cost)+'</td>'
+      +'<td class="num">'+s.turns+'</td><td class="num">'+dur(s.duration_sec)+'</td>'
+      +'<td class="num">'+(s.subagents.length||'')+'</td></tr>').join('')+'</table></div>';
+  el.querySelectorAll('[data-k]').forEach(th=>th.addEventListener('click',()=>{
+    const k=th.dataset.k;if(sortK===k)sortD=-sortD;else{sortK=k;sortD=-1;}render();}));
+  el.querySelectorAll('[data-sid]').forEach(tr=>tr.addEventListener('click',()=>{sel=tr.dataset.sid;render();}));
+}
+const kv=(k,v)=>'<div class="kvrow"><dt>'+k+'</dt><dd>'+esc(v??'—')+'</dd></div>';
+function rDetail(el){
+  const s=SD.sessions.find(x=>x.id===sel);
+  if(!s){sel=null;rList(el);return;}
+  const t=stok(s);
+  el.innerHTML='<a class="sess-back" id="sess-back">&larr; All sessions</a>'
+    +'<div class="scards4">'
+    +'<div class="scard"><div class="eyebrow2">Tokens</div><div class="v acc">'+tok(t)+'</div><div class="s">'+t.toLocaleString()+' total · incl. '+s.subagents.length+' sub-agents</div></div>'
+    +'<div class="scard"><div class="eyebrow2">Cost (est.)</div><div class="v">'+usd(s.cost)+'</div><div class="s">pricing '+esc(SD.meta.pricing_version||'—')+'</div></div>'
+    +'<div class="scard"><div class="eyebrow2">Turns</div><div class="v">'+s.turns+'</div><div class="s">&nbsp;</div></div>'
+    +'<div class="scard"><div class="eyebrow2">Duration</div><div class="v">'+dur(s.duration_sec)+'</div><div class="s">started '+dtfmt(s.started_at)+'</div></div>'
+    +'</div>'
+    +'<div class="scard"><div class="eyebrow2">Session</div><dl>'
+    +kv('Claude Code',s.agent_version)+kv('Project',s.project_path)
+    +kv('Primary model',s.model)+kv('Started',dtfmt(s.started_at))+kv('Ended',dtfmt(s.ended_at))
+    +kv('Fresh input',s.fresh.toLocaleString()+' tokens')+kv('Output',s.output.toLocaleString()+' tokens')
+    +kv('Cache writes',s.cache_write.toLocaleString()+' tokens')+kv('Cache reads',s.cache_read.toLocaleString()+' tokens')
+    +kv('Session id',s.id)+'</dl></div>'
+    +'<div class="sgrid">'
+    +'<div class="scard"><div class="eyebrow2">Tools ('+s.tools.reduce((a,x)=>a+x.calls,0)+' calls, top '+s.tools.length+')</div>'+toolTable(s.tools)+'</div>'
+    +'<div class="scard"><div class="eyebrow2">Sub-agents ('+s.subagents.length+')</div>'+subTable(s.subagents)+'</div>'
+    +'</div>';
+  document.getElementById('sess-back').addEventListener('click',()=>{sel=null;render();});
+}
+function toolTable(ts){
+  if(!ts.length)return'<div class="sess-note">no tool calls recorded</div>';
+  return'<table class="stbl"><tr><th>Tool</th><th class="num">Calls</th><th class="num">Errors</th></tr>'
+    +ts.map(x=>'<tr><td><b>'+esc(x.name)+'</b></td><td class="num">'+x.calls+'</td><td class="num'+(x.errors?' err':'')+'">'+(x.errors||'')+'</td></tr>').join('')+'</table>';
+}
+function subTable(ss){
+  if(!ss.length)return'<div class="sess-note">no sub-agents spawned</div>';
+  return'<table class="stbl"><tr><th>Id</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Turns</th></tr>'
+    +ss.map(x=>'<tr><td>'+esc(x.id.split('/').pop())+'</td><td class="num acc">'+tok(x.tokens)+'</td><td class="num">'+usd(x.cost)+'</td><td class="num">'+x.turns+'</td></tr>').join('')+'</table>';
+}
+
+/* ---- Tools ---- */
+function rTools(el){
+  const co=cutoff();
+  const rows=SD.daily_tools.filter(r=>r.day>=co);
+  const by=new Map();
+  rows.forEach(r=>{const p=by.get(r.name)||{c:0,e:0};p.c+=r.calls;p.e+=r.errors;by.set(r.name,p);});
+  const total=rows.reduce((a,r)=>a+r.calls,0),errs=rows.reduce((a,r)=>a+r.errors,0);
+  const board=[...by.entries()].sort((a,b)=>b[1].c-a[1].c).slice(0,20);
+  const mcp=new Map();
+  by.forEach((v,name)=>{
+    if(!name.startsWith('mcp__'))return;
+    const rest=name.slice(5),i=rest.indexOf('__');
+    if(i<0)return;
+    const srv=rest.slice(0,i),p=mcp.get(srv)||{c:0,e:0,t:new Set()};
+    p.c+=v.c;p.e+=v.e;p.t.add(name);mcp.set(srv,p);});
+  el.innerHTML='<div class="scards4" style="grid-template-columns:1fr 1fr">'
+    +'<div class="scard"><div class="eyebrow2">Tool calls</div><div class="v acc">'+total.toLocaleString()+'</div><div class="s">in window</div></div>'
+    +'<div class="scard"><div class="eyebrow2">Errors</div><div class="v">'+errs.toLocaleString()+'</div><div class="s">'+(total?(100*errs/total).toFixed(1):'0.0')+'% error rate</div></div></div>'
+    +'<div class="scard"><div class="eyebrow2">Leaderboard (top 20)</div><table class="stbl"><tr><th>Tool</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Error rate</th></tr>'
+    +board.map(([n,v])=>'<tr><td><b>'+esc(n)+'</b></td><td class="num">'+v.c.toLocaleString()+'</td><td class="num'+(v.e?' err':'')+'">'+(v.e||'')+'</td><td class="num">'+(v.c?(100*v.e/v.c).toFixed(1)+'%':'—')+'</td></tr>').join('')+'</table></div>'
+    +'<div class="scard"><div class="eyebrow2">MCP servers</div>'
+    +(mcp.size?'<table class="stbl"><tr><th>Server</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Tools used</th></tr>'
+      +[...mcp.entries()].sort((a,b)=>b[1].c-a[1].c).map(([sname,v])=>'<tr><td><b>'+esc(sname)+'</b></td><td class="num">'+v.c+'</td><td class="num'+(v.e?' err':'')+'">'+(v.e||'')+'</td><td class="num">'+v.t.size+'</td></tr>').join('')+'</table>'
+      :'<div class="sess-note">no MCP tool calls in this window</div>')+'</div>';
+}
+
+/* ---- Models (all time) ---- */
+function rModels(el){
+  const by=new Map();
+  SD.daily_models.forEach(r=>{const p=by.get(r.model)||{t:0,c:0};p.t+=r.tokens;p.c+=r.cost;by.set(r.model,p);});
+  const rows=[...by.entries()].sort((a,b)=>b[1].t-a[1].t);
+  const tot=rows.reduce((a,[,v])=>a+v.t,0)||1;
+  el.innerHTML='<div class="scard"><div class="eyebrow2">Tokens by model (all time)</div><div id="ch-mbars"></div></div>'
+    +'<div class="scard"><div class="eyebrow2">Breakdown</div><table class="stbl"><tr><th>Model</th><th class="num">Tokens</th><th class="num">Share</th><th class="num">Cost</th></tr>'
+    +rows.map(([m,v])=>'<tr><td><span class="chip">'+esc(mshort(m))+'</span></td><td class="num acc">'+tok(v.t)+'</td><td class="num">'+(100*v.t/tot).toFixed(1)+'%</td><td class="num">'+usd(v.c)+'</td></tr>').join('')+'</table></div>';
+  drawBars(document.getElementById('ch-mbars'),rows.slice(0,10).map(([m,v])=>({label:mshort(m),v:v.t})));
+}
+
+/* ---- Trends (weekly, all time) ---- */
+function isoWeek(day){
+  const d=new Date(day+'T00:00:00Z');
+  const th=new Date(d);th.setUTCDate(d.getUTCDate()+3-((d.getUTCDay()+6)%7));
+  const y=th.getUTCFullYear();
+  const w=Math.ceil(((th-new Date(Date.UTC(y,0,1)))/864e5+1)/7);
+  return y+'-W'+String(w).padStart(2,'0');
+}
+function rTrends(el){
+  const wk=new Map();
+  SD.daily_models.forEach(r=>{
+    const k=isoWeek(r.day),p=wk.get(k)||{t:0,c:0,m:new Map()};
+    p.t+=r.tokens;p.c+=r.cost;p.m.set(r.model,(p.m.get(r.model)||0)+r.tokens);wk.set(k,p);});
+  const weeks=[...wk.keys()].sort();
+  if(!weeks.length){el.innerHTML='<div class="sess-note">no turn data</div>';return;}
+  el.innerHTML='<div class="scard"><div class="eyebrow2">Tokens per week</div><div id="ch-wk"></div></div>'
+    +'<div class="scard"><div class="eyebrow2">Weekly breakdown</div><table class="stbl"><tr><th>Week</th><th class="num">Tokens</th><th class="num">Cost</th><th>Top model</th></tr>'
+    +weeks.slice().reverse().map(k=>{
+      const v=wk.get(k),top=[...v.m.entries()].sort((a,b)=>b[1]-a[1])[0];
+      return'<tr><td><b>'+k+'</b></td><td class="num acc">'+tok(v.t)+'</td><td class="num">'+usd(v.c)+'</td><td><span class="chip">'+esc(mshort(top[0]))+'</span> '+tok(top[1])+'</td></tr>';}).join('')+'</table></div>';
+  drawArea(document.getElementById('ch-wk'),weeks.map(k=>({d:k,v:wk.get(k).t})));
+}
+
+/* ---- Prompts ---- */
+function rPrompts(el){
+  const ptail=p=>p?p.split('/').pop()||p:'(unknown)';
+  const projects=[...new Set(SD.prompts.map(p=>p.project_path))].sort();
+  const list=SD.prompts.filter(p=>(!pproj||p.project_path===pproj)
+    &&(!pq||(p.display||'').toLowerCase().includes(pq.toLowerCase())));
+  el.innerHTML='<div class="sess-filter"><input id="pq" placeholder="Filter prompt text…" value="'+esc(pq)+'">'
+    +'<select id="pproj"><option value="">All projects</option>'
+    +projects.map(p=>'<option value="'+esc(p)+'"'+(p===pproj?' selected':'')+'>'+esc(ptail(p))+'</option>').join('')+'</select></div>'
+    +'<div class="scard"><div class="eyebrow2">'+list.length+' of latest '+SD.prompts.length+' prompts</div>'
+    +(list.length?'<table class="stbl"><tr><th>When</th><th>Project</th><th>Prompt</th></tr>'
+      +list.map(p=>'<tr><td style="white-space:nowrap">'+dtfmt(new Date(p.timestamp_ms).toISOString())+'</td>'
+      +'<td><b>'+esc(ptail(p.project_path))+'</b></td><td>'+esc(p.display)
+      +(p.pasted_chars?' <span class="chip">+'+tok(p.pasted_chars)+' pasted</span>':'')
+      +(p.is_slash?' <span class="chip">/cmd</span>':'')+'</td></tr>').join('')+'</table>'
+      :'<div class="sess-note">no prompts match</div>')+'</div>';
+  const q=document.getElementById('pq');
+  q.addEventListener('input',()=>{pq=q.value;render();
+    const n=document.getElementById('pq');n.focus();n.setSelectionRange(n.value.length,n.value.length);});
+  document.getElementById('pproj').addEventListener('change',e=>{pproj=e.target.value;render();});
+}
+
+/* redraw chart views when the panel width actually changes */
+let lastW=0;
+new ResizeObserver(es=>{
+  const w=es[0].contentRect.width;
+  if(Math.abs(w-lastW)>4){lastW=w;
+    if(SD&&document.getElementById('view-sessions').classList.contains('is-active'))render();}
+}).observe(document.getElementById('view-sessions'));
+})();
 
 function boot(DATA,DATA_SOURCE){
 /* ============================== MODEL FROM LOCAL DATA ==============================
@@ -630,7 +1009,11 @@ const shownEdges=()=>EDGES.filter(e=>isShown(byId.get(e.s))&&isShown(byId.get(e.
 /* layout seed */
 const HUB_ANGLE=DATA.hubAngles;
 const HUB_R=520;
-const root=byId.get('xo');root.fx=0;root.fy=0;
+/* root id comes from the data — never hardcode it ('xo' today, anything
+   tomorrow); byId.get(unknown).fx throws and kills boot. */
+const root=byId.get(DATA.root.id);root.fx=0;root.fy=0;
+document.getElementById('root-name').textContent=DATA.root.label;
+document.getElementById('root-reset').textContent='Reset to '+DATA.root.label;
 HUBS.forEach(h=>{h.ax=Math.cos(HUB_ANGLE[h.cat])*HUB_R;h.ay=Math.sin(HUB_ANGLE[h.cat])*HUB_R;h.x=h.ax;h.y=h.ay;});
 /* Each project owns an equal sector of the circle; its cluster fan must stay
    inside it. A fixed .5 rad step wraps the whole circle once a project has
@@ -654,7 +1037,7 @@ LEAVES.forEach((l,i)=>{
 
 /* ============================== SIMULATION ============================== */
 let simAlpha=1;
-let rootId='xo',rootDepths=null;
+let rootId=DATA.root.id,rootDepths=null;
 const SPR={root:{d:HUB_R,k:.02},hg:{d:175,k:.05},rg:{d:62,k:.08},x:{d:210,k:.005}};
 const CHG={root:-3400,hub:-2600,group:-1000,leaf:-235};
 function simTick(){
@@ -685,7 +1068,7 @@ function simTick(){
   }
   const R0=byId.get(rootId);
   for(const n of vs){
-    if(rootId==='xo'&&n.type==='hub'){n.vx+=(n.ax-n.x)*.05*simAlpha;n.vy+=(n.ay-n.y)*.05*simAlpha;}
+    if(rootId===DATA.root.id&&n.type==='hub'){n.vx+=(n.ax-n.x)*.05*simAlpha;n.vy+=(n.ay-n.y)*.05*simAlpha;}
     else if(rootDepths&&n.id!==rootId&&n.fx==null){
       /* concentric neighbourhood rings around the chosen root */
       const d=rootDepths.get(n.id)??6;
@@ -1089,7 +1472,7 @@ function setRoot(id){
   rootId=id;
   const r=byId.get(id);
   ensureShown(r);
-  if(id==='xo'){
+  if(id===DATA.root.id){
     r.fx=0;r.fy=0;rootDepths=null;
   }else{
     r.fx=r.x;r.fy=r.y;rootDepths=computeDepths(id);
@@ -1099,7 +1482,7 @@ function setRoot(id){
   reheat(.8);
   switchView('graph');
   flyTo(r.fx,r.fy,Math.min(Math.max(cam.k,.55),.9),900);
-  toast(id==='xo'?'Back to the full space':'Rooted on '+r.label);
+  toast(id===DATA.root.id?'Back to the full space':'Rooted on '+r.label);
   closeRootDD();
 }
 function closeRootDD(){rootdd.classList.remove('is-open');}
@@ -1111,7 +1494,7 @@ document.getElementById('root-btn').addEventListener('click',e=>{
     q.value='';q.focus();
   }
 });
-document.getElementById('root-reset').addEventListener('click',()=>setRoot('xo'));
+document.getElementById('root-reset').addEventListener('click',()=>setRoot(DATA.root.id));
 rootdd.addEventListener('click',e=>e.stopPropagation());
 addEventListener('click',e=>{
   if(!rootdd.classList.contains('is-open'))return;
@@ -1683,18 +2066,20 @@ document.getElementById('sixrand').addEventListener('click',()=>{
 let view='graph';
 function switchView(v){
   view=v;
-  const map={graph:'view-graph',time:'view-time',six:'view-six'};
+  const map={graph:'view-graph',time:'view-time',six:'view-six',sessions:'view-sessions'};
   Object.entries(map).forEach(([name,id])=>
     document.getElementById(id).classList.toggle('is-active',name===v));
   document.getElementById('tab-graph').classList.toggle('is-on',v==='graph');
   document.getElementById('tab-time').classList.toggle('is-on',v==='time');
   document.getElementById('tab-six').classList.toggle('is-on',v==='six');
+  document.getElementById('tab-sessions').classList.toggle('is-on',v==='sessions');
   hideHC();
   if(v==='time'){requestAnimationFrame(()=>{buildTimeline();if(tTrace)drawTrace();});}
 }
 document.getElementById('tab-graph').addEventListener('click',()=>switchView('graph'));
 document.getElementById('tab-time').addEventListener('click',()=>switchView('time'));
 document.getElementById('tab-six').addEventListener('click',()=>switchView('six'));
+window.__switchView=switchView; /* sessions-tab closure uses this when boot ran */
 addEventListener('keydown',e=>{
   const typing=/INPUT|TEXTAREA/.test(document.activeElement?.tagName||'');
   if(e.key==='/'&&!typing){e.preventDefault();document.getElementById('q').focus();return;}
@@ -1702,6 +2087,7 @@ addEventListener('keydown',e=>{
   if(e.key==='1')switchView('graph');
   else if(e.key==='2')switchView('time');
   else if(e.key==='3')switchView('six');
+  else if(e.key==='4')document.getElementById('tab-sessions').click();
   else if(e.key==='Escape'){clearFocus();clearPath();hideHC();}
 });
 
@@ -1737,17 +2123,16 @@ renderTimelineState();
 }
 
 /* ============================== BOOT ============================== */
-const DATA_FILE=DS==='argus'?'data/argus.json':'data/space.json';
-fetch(DATA_FILE,{cache:'no-store'})
+fetch('data/space.json',{cache:'no-store'})
   .then(r=>{if(!r.ok)throw new Error('http '+r.status);return r.json();})
-  .then(d=>boot(d,DS==='argus'?'argus telemetry':'local file'))
+  .then(d=>boot(d,'local file'))
   .catch(err=>{
-    console.warn('Space could not load '+DATA_FILE+':',err.message);
+    console.warn('Space could not load data/space.json:',err.message);
     const el=document.createElement('div');
     el.className='nodata';
     el.innerHTML='<div class="eyebrow">No data source</div>'+
       '<h1>Space reads its map from a local file.</h1>'+
-      '<p>This page loads <b>'+DATA_FILE+'</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
+      '<p>This page loads <b>data/space.json</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
       '<pre>cd xo-cowork-api && ./cowork-api.sh start</pre>'+
       '<p>then open <b>http://localhost:5002/space/</b></p>'+
       '<button id="nodata-retry">Retry</button>';

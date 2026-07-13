@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from services.cowork_agent.visualizer.argus_index import build_argus_data
+from services.cowork_agent.visualizer.argus_index import build_argus_stats
 from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
@@ -101,13 +101,13 @@ ARGUS_DB_DEFAULT = "~/.argus/argus.db"
 _argus_cache: tuple[float, dict] | None = None
 
 
-@router.get("/data/argus.json")
-async def argus_data():
-    """The Argus session-telemetry graph, generated live from the Argus DB.
+@router.get("/data/sessions.json")
+async def sessions_data():
+    """Argus session-telemetry stats for the Space UI's Sessions tab.
 
     DB path from ARGUS_DB (env), default ~/.argus/argus.db, expanded at
-    request time. No static fallback: a truthful 503 (the UI shows its
-    no-data panel) beats a stale pretty graph."""
+    request time. No static fallback: a truthful 503 (the tab shows its
+    error card) beats stale pretty numbers."""
     global _argus_cache
     now = time.monotonic()
     if _argus_cache is not None and now - _argus_cache[0] < SPACE_CACHE_TTL:
@@ -115,7 +115,7 @@ async def argus_data():
 
     db_path = Path(os.getenv("ARGUS_DB", ARGUS_DB_DEFAULT)).expanduser()
     try:
-        data = build_argus_data(db_path)
+        data = build_argus_stats(db_path)
     except Exception as exc:
         print(f"⚠️ argus_index failed ({exc})")
         raise HTTPException(
