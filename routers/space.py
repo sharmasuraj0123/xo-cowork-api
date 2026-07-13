@@ -20,7 +20,9 @@ from fastapi.staticfiles import StaticFiles
 
 from services.cowork_agent.visualizer.space_index import build_space_data
 
-DEFAULT_SPACE_DIR = "~/Programming/XO/ClaudeWorkspace/xo-atlas"
+# Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
+# to point at a live xo-atlas checkout during UI development.
+DEFAULT_SPACE_DIR = str(Path(__file__).resolve().parent.parent / "space_ui")
 SPACE_DIR = Path(os.getenv("SPACE_DIR", DEFAULT_SPACE_DIR)).expanduser()
 
 router = APIRouter(prefix="/space", tags=["space"])
