@@ -231,6 +231,10 @@
 
   /* ---------------- sessions tab ---------------- */
   #view-sessions{overflow-y:auto}
+  /* the global `canvas` rule makes every canvas a full-bleed overlay (graph,
+     timeline). Chart canvases in this tab are ordinary in-flow elements —
+     undo the overlay positioning inside the panel. */
+  .sesswrap canvas{position:static;inset:auto}
   .sesswrap{max-width:1180px;margin:0 auto;padding:26px 26px 60px;font-family:var(--sans)}
   .sess-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
   .sess-subnav,.sess-win{display:flex;gap:2px;background:var(--bg-2);border:1px solid var(--line);border-radius:9px;padding:3px}
@@ -272,9 +276,6 @@
   .kvrow{display:grid;grid-template-columns:180px 1fr;font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line-soft)}
   .kvrow dt{color:var(--ink-3)}
   .kvrow dd{color:var(--ink-2);word-break:break-all}
-  .sess-filter{display:flex;gap:8px;margin-bottom:12px}
-  .sess-filter input,.sess-filter select{background:var(--bg-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12.5px;color:var(--ink);outline:none}
-  .sess-filter input{flex:1}
   @media(max-width:900px){.sgrid{grid-template-columns:1fr}.scards4{grid-template-columns:1fr 1fr}}
 
   /* ---------------- timeline ---------------- */
@@ -611,8 +612,8 @@ setInterval(pollServer,5000);
 const wrap=document.getElementById('sesswrap');
 const WINS=[['today','Today'],['7d','7 days'],['30d','30 days'],['all','All']];
 const WDAYS={today:1,'7d':7,'30d':30,all:null};
-const SUBS=[['overview','Overview'],['sessions','Sessions'],['tools','Tools'],['models','Models'],['trends','Trends'],['prompts','Prompts']];
-let SD=null,loading=false,failed=null,win='7d',sub='overview',sel=null,sortK='started_at',sortD=-1,pq='',pproj='';
+const SUBS=[['overview','Overview'],['sessions','Sessions'],['tools','Tools'],['models','Models'],['trends','Trends']];
+let SD=null,loading=false,failed=null,win='7d',sub='overview',sel=null,sortK='started_at',sortD=-1;
 
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const tok=n=>n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':String(Math.round(n));
@@ -751,8 +752,7 @@ function render(){
   else if(sub==='sessions'){if(sel)rDetail(el);else rList(el);}
   else if(sub==='tools')rTools(el);
   else if(sub==='models')rModels(el);
-  else if(sub==='trends')rTrends(el);
-  else rPrompts(el);
+  else rTrends(el);
 }
 
 /* ---- Overview ---- */
@@ -909,28 +909,6 @@ function rTrends(el){
       const v=wk.get(k),top=[...v.m.entries()].sort((a,b)=>b[1]-a[1])[0];
       return'<tr><td><b>'+k+'</b></td><td class="num acc">'+tok(v.t)+'</td><td class="num">'+usd(v.c)+'</td><td><span class="chip">'+esc(mshort(top[0]))+'</span> '+tok(top[1])+'</td></tr>';}).join('')+'</table></div>';
   drawArea(document.getElementById('ch-wk'),weeks.map(k=>({d:k,v:wk.get(k).t})));
-}
-
-/* ---- Prompts ---- */
-function rPrompts(el){
-  const ptail=p=>p?p.split('/').pop()||p:'(unknown)';
-  const projects=[...new Set(SD.prompts.map(p=>p.project_path))].sort();
-  const list=SD.prompts.filter(p=>(!pproj||p.project_path===pproj)
-    &&(!pq||(p.display||'').toLowerCase().includes(pq.toLowerCase())));
-  el.innerHTML='<div class="sess-filter"><input id="pq" placeholder="Filter prompt text…" value="'+esc(pq)+'">'
-    +'<select id="pproj"><option value="">All projects</option>'
-    +projects.map(p=>'<option value="'+esc(p)+'"'+(p===pproj?' selected':'')+'>'+esc(ptail(p))+'</option>').join('')+'</select></div>'
-    +'<div class="scard"><div class="eyebrow2">'+list.length+' of latest '+SD.prompts.length+' prompts</div>'
-    +(list.length?'<table class="stbl"><tr><th>When</th><th>Project</th><th>Prompt</th></tr>'
-      +list.map(p=>'<tr><td style="white-space:nowrap">'+dtfmt(new Date(p.timestamp_ms).toISOString())+'</td>'
-      +'<td><b>'+esc(ptail(p.project_path))+'</b></td><td>'+esc(p.display)
-      +(p.pasted_chars?' <span class="chip">+'+tok(p.pasted_chars)+' pasted</span>':'')
-      +(p.is_slash?' <span class="chip">/cmd</span>':'')+'</td></tr>').join('')+'</table>'
-      :'<div class="sess-note">no prompts match</div>')+'</div>';
-  const q=document.getElementById('pq');
-  q.addEventListener('input',()=>{pq=q.value;render();
-    const n=document.getElementById('pq');n.focus();n.setSelectionRange(n.value.length,n.value.length);});
-  document.getElementById('pproj').addEventListener('change',e=>{pproj=e.target.value;render();});
 }
 
 /* redraw chart views when the panel width actually changes */

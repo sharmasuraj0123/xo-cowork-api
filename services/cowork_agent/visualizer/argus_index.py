@@ -3,12 +3,13 @@
 Pure reader: opens the Claude Code session-telemetry SQLite DB **read-only**
 and returns one JSON-able payload for GET /space/data/sessions.json. The
 Sessions tab renders it directly: session list (subagents nested), per-day
-rollups for client-side windowing (models, sessions, tools), prompt tail.
+rollups for client-side windowing (models, sessions, tools).
 
 Failure policy: fail fast when data would be wrong (missing DB file, missing
 sessions table); degrade when merely incomplete (missing turns/tool_calls/
-prompts/app_meta → that key is empty, the rest builds). No alerts — the
-alerts table is deliberately never queried (user decision).
+app_meta → that key is empty, the rest builds). No alerts and no prompts —
+those tables are deliberately never queried (user decision; prompts carry
+raw typed text, which also keeps it out of the payload).
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Bounds — each constant is an assumption made explicit:
-MAX_PROMPTS = 200           # prompt tail shipped to the UI (a list, not search)
 MAX_TOOLS_PER_SESSION = 10  # per-session tool rollup rows (detail card height)
 _BUSY_TIMEOUT_MS = 2000     # Argus writes while we read; brief waits ok
 _EXPECTED_SCHEMA = 6        # argus.db app_meta.schema_version this targets
@@ -122,19 +122,6 @@ def _daily_tools(con: sqlite3.Connection) -> list[dict]:
             for d, n, c, e in rows]
 
 
-def _prompts_tail(con: sqlite3.Connection) -> list[dict]:
-    try:
-        rows = con.execute(
-            "select timestamp_ms, project_path, display, pasted_chars,"
-            " is_slash from prompts order by timestamp_ms desc limit ?",
-            (MAX_PROMPTS,)).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    return [{"timestamp_ms": t, "project_path": p or "", "display": d or "",
-             "pasted_chars": pc or 0, "is_slash": bool(sl)}
-            for t, p, d, pc, sl in rows]
-
-
 def build_argus_stats(db_path: Path) -> dict:
     con = _connect_ro(db_path)
     try:
@@ -144,7 +131,6 @@ def build_argus_stats(db_path: Path) -> dict:
         daily_raw = _daily_rollup(con, "session_id", "session_id")
         tools_by_session = _tools_by_session(con)
         daily_tools = _daily_tools(con)
-        prompts = _prompts_tail(con)
     finally:
         con.close()
 
@@ -210,5 +196,4 @@ def build_argus_stats(db_path: Path) -> dict:
         "daily_sessions": daily_sessions,
         "sessions": sessions,
         "daily_tools": daily_tools,
-        "prompts": prompts,
     }

@@ -50,11 +50,11 @@ Space theme. It lives in its own closure, independent of the graph's
   first open; the Refresh button re-fetches (server rebuilds behind the
   same 30 s TTL).
 - Sub-views: Overview · Sessions (list → detail with sub-agents and
-  per-session tools) · Tools · Models · Trends · Prompts. The
-  `Today/7d/30d/All` window selector filters client-side over per-day
-  rollups shipped in the payload.
-- No alerts view by design; prompt full-text search is out of scope (the
-  Prompts view is a client-side filter over the latest 200).
+  per-session tools) · Tools · Models · Trends. The `Today/7d/30d/All`
+  window selector filters client-side over per-day rollups shipped in the
+  payload.
+- No alerts and no prompts by design — those tables are never read, so raw
+  prompt text never enters the payload.
 
 ## Data format
 
