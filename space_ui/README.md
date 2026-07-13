@@ -36,6 +36,19 @@ to 60 units — generated data can put 100+ leaves in one cluster, whose summed
 spring stiffness makes the original explicit-Euler sim diverge (positions hit
 1e20 and the canvas goes blank).
 
+## Datasets
+
+The page serves two datasets through one engine, chosen by URL param:
+
+- `/space/` (default) — the xo-projects atlas (`data/space.json`).
+- `/space/?data=argus` — Claude Code session telemetry (`data/argus.json`,
+  generated from the Argus DB; `ARGUS_DB` env, default `~/.argus/argus.db`).
+  Hubs = projects, month-bucket groups, leaves = sessions (`disc`) and
+  subagent runs (`diamond`, tied "spawned by"). Same ten-key format below.
+
+The `Atlas | Argus` topbar toggle navigates between them; clicking the active
+one reloads (that is the refresh — data is rebuilt behind a 30 s server TTL).
+
 ## Data format
 
 ```jsonc

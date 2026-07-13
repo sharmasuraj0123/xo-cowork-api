@@ -30,6 +30,9 @@
   [hidden]{display:none!important}
 
   /* ---------------- topbar ---------------- */
+  .dstoggle{display:flex;gap:2px;background:#14161b;border:1px solid #23262d;border-radius:8px;padding:2px}
+  .dstoggle button{background:none;border:0;color:#b3ada0;font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer}
+  .dstoggle button.is-on{background:#23262d;color:#e9e4d9}
   .topbar{
     display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:20px;
     padding:0 18px;border-bottom:1px solid var(--line);
@@ -391,6 +394,10 @@
     <button id="tab-six">Six&nbsp;Degrees</button>
   </div>
   <div class="tright">
+    <div class="dstoggle" title="Data source">
+      <button id="ds-atlas">Atlas</button>
+      <button id="ds-argus">Argus</button>
+    </div>
     <div class="rootpick">
       <button id="root-btn" title="Re-root the graph on any node">
         <span class="rlab">Root</span><b id="root-name">XO</b><span class="caret">&#9662;</span>
@@ -507,6 +514,15 @@
 'use strict';
 
 /* ============================== SERVER WIDGET ============================== */
+/* dataset toggle — Atlas = data/space.json, Argus = data/argus.json (?data=).
+   Switching NAVIGATES instead of re-booting in place: all sim/listener state
+   lives inside boot() with no teardown path; a reload is the only clean
+   slate. Clicking the active button re-navigates the same URL — that IS the
+   refresh (server holds a 30s TTL). */
+const DS=new URLSearchParams(location.search).get('data')==='argus'?'argus':'atlas';
+document.getElementById('ds-'+DS).classList.add('is-on');
+document.getElementById('ds-atlas').addEventListener('click',()=>{location.href=location.pathname;});
+document.getElementById('ds-argus').addEventListener('click',()=>{location.href=location.pathname+'?data=argus';});
 const API_BASE=location.port==='5002'?'':'http://127.0.0.1:5002';
 const srvPip=document.getElementById('srv-pip');
 const srvText=document.getElementById('srv-text');
@@ -1721,16 +1737,17 @@ renderTimelineState();
 }
 
 /* ============================== BOOT ============================== */
-fetch('data/space.json',{cache:'no-store'})
+const DATA_FILE=DS==='argus'?'data/argus.json':'data/space.json';
+fetch(DATA_FILE,{cache:'no-store'})
   .then(r=>{if(!r.ok)throw new Error('http '+r.status);return r.json();})
-  .then(d=>boot(d,'local file'))
+  .then(d=>boot(d,DS==='argus'?'argus telemetry':'local file'))
   .catch(err=>{
-    console.warn('Space could not load data/space.json:',err.message);
+    console.warn('Space could not load '+DATA_FILE+':',err.message);
     const el=document.createElement('div');
     el.className='nodata';
     el.innerHTML='<div class="eyebrow">No data source</div>'+
       '<h1>Space reads its map from a local file.</h1>'+
-      '<p>This page loads <b>data/space.json</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
+      '<p>This page loads <b>'+DATA_FILE+'</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
       '<pre>cd xo-cowork-api && ./cowork-api.sh start</pre>'+
       '<p>then open <b>http://localhost:5002/space/</b></p>'+
       '<button id="nodata-retry">Retry</button>';

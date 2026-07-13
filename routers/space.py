@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from services.cowork_agent.visualizer.argus_index import build_argus_data
 from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
@@ -91,6 +92,37 @@ async def space_data():
         )
 
     _data_cache = (now, data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Argus telemetry graph — second Space dataset. Same TTL, separate cache slot.
+ARGUS_DB_DEFAULT = "~/.argus/argus.db"
+
+_argus_cache: tuple[float, dict] | None = None
+
+
+@router.get("/data/argus.json")
+async def argus_data():
+    """The Argus session-telemetry graph, generated live from the Argus DB.
+
+    DB path from ARGUS_DB (env), default ~/.argus/argus.db, expanded at
+    request time. No static fallback: a truthful 503 (the UI shows its
+    no-data panel) beats a stale pretty graph."""
+    global _argus_cache
+    now = time.monotonic()
+    if _argus_cache is not None and now - _argus_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_argus_cache[1], headers={"Cache-Control": "no-store"})
+
+    db_path = Path(os.getenv("ARGUS_DB", ARGUS_DB_DEFAULT)).expanduser()
+    try:
+        data = build_argus_data(db_path)
+    except Exception as exc:
+        print(f"⚠️ argus_index failed ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "argus_db_unavailable", "message": str(exc)},
+        )
+    _argus_cache = (now, data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
