@@ -12,6 +12,10 @@
 #     gh      — xo-projects-sync per-project backup repos
 #     gnupg   — xo-projects-sync encrypted backup/restore (gpg + gpg-agent)
 #
+# Also revives the Argus telemetry daemon (installed via requirements.txt;
+# feeds ~/.argus/argus.db, which the Space Sessions tab reads). Runs every
+# boot so a workspace restart self-heals the daemon.
+#
 # Idempotent: each dep is skipped if already on PATH, so repeat boots are
 # cheap. Non-fatal: every step logs and continues on failure, and the
 # script always exits 0 so the API still comes up for debugging.
@@ -115,9 +119,30 @@ install_gnupg() {
     fi
 }
 
-log "Ensuring shared system deps (rclone, gh, gnupg)"
+# argus — session-telemetry daemon. The package (argus-code, pinned in
+# requirements.txt) installs the binary into the API's environment, so it is
+# on this process's PATH. `argus daemon start` reports "daemon already
+# running, PID …" when up — treated as healthy, keeping this idempotent.
+# Never fatal: without the daemon the Sessions tab shows its error card.
+start_argus_daemon() {
+    if ! command -v argus >/dev/null 2>&1; then
+        log_warn "argus binary not on PATH — run the install step (requirements.txt); session telemetry degraded"
+        return 0
+    fi
+    local out
+    if out=$(argus daemon start 2>&1); then
+        log_success "argus daemon: ${out:-started}"
+    elif echo "$out" | grep -qi "already running"; then
+        log "argus daemon already running"
+    else
+        log_warn "argus daemon start failed — session telemetry degraded: ${out}"
+    fi
+}
+
+log "Ensuring shared system deps (rclone, gh, gnupg) + argus daemon"
 install_rclone
 install_gh
 install_gnupg
+start_argus_daemon
 log "Shared dep check complete"
 exit 0

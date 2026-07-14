@@ -1,6 +1,6 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Space &middot; v3 Local-first</title>
+<title>XO Space</title>
 <style>html{color-scheme:dark}</style>
 </head><body>
 <title>Space</title>
@@ -562,7 +562,13 @@
 'use strict';
 
 /* ============================== SERVER WIDGET ============================== */
-const API_BASE=location.port==='5002'?'':'http://127.0.0.1:5002';
+/* Served under /space/ means THIS origin is the API — true on localhost and
+   equally true behind a remote proxy (e.g. a Coder workspace URL), so talk
+   same-origin and inherit the page's routing + auth. The 127.0.0.1:5002
+   fallback exists only for UI development, where this file is opened from
+   some other static server. (The old check keyed on location.port==='5002',
+   which wrongly sent proxied pages to the viewer's own machine.) */
+const API_BASE=location.pathname.startsWith('/space')?'':'http://127.0.0.1:5002';
 const srvPip=document.getElementById('srv-pip');
 const srvText=document.getElementById('srv-text');
 const srvBtn=document.getElementById('srv-btn');
@@ -570,7 +576,7 @@ const srvPop=document.getElementById('srvpop');
 let srvOn=null;
 async function pollServer(){
   try{
-    const r=await fetch(API_BASE+'/space/server/status',{cache:'no-store'});
+    const r=await fetch(API_BASE+'/space/server/status'+location.search,{cache:'no-store'});
     if(!r.ok)throw new Error('http '+r.status);
     setSrv(true);
   }catch(e){setSrv(false);}
@@ -587,7 +593,7 @@ function setSrv(on){
 srvBtn.addEventListener('click',async()=>{
   if(srvOn){
     srvBtn.textContent='stopping…';
-    try{await fetch(API_BASE+'/space/server/stop',{method:'POST'});}catch(e){}
+    try{await fetch(API_BASE+'/space/server/stop'+location.search,{method:'POST'});}catch(e){}
     setTimeout(pollServer,900);
   }else{
     srvPop.classList.toggle('is-open');
@@ -635,10 +641,25 @@ document.getElementById('tab-sessions').addEventListener('click',open);
 
 function load(){
   loading=true;failed=null;render();
-  fetch('data/sessions.json',{cache:'no-store'})
-    .then(r=>{if(!r.ok)throw new Error('http '+r.status);return r.json();})
+  /* forward the page's query string (e.g. Coder's ?coder_session_token=…)
+     so this lazy fetch authenticates on its own, independent of whether the
+     proxy's session cookie is still fresh — an auth redirect to another
+     origin surfaces here as a bare "Failed to fetch". */
+  fetch('data/sessions.json'+location.search,{cache:'no-store'})
+    .then(async r=>{
+      if(!r.ok){
+        /* the API answered — surface its own explanation (e.g. the 503's
+           "Argus DB not found at …") instead of a bare status code */
+        let msg='http '+r.status;
+        try{const j=await r.json();if(j.detail&&j.detail.message)msg=j.detail.message;}catch(e){}
+        throw new Error(msg);
+      }
+      return r.json();})
     .then(d=>{SD=d;loading=false;render();})
-    .catch(err=>{loading=false;failed=err.message;render();});
+    /* fetch rejects with TypeError ONLY when the request never reached the
+       server (down/restarting/proxy) — a different failure than any HTTP
+       error, and it must not be blamed on the Argus DB */
+    .catch(err=>{loading=false;failed=(err instanceof TypeError)?'\x00offline':err.message;render();});
 }
 
 /* ---- tiny chart kit: canvas, Space theme, zero deps. Mouse math is
@@ -731,8 +752,12 @@ function drawBars(host,items){
 function render(){
   if(loading){wrap.innerHTML='<div class="sess-note">loading data/sessions.json…</div>';return;}
   if(failed){
-    wrap.innerHTML='<div class="sess-err"><b>Could not load data/sessions.json</b> ('+esc(failed)+'). '
-      +'The API builds it live from the Argus DB (env <b>ARGUS_DB</b>, default <b>~/.argus/argus.db</b>). '
+    const off=failed==='\x00offline';
+    wrap.innerHTML='<div class="sess-err">'+(off
+      ?'<b>xo-cowork-api is unreachable</b> — the request never reached the server '
+        +'(stopped or restarting; the footer pill tracks it). Not an Argus problem. '
+      :'<b>Could not load data/sessions.json</b> ('+esc(failed)+'). '
+        +'The API builds it live from the Argus DB (env <b>ARGUS_DB</b>, default <b>~/.argus/argus.db</b>). ')
       +'<button class="sess-refresh" id="sess-retry">Retry</button></div>';
     document.getElementById('sess-retry').addEventListener('click',load);return;
   }
@@ -2102,7 +2127,9 @@ renderTimelineState();
 }
 
 /* ============================== BOOT ============================== */
-fetch('data/space.json',{cache:'no-store'})
+/* query string forwarded for proxy auth (e.g. Coder session token) — same
+   reasoning as the sessions.json fetch above */
+fetch('data/space.json'+location.search,{cache:'no-store'})
   .then(r=>{if(!r.ok)throw new Error('http '+r.status);return r.json();})
   .then(d=>boot(d,'local file'))
   .catch(err=>{

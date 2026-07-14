@@ -8,6 +8,7 @@ import os
 import json
 import datetime
 import subprocess
+import sys
 import uuid
 import shutil
 from pathlib import Path
@@ -426,11 +427,20 @@ def _install_shared_deps() -> None:
     try:
         # 10-minute ceiling covers a cold first-time install (rclone download +
         # gh .deb + apt). Steady-state re-runs finish in seconds.
+        #
+        # The server is typically launched as venv/bin/python WITHOUT venv
+        # activation, so venv/bin is not on PATH — but console scripts pip
+        # installs for us (e.g. `argus`) live exactly there, next to the
+        # interpreter. Prepend it so the script sees them.
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join(
+            [os.path.dirname(sys.executable), env.get("PATH", "")])
         result = subprocess.run(
             ["bash", script],
             cwd=repo_root,
             check=False,
             timeout=600,
+            env=env,
         )
         if result.returncode == 0:
             print("✅ Shared dep check completed")
