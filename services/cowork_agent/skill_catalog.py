@@ -109,13 +109,33 @@ async def install(name: str) -> dict:
             if not step["ok"]:
                 ok = False
                 break
+        steps_total = len(entry["commands"])
         return {
             "name": name,
             "ok": ok,
+            "summary": _summarize(name, ok, steps, steps_total),
             "steps": steps,
-            "steps_total": len(entry["commands"]),
+            "steps_total": steps_total,
             "steps_run": len(steps),
         }
+
+
+def _summarize(name: str, ok: bool, steps: list[dict], steps_total: int) -> str:
+    """Build a human-facing one-line summary the frontend can show as-is."""
+    plural = "s" if steps_total != 1 else ""
+    if ok:
+        return f"Installed {name!r} ({steps_total} step{plural})."
+
+    failed = steps[-1] if steps else None
+    at = f"step {len(steps)} of {steps_total}"
+    if failed is None:
+        return f"Install of {name!r} failed."
+    if failed["timed_out"]:
+        return f"Install of {name!r} timed out at {at}."
+    if failed["exit_code"] is None:
+        # Command never started (bad cwd, missing binary, placeholder error).
+        return f"Install of {name!r} failed at {at}: command could not start."
+    return f"Install of {name!r} failed at {at} (exit code {failed['exit_code']})."
 
 
 def _expand_placeholders(command: str) -> str:
