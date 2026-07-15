@@ -1,0 +1,21 @@
+{
+  "_shape": {
+    "name": "required, unique",
+    "description": "optional",
+    "command": "single shell command (use this OR commands, not both)",
+    "commands": ["step 1", "step 2 — run sequentially, stop at first failure"],
+    "timeout_seconds": "optional, default 300, applies per command",
+    "cwd": "optional working directory for every command",
+    "_placeholders": "in any command: {skills_dir} → active agent's <home_dir>/skills, {home_dir}, {agent_name}. Unknown {..} pass through."
+  },
+  "skills": [
+    {
+      "name": "zero",
+      "description": "@zeroxyz/cli — installs into the active agent's skills dir",
+      "commands": [
+        "npm i -g @zeroxyz/cli",
+        "zero init --skills-dir {skills_dir}"
+      ]
+    }
+  ]
+}
