@@ -26,7 +26,6 @@ directly. Descended from the single-file xo-atlas `v3.html`.
 | `js/core/server-widget.js` | Footer server pill (status poll + stop). |
 | `js/views/atlas.js` | Graph + Timeline + Six Degrees — three lenses over one dataset, one shared closure, three exported views. |
 | `js/views/sessions.js` | The Sessions (Argus telemetry) view. |
-| `js/views/system.js` | The System view: read-only status cards (`/health`, backups, onboarding, MCP/tools/skills/automations/plugins/workspace-memory), each card failing independently. |
 
 See `AGENTS.md` in this folder for the view contract and working rules.
 

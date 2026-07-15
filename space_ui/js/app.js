@@ -5,7 +5,6 @@ import {registerView,startRegistry} from './core/registry.js';
 import {initServerWidget} from './core/server-widget.js';
 import {graphView,timeView,sixView} from './views/atlas.js';
 import sessionsView from './views/sessions.js';
-import systemView from './views/system.js';
 
 /* app-shell bulkhead: a fatal script error logs instead of white-screening */
 addEventListener('error',e=>console.error('Space shell error:',e.error||e.message));
@@ -16,7 +15,6 @@ try{
   registerView(timeView);
   registerView(sixView);
   registerView(sessionsView);
-  registerView(systemView);
   startRegistry({defaultView:'graph'});
 }catch(err){console.error('Space registry failed to start:',err);}
 
