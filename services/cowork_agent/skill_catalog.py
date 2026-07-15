@@ -17,6 +17,10 @@ Catalog entry shape (one of ``command``/``commands`` is required):
                      sequentially, stopping at the first failure
     timeout_seconds  optional, default 300 — applies per command
     cwd              optional working directory for every command
+    success_message  optional human-authored line returned as ``summary`` on
+                     success (same placeholders as commands are expanded); a
+                     default is used when omitted. Failure always returns a
+                     generic ``Failed to install <name>.`` line.
 
 A missing or malformed catalog degrades to an empty catalog with a printed
 warning; invalid entries are skipped, valid ones kept — matches the non-fatal
@@ -110,32 +114,36 @@ async def install(name: str) -> dict:
                 ok = False
                 break
         steps_total = len(entry["commands"])
+        summary = (
+            _success_summary(name, entry["success_message"])
+            if ok
+            else f"Failed to install {name!r}."
+        )
         return {
             "name": name,
             "ok": ok,
-            "summary": _summarize(name, ok, steps, steps_total),
+            "summary": summary,
             "steps": steps,
             "steps_total": steps_total,
             "steps_run": len(steps),
         }
 
 
-def _summarize(name: str, ok: bool, steps: list[dict], steps_total: int) -> str:
-    """Build a human-facing one-line summary the frontend can show as-is."""
-    plural = "s" if steps_total != 1 else ""
-    if ok:
-        return f"Installed {name!r} ({steps_total} step{plural})."
+def _success_summary(name: str, message: str | None) -> str:
+    """Success line for the response.
 
-    failed = steps[-1] if steps else None
-    at = f"step {len(steps)} of {steps_total}"
-    if failed is None:
-        return f"Install of {name!r} failed."
-    if failed["timed_out"]:
-        return f"Install of {name!r} timed out at {at}."
-    if failed["exit_code"] is None:
-        # Command never started (bad cwd, missing binary, placeholder error).
-        return f"Install of {name!r} failed at {at}: command could not start."
-    return f"Install of {name!r} failed at {at} (exit code {failed['exit_code']})."
+    Returns the catalog's human-authored ``success_message`` (with the same
+    ``{skills_dir}``-style placeholders expanded), or a default when the entry
+    sets none. Best-effort on expansion: display text must never fail an
+    install that already succeeded, so a placeholder error falls back to the
+    raw message. Plain messages (no ``{`` ) never touch the registry.
+    """
+    if not message:
+        return f"Installed {name!r}."
+    try:
+        return _expand_placeholders(message)
+    except Exception:
+        return message
 
 
 def _expand_placeholders(command: str) -> str:
@@ -200,6 +208,9 @@ def _normalize(entry) -> dict | None:
     cwd = entry.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         return None
+    success_message = entry.get("success_message")
+    if success_message is not None and not isinstance(success_message, str):
+        return None
 
     return {
         "name": name.strip(),
@@ -207,6 +218,7 @@ def _normalize(entry) -> dict | None:
         "commands": resolved,
         "timeout_seconds": timeout,
         "cwd": cwd,
+        "success_message": success_message,
     }
 
 
