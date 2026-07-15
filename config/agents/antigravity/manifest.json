@@ -1,0 +1,45 @@
+{
+  "name": "antigravity",
+  "binary": "agy",
+  "home_dir": "~/.gemini/antigravity-cli",
+  "env_file": "~/.gemini/antigravity-cli/.env",
+  "config_file": "~/.gemini/antigravity-cli/settings.json",
+  "agents_dir": "~/.gemini/antigravity-cli/brain",
+  "workspace_dir": "~/xo-projects",
+  "provisioning_log": "~/.gemini/antigravity-cli/provisioning.log",
+  "cwd": "~",
+  "cli_timeout_seconds": 300,
+  "api": {
+    "session_header": ""
+  },
+  "model_prefix": "antigravity",
+  "model_capabilities": {
+    "function_calling": true,
+    "vision": true,
+    "reasoning": true,
+    "json_output": false,
+    "max_context": 1000000,
+    "max_output": 16384
+  },
+  "models": {
+    "default": "Gemini 3.5 Flash (Medium)",
+    "catalog": [
+      "Gemini 3.5 Flash (Medium)",
+      "Gemini 3.5 Flash (High)",
+      "Gemini 3.5 Flash (Low)",
+      "Gemini 3.1 Pro (Low)",
+      "Gemini 3.1 Pro (High)",
+      "Claude Sonnet 4.6 (Thinking)",
+      "Claude Opus 4.6 (Thinking)",
+      "GPT-OSS 120B (Medium)"
+    ]
+  },
+  "auth": {
+    "token_file": "~/.gemini/antigravity-cli/antigravity-oauth-token",
+    "method": "consumer-oauth",
+    "note": "agy authenticates via a consumer Google OAuth token file (self-refreshing). There is no headless `agy login`/`agy auth status` subcommand; first-time login is an interactive browser flow. Login state is read from the token file."
+  },
+  "flags": {
+    "dangerously_skip_permissions": true
+  }
+}
