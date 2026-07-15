@@ -19,9 +19,17 @@ import {singleFlight} from './store.js';
 
 export const API_BASE=location.pathname.startsWith('/space')?'':'http://127.0.0.1:5002';
 
+/* merge the page's query string into a path that may already carry one —
+   naive concatenation would produce "…?limit=30?token=…" */
+function withPageQuery(path){
+  const ps=location.search.replace(/^\?/,'');
+  if(!ps)return path;
+  return path+(path.includes('?')?'&':'?')+ps;
+}
+
 async function doFetch(path,method){
   try{
-    const r=await fetch(path+location.search,{method,cache:'no-store'});
+    const r=await fetch(withPageQuery(path),{method,cache:'no-store'});
     if(!r.ok){
       let message='http '+r.status;
       try{

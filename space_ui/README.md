@@ -26,6 +26,7 @@ directly. Descended from the single-file xo-atlas `v3.html`.
 | `js/core/server-widget.js` | Footer server pill (status poll + stop). |
 | `js/views/atlas.js` | Graph + Timeline + Six Degrees — three lenses over one dataset, one shared closure, three exported views. |
 | `js/views/sessions.js` | The Sessions (Argus telemetry) view. |
+| `js/views/projects.js` | The Projects view: xo-projects observability — project list with per-project drawers for live todos, open sessions, and recent timeline events (read-only v1). |
 
 See `AGENTS.md` in this folder for the view contract and working rules.
 
