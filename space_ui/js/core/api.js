@@ -21,15 +21,20 @@ export const API_BASE=location.pathname.startsWith('/space')?'':'http://127.0.0.
 
 /* merge the page's query string into a path that may already carry one —
    naive concatenation would produce "…?limit=30?token=…" */
-function withPageQuery(path){
+export function withPageQuery(path){
   const ps=location.search.replace(/^\?/,'');
   if(!ps)return path;
   return path+(path.includes('?')?'&':'?')+ps;
 }
 
-async function doFetch(path,method){
+async function doFetch(path,method,body){
   try{
-    const r=await fetch(withPageQuery(path),{method,cache:'no-store'});
+    const opts={method,cache:'no-store'};
+    if(body!==undefined){
+      opts.headers={'Content-Type':'application/json'};
+      opts.body=JSON.stringify(body);
+    }
+    const r=await fetch(withPageQuery(path),opts);
     if(!r.ok){
       let message='http '+r.status;
       try{
@@ -48,7 +53,7 @@ async function doFetch(path,method){
   }
 }
 
-export function apiFetch(path,{method='GET'}={}){
+export function apiFetch(path,{method='GET',body}={}){
   if(method==='GET')return singleFlight('GET '+path,()=>doFetch(path,'GET'));
-  return doFetch(path,method); /* writes are never deduped — disable the button instead */
+  return doFetch(path,method,body); /* writes are never deduped — disable the button instead */
 }
