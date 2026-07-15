@@ -35,6 +35,15 @@
   .md-code{background:var(--bg-3);border:1px solid var(--line-soft);border-radius:9px;padding:10px 12px;margin:8px 0;overflow-x:auto;position:relative}
   .md-code code{font:500 12px var(--mono);background:none;border:none;padding:0;white-space:pre}
   .md-code[data-lang]::before{content:attr(data-lang);position:absolute;top:6px;right:10px;font:500 9px var(--mono);letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+  .md s{color:var(--ink-3)}
+  .md hr{border:0;border-top:1px solid var(--line-soft);margin:12px 0}
+  .md blockquote{margin:8px 0;padding:2px 12px;border-left:3px solid var(--line);color:var(--ink-2)}
+  .md .md-task{list-style:none;margin-left:-16px}
+  .md .md-task input{margin-right:6px;vertical-align:1px;accent-color:var(--accent)}
+  .md-table{border-collapse:collapse;margin:10px 0;font-size:12.5px;display:block;overflow-x:auto;max-width:100%}
+  .md-table th,.md-table td{border:1px solid var(--line-soft);padding:5px 10px;text-align:left;vertical-align:top}
+  .md-table th{background:var(--bg-3);color:var(--ink);font-weight:600}
+  .md-table tbody tr:nth-child(even){background:var(--bg-2)}
   /* reasoning + tool parts */
   .msg-reason,.msg-tool{margin:8px 0;border:1px solid var(--line-soft);border-radius:9px;background:var(--bg-2)}
   .msg-reason summary,.msg-tool summary{cursor:pointer;padding:7px 11px;font:500 11px var(--mono);color:var(--ink-3);list-style:none}
