@@ -11,9 +11,24 @@ zero configuration.
 
 ## Files
 
-| File | What it is |
+Build-free ES modules (no bundler, no dependencies); the browser loads them
+directly. Descended from the single-file xo-atlas `v3.html`.
+
+| Path | What it is |
 |------|------------|
-| `index.html` | The whole app (was xo-atlas `v3.html`). Self-contained, no dependencies. |
+| `index.html` | Thin shell: markup + stylesheet links + `js/app.js` entry. |
+| `css/` | The original stylesheet split at its section banners, loaded in original order (cascade unchanged). |
+| `js/app.js` | Entry point. Registers views; **adding a view = one new file in `js/views/` + one import line here.** |
+| `js/core/registry.js` | View registry: tab nav, `1..n` hotkeys, `#/<id>` hash routing, lazy mount, per-view failure isolation. |
+| `js/core/api.js` | The one fetch layer: `API_BASE`, query-string auth forwarding, offline / HTTP-error / 501 classification, single-flight GETs. |
+| `js/core/store.js` | Idempotency helpers: single-flight promises, slotted (non-stacking) intervals. |
+| `js/core/ui.js` | Shared UI helpers (toast). |
+| `js/core/server-widget.js` | Footer server pill (status poll + stop). |
+| `js/views/atlas.js` | Graph + Timeline + Six Degrees — three lenses over one dataset, one shared closure, three exported views. |
+| `js/views/sessions.js` | The Sessions (Argus telemetry) view. |
+| `js/views/system.js` | The System view: read-only status cards (`/health`, backups, onboarding, MCP/tools/skills/automations/plugins/workspace-memory), each card failing independently. |
+
+See `AGENTS.md` in this folder for the view contract and working rules.
 
 ## How it's served
 
@@ -41,8 +56,9 @@ spring stiffness makes the original explicit-Euler sim diverge (positions hit
 The fourth topbar tab (`Graph | Timeline | Six Degrees | Sessions`) is an
 Argus telemetry dashboard: Claude Code session stats rendered as cards,
 tables, and hand-drawn canvas charts (no dependencies), re-skinned to the
-Space theme. It lives in its own closure, independent of the graph's
-`boot()` — either can fail without taking the other down.
+Space theme. It lives in its own module (`js/views/sessions.js`), independent
+of the atlas's `boot()` — either can fail without taking the other down, and
+the registry keeps the tabs switchable regardless.
 
 - Data: `GET /space/data/sessions.json`, one pre-aggregated payload built
   live from the Argus DB (`ARGUS_DB` env, default `~/.argus/argus.db`) by
