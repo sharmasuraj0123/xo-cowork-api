@@ -9,8 +9,11 @@
   }
   #chips button:hover{color:var(--ink);border-color:#39404d}
   #chips button.is-on{background:rgba(168,217,79,.12);border-color:var(--accent);color:var(--ink)}
-  #hint{top:52px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3)}
+  #hint{top:52px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3);transition:opacity .5s var(--ease)}
   #hint b{color:var(--ink-2);font-weight:500}
+  /* the intro overlay covers the same corner and already carries the guidance —
+     keep the hint hidden until the intro is dismissed (intro-dim tracks that) */
+  #view-graph.intro-dim #hint{opacity:0;visibility:hidden}
   #legend{bottom:38px;left:18px;display:flex;gap:15px;align-items:center}
   #legend .li{display:flex;gap:6px;align-items:center;font:400 10px var(--mono);letter-spacing:.06em;color:var(--ink-3)}
   #legend .sw{width:8px;height:8px;border-radius:50%}

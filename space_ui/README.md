@@ -43,8 +43,9 @@ truthful error panel beats both.)
 
 - Override the folder with the `SPACE_DIR` env var (e.g. to point at a live
   xo-atlas checkout during UI development).
-- The footer server pill polls `GET /space/server/status`; **Stop** calls
-  `POST /space/server/stop` (localhost only).
+- The footer server pill polls `GET /space/server/status`. (The backend also
+  exposes `POST /space/server/stop`, localhost-only, but the UI deliberately
+  carries no stop control.)
 
 Local change vs upstream xo-atlas: `simTick()` clamps per-tick node velocity
 to 60 units — generated data can put 100+ leaves in one cluster, whose summed

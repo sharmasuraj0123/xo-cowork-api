@@ -1,5 +1,7 @@
-/* Footer server pill: polls /space/server/status, offers Stop / the start
-   command. Independent of every view. */
+/* Footer server pill: polls /space/server/status; when the API is offline it
+   offers the start command. No stop control — killing the server from its own
+   UI was a footgun, especially behind a shared proxy. Independent of every
+   view. */
 import {API_BASE,apiFetch} from './api.js';
 import {setSlottedInterval} from './store.js';
 
@@ -18,18 +20,12 @@ export function initServerWidget(){
     srvOn=on;
     srvPip.className='pip '+(on?'on':'off');
     srvText.textContent='xo-cowork-api · '+(on?'online':'offline');
-    srvBtn.hidden=false;
-    srvBtn.textContent=on?'Stop':'Start…';
+    srvBtn.hidden=on; /* button exists only to show the start command */
+    srvBtn.textContent='Start…';
     if(on)srvPop.classList.remove('is-open');
   }
-  srvBtn.addEventListener('click',async()=>{
-    if(srvOn){
-      srvBtn.textContent='stopping…';
-      await apiFetch(API_BASE+'/space/server/stop',{method:'POST'});
-      setTimeout(pollServer,900);
-    }else{
-      srvPop.classList.toggle('is-open');
-    }
+  srvBtn.addEventListener('click',()=>{
+    srvPop.classList.toggle('is-open');
   });
   document.getElementById('srv-copy').addEventListener('click',()=>{
     navigator.clipboard.writeText('cd xo-cowork-api && ./cowork-api.sh start').then(()=>{
