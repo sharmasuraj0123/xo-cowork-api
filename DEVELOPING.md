@@ -105,19 +105,19 @@ name. A missing capability is normal — the router returns its empty/501 shape.
 
 Capabilities in use today:
 
-| capability | what it provides | openclaw | claude_code | hermes |
-|---|---|:--:|:--:|:--:|
-| `adapter` | the `Adapter` class (run/stream dispatch) | ✓ | ✓ | ✓ |
-| `usage` | `/api/usage` | ✓ | ✓ | ✓ |
-| `models` | `/api/models` listing | ✓ | ✓ | ✓ |
-| `models_status` | `/models/status` | ✓ | ✓ | ✓ |
-| `channels_status` | `/channels/status` | ✓ | ✓ | ✓ |
-| `providers_status` | `/providers/status` | ✓ | ✓ | ✓ |
-| `sessions` | session read/convert | ✓ | ✓ | ✓ |
-| `chat` | `resolve_agent_id` / `handle_prompt` (optional) | ✓ | — | ✓ |
-| `streaming` | SSE shaping | ✓ | ✓ | ✓ |
-| `visualizer_source` | visualizer feed | ✓ | ✓ | ✓ |
-| `routes` | agent-owned `APIRouter` (active-only) | ✓ | — | ✓ |
+| capability | what it provides | openclaw | claude_code | hermes | antigravity |
+|---|---|:--:|:--:|:--:|:--:|
+| `adapter` | the `Adapter` class (run/stream dispatch) | ✓ | ✓ | ✓ | ✓ |
+| `usage` | `/api/usage` | ✓ | ✓ | ✓ | ✓ |
+| `models` | `/api/models` listing | ✓ | ✓ | ✓ | ✓ |
+| `models_status` | `/models/status` | ✓ | ✓ | ✓ | ✓ |
+| `channels_status` | `/channels/status` | ✓ | ✓ | ✓ | ✓ |
+| `providers_status` | `/providers/status` | ✓ | ✓ | ✓ | ✓ |
+| `sessions` | session read/convert | ✓ | ✓ | ✓ | ✓ |
+| `chat` | `resolve_agent_id` / `handle_prompt` (optional) | ✓ | — | ✓ | — |
+| `streaming` | SSE shaping | ✓ | ✓ | ✓ | — |
+| `visualizer_source` | visualizer feed | ✓ | ✓ | ✓ | ✓ |
+| `routes` | agent-owned `APIRouter` (active-only) | ✓ | — | ✓ | ✓ |
 
 `claude_code` has no `chat` capability on purpose: `routers/cowork_agent/chat.py`
 falls through to the shared `AgentDispatcher` when `chat`/`handle_prompt` is
@@ -181,10 +181,10 @@ AGENT_NAME=hermes python server.py                 # boot a specific backend
 **Validation playbook — run before every commit:**
 
 ```bash
-# 1. Import gate + route parity under each agent (expect 146 / 149 / 173)
-for a in claude_code openclaw hermes; do
+# 1. Import gate + route parity under each agent (expect 146 / 149 / 173 / 148)
+for a in claude_code openclaw hermes antigravity; do
   AGENT_NAME=$a venv/bin/python -c "import server; \
-    print('$a', len({r.path for r in server.app.routes if hasattr(r,'path')}))"
+    print('$a', len(server.app.openapi()['paths']))"
 done
 
 # 2. Modularity invariant (§6) — no agent name in core code. Upheld in review;
