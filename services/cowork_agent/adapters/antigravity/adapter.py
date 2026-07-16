@@ -382,6 +382,7 @@ class AntigravityAdapter(BaseAgentAdapter):
         cid: str | None = None
         emitted: set = set()
         final_text: str = ""
+        error_emitted: bool = False
         try:
             cmd = self._build_cmd(
                 question, cwd, native_conversation_id=native_resume, model=model, log_file=log_file
@@ -420,23 +421,51 @@ class AntigravityAdapter(BaseAgentAdapter):
                     proc.kill()
                     await wait_task
                     yield {"type": "error", "error": f"agy timed out after {timeout}s"}
+                    error_emitted = True
                     break
                 await asyncio.sleep(0.4)
 
             await wait_task
 
-            # Authoritative final answer from the transcript (fallback: stdout).
+            # Resolve THIS run's conversation id from its own --log-file only. The
+            # cwd-cache / newest-brain-dir fallbacks in resolve_conversation_id() can
+            # bind a FAILED run (which created no conversation) to an unrelated one —
+            # returning a stale answer from another session and masking the failure.
             if cid is None:
-                cid = _t.resolve_conversation_id(log_file, cwd)
+                cid = _t.conversation_id_from_log(log_file)
                 if cid and sk:
                     _patch_native_session_id(sk, cid)
-            final_text = _t.final_answer(cid) if cid else None
-            if final_text is None:
-                out_fh.seek(0)
-                final_text = (out_fh.read() or "").strip()
 
-            if final_text:
+            # The transcript's final answer is authoritative — it is only written on a
+            # genuine model response, so it is trustworthy even when agy exits
+            # non-zero. stdout, by contrast, can hold an error message: agy prints
+            # some failures (e.g. an invalid --model) to *stdout* with a non-zero exit,
+            # so stdout must NEVER be shown as a reply once the run has failed.
+            answer = _t.final_answer(cid) if cid else None
+            rc = proc.returncode
+
+            if answer and not error_emitted:
+                final_text = answer
                 yield {"type": "token", "token": final_text}
+            elif not answer and not error_emitted:
+                out_fh.seek(0)
+                stdout_tail = (out_fh.read() or "").strip()
+                err_fh.seek(0)
+                stderr_tail = (err_fh.read() or "").strip()
+                if rc not in (0, None):
+                    # Failed run: surface agy's own message as an ERROR (run() guards
+                    # this too) — not a blank bubble, and not the error masquerading
+                    # as an answer, which is what the stdout fallback used to do.
+                    detail = (stderr_tail or stdout_tail or f"agy exited with code {rc}")
+                    yield {"type": "error", "error": f"agy failed (exit {rc}): {detail[-500:]}"}
+                elif stdout_tail:
+                    # Clean exit but no transcript answer (rare) — fall back to stdout.
+                    final_text = stdout_tail
+                    yield {"type": "token", "token": final_text}
+                else:
+                    yield {"type": "error",
+                           "error": "agy produced no response. Please try again."}
+                error_emitted = True
         finally:
             # Roll up token usage onto the session index (best-effort).
             if sk and cid:
