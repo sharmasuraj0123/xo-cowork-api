@@ -130,11 +130,6 @@ def _resolve_agy_path() -> str:
     return path
 
 
-# The deployed Connect dialog detects login success only by scraping this exact
-# phrase from a stdout line (its `isAuthSuccess`). agy prints no such line, so we
-# emit a compat one alongside our own `done` event to flip the UI to "Connected".
-_SUCCESS_COMPAT_LINE = "Authentication token created successfully"
-
 CONNECT_TIMEOUT_SECONDS = int(os.getenv("ANTIGRAVITY_CONNECT_TIMEOUT", "180"))
 SSE_HEARTBEAT_SECONDS = int(os.getenv("ANTIGRAVITY_CONNECT_HEARTBEAT", "15"))
 _TRIGGER_MODEL = "Gemini 3.5 Flash (Low)"
@@ -280,7 +275,6 @@ async def antigravity_connect():
         # Idempotent short-circuit: already logged in → nothing to do.
         if has_usable_login():
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-            yield f"data: {json.dumps({'type': 'stdout', 'line': _SUCCESS_COMPAT_LINE})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
             return
 
@@ -437,7 +431,6 @@ async def antigravity_connect():
                     ok = has_usable_login() or (kind == "login_ok")
                     if ok:
                         clear_session(process)
-                        yield f"data: {json.dumps({'type': 'stdout', 'line': _SUCCESS_COMPAT_LINE})}\n\n"
                         yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
                         break
                     if kind == "exit":
