@@ -179,6 +179,9 @@ _auth_url: Optional[str] = None
 _started_at: Optional[float] = None
 _last_completed_session_id: Optional[str] = None
 _last_completed_ok: bool = False
+# True once the user has pasted a code this session — suppresses the auth-timer
+# respawn so we never kill an agy that is mid token-exchange.
+_code_submitted: bool = False
 
 
 def _deliver(session_id: str, item: tuple) -> None:
@@ -213,7 +216,7 @@ class AntigravityConnectCallbackBody(BaseModel):
 @router.post("/connect/antigravity/callback")
 async def antigravity_connect_callback(body: AntigravityConnectCallbackBody):
     """Send the pasted authorization code to the running ``agy`` login process."""
-    global _process, _session_id, _ready
+    global _process, _session_id, _ready, _code_submitted
 
     if _process is None or _session_id is None:
         if body.session_id == _last_completed_session_id and _last_completed_ok:
@@ -245,6 +248,7 @@ async def antigravity_connect_callback(body: AntigravityConnectCallbackBody):
         try:
             normalized = _normalize_code(body.code)
             await _write_code_to_pty(normalized.encode("utf-8"))
+            _code_submitted = True  # stop the auth-timer respawn — a token exchange is now in flight
             return {"ok": True, "message": "Code sent", "session_id": _session_id}
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             raise HTTPException(status_code=410, detail=f"Login process input closed: {e}")
@@ -265,7 +269,7 @@ async def antigravity_connect():
 
     async def generate() -> AsyncGenerator[str, None]:
         global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
-        global _last_completed_session_id, _last_completed_ok
+        global _last_completed_session_id, _last_completed_ok, _code_submitted
 
         session_id = str(uuid.uuid4())
         queue: asyncio.Queue = asyncio.Queue()
@@ -280,11 +284,11 @@ async def antigravity_connect():
             yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
             return
 
-        def clear_session() -> None:
+        def clear_session(proc) -> None:
             async def _clear():
                 global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
                 async with _lock:
-                    if _process is process:
+                    if _process is proc:
                         _process = None
                         _session_id = None
                         _ready = None
@@ -315,23 +319,22 @@ async def antigravity_connect():
                 text = buf.decode("utf-8", errors="replace").rstrip("\r")
                 loop.call_soon_threadsafe(_deliver, session_id, ("stdout", text))
 
-        async def login_watcher() -> None:
+        async def login_watcher(proc: asyncio.subprocess.Process) -> None:
             """The authoritative agy success signal: poll the token file. The
             instant login writes it, kill agy (skip the throwaway prompt) and
-            report success."""
+            report success. Bound to a specific ``proc`` so it stays correct across
+            respawns."""
             while True:
                 await asyncio.sleep(1.0)
-                if process is None:
-                    return
                 if has_usable_login():
-                    if process.returncode is None:
+                    if proc.returncode is None:
                         try:
-                            process.kill()
+                            proc.kill()
                         except ProcessLookupError:
                             pass
                     _deliver(session_id, ("login_ok", 0))
                     return
-                if process.returncode is not None:
+                if proc.returncode is not None:
                     return
 
         async def wait_done(proc: asyncio.subprocess.Process) -> None:
@@ -341,7 +344,57 @@ async def antigravity_connect():
             _last_completed_session_id = session_id
             _last_completed_ok = ok
             _deliver(session_id, ("exit", 0 if ok else (returncode or 1)))
-            clear_session()
+            clear_session(proc)
+
+        async def _spawn_login() -> Optional[asyncio.subprocess.Process]:
+            """Spawn one throwaway ``agy -p`` under a PTY and wire its reader +
+            watcher + wait tasks, publishing the session globals under the lock.
+            Reused for the initial spawn and for each respawn when agy's own ~60s
+            auth timer expires. Returns the process, or None if no PTY is available."""
+            global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
+            if not _pty_wanted():
+                return None
+            env = os.environ.copy()
+            env.setdefault("TERM", "xterm-256color")
+            env.setdefault("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
+            # Don't let agy try to open a browser on the SERVER — the user opens the
+            # URL on their own machine (OOB paste-code flow).
+            env["BROWSER"] = "true"
+            env["DISPLAY"] = ""
+            master_fd, slave_fd = _pty.openpty()
+            try:
+                _set_pty_winsize(slave_fd)
+                _disable_pty_echo(slave_fd)
+                proc = await asyncio.create_subprocess_exec(
+                    agy_path, "-p", "hello",
+                    "--model", _TRIGGER_MODEL,
+                    "--dangerously-skip-permissions",
+                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, env=env,
+                )
+            except BaseException:
+                for fd in (slave_fd, master_fd):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise
+            os.close(slave_fd)
+            async with _lock:
+                _process = proc
+                _pty_master = master_fd
+                _session_id = session_id
+                _ready = ready_event
+                _queue = queue
+                _auth_url = None
+                _started_at = time.monotonic()
+            threading.Thread(
+                target=_pty_reader_thread,
+                args=(master_fd, asyncio.get_running_loop()),
+                daemon=True, name=f"agy-connect-{session_id[:8]}",
+            ).start()
+            asyncio.create_task(wait_done(proc))
+            asyncio.create_task(login_watcher(proc))
+            return proc
 
         try:
             async with _lock:
@@ -352,64 +405,27 @@ async def antigravity_connect():
                     return
                 if _process is not None:
                     _close_pty_master()
+                _code_submitted = False
 
-                env = os.environ.copy()
-                env.setdefault("TERM", "xterm-256color")
-                env.setdefault("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-                # Don't let agy try to open a browser on the SERVER — the user
-                # opens the URL on their own machine (OOB paste-code flow).
-                env["BROWSER"] = "true"
-                env["DISPLAY"] = ""
-
-                use_pty = _pty_wanted()
-                if not use_pty:
-                    yield f"data: {json.dumps({'type': 'error', 'error': 'PTY unavailable; antigravity login needs a terminal.'})}\n\n"
-                    return
-
-                master_fd, slave_fd = _pty.openpty()
-                try:
-                    _set_pty_winsize(slave_fd)
-                    _disable_pty_echo(slave_fd)
-                    process = await asyncio.create_subprocess_exec(
-                        agy_path, "-p", "hello",
-                        "--model", _TRIGGER_MODEL,
-                        "--dangerously-skip-permissions",
-                        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, env=env,
-                    )
-                except BaseException:
-                    for fd in (slave_fd, master_fd):
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                    raise
-                os.close(slave_fd)
-                _process = process
-                _pty_master = master_fd
-                _session_id = session_id
-                _ready = ready_event
-                _queue = queue
-                _auth_url = None
-                _started_at = time.monotonic()
-                threading.Thread(
-                    target=_pty_reader_thread,
-                    args=(master_fd, asyncio.get_running_loop()),
-                    daemon=True, name=f"agy-connect-{session_id[:8]}",
-                ).start()
-                asyncio.create_task(wait_done(process))
-                asyncio.create_task(login_watcher())
+            process = await _spawn_login()
+            if process is None:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'PTY unavailable; antigravity login needs a terminal.'})}\n\n"
+                return
 
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-            deadline = (_started_at or time.monotonic()) + CONNECT_TIMEOUT_SECONDS
+            # The overall budget spans ALL respawns: each agy self-times-out at ~60s,
+            # and we refresh the URL on timeout so a slow-but-valid user (opening the
+            # link, signing in, pasting the code) isn't hard-failed by that 60s.
+            overall_deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
 
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_SECONDS)
                 except asyncio.TimeoutError:
-                    if time.monotonic() >= deadline:
+                    if time.monotonic() >= overall_deadline:
                         if process and process.returncode is None:
                             process.kill()
-                        clear_session()
+                        clear_session(process)
                         yield f"data: {json.dumps({'type': 'error', 'error': 'Antigravity login timed out'})}\n\n"
                         break
                     yield ": heartbeat\n\n"
@@ -419,27 +435,34 @@ async def antigravity_connect():
 
                 if kind in ("login_ok", "exit"):
                     ok = has_usable_login() or (kind == "login_ok")
-                    if kind == "exit" and value != 0 and not ok:
-                        clear_session()
-                        yield f"data: {json.dumps({'type': 'error', 'error': 'Antigravity login failed. Please try again.'})}\n\n"
-                        break
                     if ok:
-                        clear_session()
+                        clear_session(process)
                         yield f"data: {json.dumps({'type': 'stdout', 'line': _SUCCESS_COMPAT_LINE})}\n\n"
                         yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
                         break
-                    # exit==0 but no token yet — keep waiting briefly for the watcher.
+                    if kind == "exit":
+                        # agy exited without writing a token. If it had reached the
+                        # auth prompt (URL shown) and the user hasn't pasted a code
+                        # yet, this is agy's own ~60s auth timer expiring — respawn a
+                        # fresh agy + URL (up to overall_deadline) rather than
+                        # hard-failing a user still completing the browser flow. A URL
+                        # never shown ⇒ a genuine startup failure ⇒ don't respawn-storm.
+                        if auth_url_sent and not _code_submitted and time.monotonic() < overall_deadline:
+                            auth_url_sent = False
+                            new_proc = await _spawn_login()
+                            if new_proc is not None:
+                                process = new_proc
+                                yield f"data: {json.dumps({'type': 'stdout', 'line': 'Sign-in link expired — issuing a fresh one…'})}\n\n"
+                                continue
+                        clear_session(process)
+                        yield f"data: {json.dumps({'type': 'error', 'error': 'Antigravity login failed. Please try again.'})}\n\n"
+                        break
+                    # login_ok without a usable token (shouldn't happen) — keep waiting.
                     continue
 
-                # kind == "stdout": forward escape-free text; emit the URL once.
+                # kind == "stdout": forward escape-free text; emit the URL once per attempt.
                 clean = _strip_ansi(value)
                 stripped = clean.strip()
-                low = stripped.lower()
-                if ("authentication failed" in low or "sign-in failed" in low
-                        or "invalid" in low and "code" in low):
-                    # Retryable errors (bad code) keep the session alive; the line
-                    # still streams below so the UI can show it.
-                    pass
                 if not auth_url_sent:
                     url = _extract_auth_url(clean)
                     if url:
@@ -451,14 +474,25 @@ async def antigravity_connect():
                     yield f"data: {json.dumps({'type': 'stdout', 'line': clean})}\n\n"
 
         except FileNotFoundError:
-            clear_session()
+            if process is not None:
+                clear_session(process)
             yield f"data: {json.dumps({'type': 'error', 'error': f'agy CLI not found: {agy_path}'})}\n\n"
         except Exception as e:
-            clear_session()
+            if process is not None:
+                clear_session(process)
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         finally:
-            if process is not None and process.returncode is not None:
-                clear_session()
+            # On generator close (SSE client disconnect) or any exit, tear down the
+            # current throwaway agy if it is still alive, so a login process never
+            # lingers to its own ~60s timeout. (A succeeded run is already dead here —
+            # login_watcher killed it — so this only fires on disconnect/abort.)
+            if process is not None:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                clear_session(process)
 
     return StreamingResponse(
         generate(),
