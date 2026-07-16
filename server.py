@@ -537,6 +537,20 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ xo.json: setup failed (non-fatal): {exc}")
 
+    # Cross-workspace commit relay: always-on pull poller + publish watcher.
+    # RELAY_ENABLED (default true) is an emergency brake only; with no PROJECT_ID
+    # the poller PARKS (no network calls). Non-fatal on failure.
+    _relay_poller_task = None
+    _relay_watcher_task = None
+    try:
+        from services.cowork_agent.commit_relay.poller import run_relay_poller
+        from services.cowork_agent.commit_relay.watcher import start_commit_relay_watcher
+        _relay_poller_task = asyncio.create_task(run_relay_poller())
+        _relay_watcher_task = asyncio.create_task(start_commit_relay_watcher())
+        print("   relay: poller + watcher started (always-on; RELAY_ENABLED=false to brake)")
+    except Exception as exc:
+        print(f"⚠️ relay failed to start (non-fatal): {exc}")
+
     # Start daily usage sync background task
     _sync_task = None
     _warmup_task = None
@@ -588,6 +602,20 @@ async def lifespan(app: FastAPI):
         _xo_status_task.cancel()
         try:
             await _xo_status_task
+        except asyncio.CancelledError:
+            pass
+
+    if _relay_poller_task and not _relay_poller_task.done():
+        _relay_poller_task.cancel()
+        try:
+            await _relay_poller_task
+        except asyncio.CancelledError:
+            pass
+
+    if _relay_watcher_task and not _relay_watcher_task.done():
+        _relay_watcher_task.cancel()
+        try:
+            await _relay_watcher_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")

@@ -1,13 +1,17 @@
-/* Projects tab — xo-projects observability (design direction 2026-07-15).
-   Read-only v1: the project list (GET /api/xo-projects) with a per-project
-   drawer showing the live todo board (.xo/todos.json via the watcher), open
-   sessions, and the recent timeline. Every drawer panel is its own fetch —
-   one dead source degrades one panel. Writes (todos CRUD, backup/restore)
-   are deliberately not wired yet; the sync-vs-git decision is open. */
+/* Projects tab — xo-project sharing + sync (design 2026-07-16).
+   Always-open cards (no drawers): each project shows a sync-state chip, a
+   minimal commit feed from local git (the relay's origin/<watch-branch> view,
+   with the "N new, not yet applied" count), and the share panel (share by
+   workspace id, member list, revoke). A strip above the cards shows the relay
+   poller's health. Every section is its own fetch — one dead endpoint degrades
+   one section (bulkheads); renders replace, never append (idempotency); the
+   status strip refreshes on a slotted interval; Share/Revoke disable while
+   pending (writes are never single-flighted). */
 import {API_BASE,apiFetch} from '../core/api.js';
+import {setSlottedInterval} from '../core/store.js';
+import {toast} from '../core/ui.js';
 
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const dtfmt=iso=>iso?new Date(iso).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'—';
 function rel(iso){
   if(!iso)return'—';
   const s=(Date.now()-new Date(iso).getTime())/1000;
@@ -18,119 +22,185 @@ function rel(iso){
   if(s<86400*30)return Math.floor(s/86400)+'d ago';
   return new Date(iso).toLocaleDateString(undefined,{dateStyle:'medium'});
 }
-function panelFail(res){
+function secFail(res){
   if(res.notImplemented)return'<div class="prj-note">not available for the active agent</div>';
   if(res.offline)return'<div class="prj-note">xo-cowork-api is unreachable</div>';
   return'<div class="prj-note">'+esc(res.error)+'</div>';
 }
 
-/* status display order + chip class per todo status */
-const ST_ORDER={in_progress:0,pending:1,blocked:2,completed:3,cancelled:4};
-const stChip=st=>'<span class="tchip st-'+esc(st)+'">'+esc(st.replace('_',' '))+'</span>';
-
-function rTodos(d){
-  const rows=[];
-  for(const [sid,sess] of Object.entries(d.sessions||{})){
-    for(const t of sess.todos||[])rows.push({t,runtime:sess.runtime||'',sid});
-  }
-  if(!rows.length)return'<div class="prj-note">no todos recorded yet</div>';
-  rows.sort((a,b)=>(ST_ORDER[a.t.status]??9)-(ST_ORDER[b.t.status]??9));
-  const shown=rows.slice(0,30);
-  return'<div class="prj-todos">'
-    +shown.map(({t,runtime})=>'<div class="prj-todo">'+stChip(t.status)
-      +'<span class="tcontent'+(t.status==='completed'||t.status==='cancelled'?' done':'')+'">'+esc(t.content)+'</span>'
-      +(runtime?'<span class="truntime">'+esc(runtime)+'</span>':'')+'</div>').join('')
-    +(rows.length>shown.length?'<div class="prj-note">+'+(rows.length-shown.length)+' more</div>':'')
-    +'</div>';
-}
-function rActivity(d){
-  const ss=d.open_sessions||[];
-  if(!ss.length)return'<div class="prj-note">no open sessions</div>';
-  return'<div class="prj-list">'+ss.map(s=>'<div class="prj-li">'
-    +'<b>'+esc(s.agent)+'</b>'+(s.runtime?' <span class="truntime">'+esc(s.runtime)+'</span>':'')
-    +'<span class="tmuted">opened '+rel(s.opened_at)+' · active '+rel(s.last_activity_at)+'</span>'
-    +'</div>').join('')+'</div>';
-}
-function rTimeline(d){
-  const evs=d.events||[];
-  if(!evs.length)return'<div class="prj-note">no events yet (the watcher hasn’t emitted any for this project)</div>';
-  return'<div class="prj-list">'+evs.slice(0,20).map(e=>'<div class="prj-li">'
-    +'<span class="tchip">'+esc(e.type)+'</span>'
-    +(e.runtime?'<span class="truntime">'+esc(e.runtime)+'</span>':'')
-    +'<span class="tmuted">'+rel(e.ts)+'</span>'
-    +'</div>').join('')+'</div>';
-}
-
-const PANELS=[
-  {key:'todos',   title:'Todos',        path:id=>'/api/xo-projects/'+encodeURIComponent(id)+'/todos',            render:rTodos},
-  {key:'activity',title:'Open sessions',path:id=>'/api/xo-projects/'+encodeURIComponent(id)+'/activity',         render:rActivity},
-  {key:'timeline',title:'Recent events',path:id=>'/api/xo-projects/'+encodeURIComponent(id)+'/timeline?limit=20',render:rTimeline},
-];
-
-let root=null,items=null,expanded=null;
+let root=null,items=null,relay=null;
 
 export default {
   id:'projects',label:'Projects',order:5,
   async mount(el){
     root=el;
     el.innerHTML='<div class="prj"><div class="prj-note">loading projects…</div></div>';
-    await loadList();
+    await loadAll();
+    /* slotted: remounting or re-calling can never stack a second interval */
+    setSlottedInterval('projects-relay',refreshStatus,60000);
   },
-  show(){/* keep whatever the user had open; Refresh re-fetches */}
+  show(){refreshStatus();}
 };
 
-async function loadList(){
+async function loadAll(){
   const res=await apiFetch(API_BASE+'/api/xo-projects');
   const box=root.querySelector('.prj');
-  if(!res.ok){box.innerHTML='<div class="prj-head"><span class="prj-eyebrow">PROJECTS</span></div>'+panelFail(res);return;}
+  if(!res.ok){box.innerHTML='<div class="prj-head"><span class="prj-eyebrow">PROJECTS</span></div>'+secFail(res);return;}
   items=res.data.items||[];
-  expanded=null;
+  const st=await apiFetch(API_BASE+'/api/relay/status');
+  relay=st.ok?st.data:null;
   render();
+  for(const p of items){
+    if(!p.unscaffolded){fillCommits(p.id);fillMembers(p.id);}
+  }
 }
+
+async function refreshStatus(){
+  const st=await apiFetch(API_BASE+'/api/relay/status');
+  if(!st.ok||!root||!items)return;
+  relay=st.data;
+  const strip=root.querySelector('#prj-strip');
+  if(strip)strip.innerHTML=stripHTML();
+  for(const p of items){
+    const chip=document.getElementById('prj-chip-'+p.id);
+    if(chip)chip.innerHTML=chipHTML(p);
+  }
+}
+
+function relayEntry(projectId){
+  if(!relay||!relay.repos)return null;
+  for(const r of Object.values(relay.repos))if(r.project===projectId)return r;
+  return null;
+}
+
+function stripHTML(){
+  if(!relay)return'<span class="prj-note">relay status unavailable</span>';
+  if(relay.cadence==='parked'){
+    return relay.workspace_configured===false
+      ?'<span class="tchip st-blocked">relay parked</span><span class="tmuted">no workspace id configured — sharing is disabled</span>'
+      :'<span class="tchip st-blocked">relay off</span><span class="tmuted">RELAY_ENABLED=false</span>';
+  }
+  const ok=relay.last_poll_ok;
+  return'<span class="tchip'+(ok===false?' st-blocked':'')+'">'+esc(relay.cadence)+'</span>'
+    +'<span class="tmuted">last poll '+rel(relay.last_poll_at)+(ok===false?' · failed':'')+'</span>'
+    +'<span class="tmuted">watching '+esc(relay.watch_branch||'main')+'</span>';
+}
+
+function chipHTML(p){
+  if(p.unscaffolded)return'<span class="tchip st-blocked">unscaffolded</span>';
+  const e=relayEntry(p.id);
+  if(!e)return'<span class="tchip">solo</span>';
+  if(e.pending_github)return'<span class="tchip st-blocked">connect GitHub to sync</span>';
+  if(e.last_error)return'<span class="tchip st-blocked">sync error</span>';
+  if(e.shared)return'<span class="tchip st-shared">shared</span>'
+    +(e.last_fetch_at?'<span class="tmuted">synced '+rel(e.last_fetch_at)+'</span>':'');
+  return'<span class="tchip">solo</span>';
+}
+
 function render(){
-  const un=items.filter(p=>p.unscaffolded).length;
   root.querySelector('.prj').innerHTML=
-    '<div class="prj-head"><span class="prj-eyebrow">PROJECTS · '+items.length
-      +(un?' · '+un+' unscaffolded':'')+'</span>'
+    '<div class="prj-head"><span class="prj-eyebrow">PROJECTS · '+items.length+'</span>'
     +'<span class="prj-spacer"></span>'
-    +'<button class="sess-refresh" id="prj-refresh" title="Re-fetch the project list">&#8635; Refresh</button></div>'
-    +(items.length?'<div class="prj-rows">'+items.map(rowHTML).join('')+'</div>'
+    +'<button class="sess-refresh" id="prj-refresh" title="Re-fetch everything">&#8635; Refresh</button></div>'
+    +'<div class="prj-strip" id="prj-strip">'+stripHTML()+'</div>'
+    +(items.length?'<div class="prj-cards">'+items.map(cardHTML).join('')+'</div>'
       :'<div class="prj-note">no projects in the workspace yet</div>');
-  document.getElementById('prj-refresh').addEventListener('click',loadList);
-  root.querySelectorAll('.prj-row-head').forEach(h=>h.addEventListener('click',()=>toggle(h.dataset.id)));
-  if(expanded)fillDrawer(expanded);
+  document.getElementById('prj-refresh').addEventListener('click',loadAll);
+  root.querySelectorAll('.prj-share-btn').forEach(b=>b.addEventListener('click',()=>share(b.dataset.id)));
 }
-function rowHTML(p){
-  const open=expanded===p.id;
-  return'<div class="prj-row'+(open?' is-open':'')+'" id="prj-row-'+esc(p.id)+'">'
-    +'<div class="prj-row-head" data-id="'+esc(p.id)+'">'
-    +'<span class="caret">'+(open?'&#9662;':'&#9656;')+'</span>'
+
+function cardHTML(p){
+  return'<div class="prj-card" id="prj-card-'+esc(p.id)+'">'
+    +'<div class="prj-card-head">'
     +'<b>'+esc(p.display_name)+'</b>'
     +(p.id!==p.display_name?'<span class="truntime">'+esc(p.id)+'</span>':'')
-    +(p.unscaffolded?'<span class="tchip st-blocked">unscaffolded</span>':'')
+    +'<span id="prj-chip-'+esc(p.id)+'" class="prj-chipbox">'+chipHTML(p)+'</span>'
     +'<span class="prj-spacer"></span>'
     +'<span class="tmuted">'+(p.created_at?'created '+rel(p.created_at):'')+'</span>'
     +'</div>'
-    +(open?'<div class="prj-drawer">'
-      +(p.description?'<p class="prj-desc">'+esc(p.description)+'</p>':'')
-      +'<div class="prj-panels">'+PANELS.map(pn=>
-        '<div class="prj-panel"><div class="prj-ptitle">'+pn.title+'</div>'
-        +'<div class="prj-pbody" id="prjp-'+pn.key+'"><div class="prj-note">loading…</div></div></div>').join('')
-      +'</div></div>':'')
+    +(p.description?'<p class="prj-desc">'+esc(p.description)+'</p>':'')
+    +(p.unscaffolded?'':
+      '<div class="prj-sections">'
+      +'<div class="prj-sec"><div class="prj-ptitle">Commits</div>'
+      +'<div id="prj-commits-'+esc(p.id)+'"><div class="prj-note">loading…</div></div></div>'
+      +'<div class="prj-sec"><div class="prj-ptitle">Sharing</div>'
+      +'<div id="prj-members-'+esc(p.id)+'"><div class="prj-note">loading…</div></div>'
+      +'<div class="prj-shareform">'
+      +'<input class="prj-input" id="prj-ws-'+esc(p.id)+'" placeholder="recipient workspace id" spellcheck="false">'
+      +'<button class="prj-btn prj-share-btn" data-id="'+esc(p.id)+'">Share</button>'
+      +'</div></div>'
+      +'</div>')
     +'</div>';
 }
-function toggle(id){
-  expanded=expanded===id?null:id;
-  render();
-}
-/* three independent fetches per drawer — no barrier, no shared failure */
-function fillDrawer(id){
-  for(const pn of PANELS)fillPanel(id,pn);
-}
-async function fillPanel(id,pn){
-  const res=await apiFetch(API_BASE+pn.path(id));
-  if(expanded!==id)return; /* drawer changed while in flight */
-  const el=document.getElementById('prjp-'+pn.key);
+
+async function fillCommits(id){
+  const res=await apiFetch(API_BASE+'/api/xo-projects/'+encodeURIComponent(id)+'/commits?limit=15');
+  const el=document.getElementById('prj-commits-'+id);
   if(!el)return;
-  el.innerHTML=res.ok?pn.render(res.data):panelFail(res);
+  if(!res.ok){el.innerHTML=secFail(res);return;}
+  const d=res.data,list=d.commits||[];
+  const newN=d.behind|0;
+  el.innerHTML=
+    (newN>0?'<div class="prj-newline"><span class="tchip st-shared">'+newN+' new</span>'
+      +'<span class="tmuted">fetched on origin/'+esc(d.branch)+', not yet applied</span></div>':'')
+    +(list.length?'<div class="prj-commits">'+list.map((c,i)=>
+      '<div class="prj-commit'+(i<newN?' is-new':'')+'">'
+      +'<code class="prj-hash">'+esc(c.hash.slice(0,8))+'</code>'
+      +'<span class="prj-subj">'+esc(c.subject)+'</span>'
+      +'<span class="tmuted">'+esc(c.author)+' · '+rel(c.date)+'</span>'
+      +'</div>').join('')+'</div>'
+      :'<div class="prj-note">no commits visible ('+esc(d.source)+')</div>');
+}
+
+async function fillMembers(id){
+  const res=await apiFetch(API_BASE+'/api/xo-projects/'+encodeURIComponent(id)+'/members');
+  const el=document.getElementById('prj-members-'+id);
+  if(!el)return;
+  if(!res.ok){
+    /* 404 no_git_origin / 403 not-a-member / swarm down: sharing may still be
+       possible (the first share creates the group) — the form stays below */
+    el.innerHTML='<div class="prj-note">'+esc(res.error)+'</div>';
+    return;
+  }
+  const own=res.data.own_workspace_id,ms=res.data.members||[];
+  const iOwn=ms.some(m=>m.role==='owner'&&m.workspace_id===own);
+  el.innerHTML=ms.length?'<div class="prj-members">'+ms.map(m=>
+    '<div class="prj-member'+(m.status==='revoked'?' is-revoked':'')+'">'
+    +'<code>'+esc(m.workspace_id)+'</code>'
+    +'<span class="tchip">'+esc(m.role)+'</span>'
+    +(m.status==='revoked'?'<span class="tchip st-blocked">revoked</span>':'')
+    +(m.bound===false&&m.status==='active'?'<span class="tmuted" title="that workspace has not polled yet">not seen yet</span>':'')
+    +(m.workspace_id===own?'<span class="tmuted">(this workspace)</span>':'')
+    +'<span class="prj-spacer"></span>'
+    +(iOwn&&m.role!=='owner'&&m.status==='active'
+      ?'<button class="prj-btn prj-revoke-btn" data-id="'+esc(id)+'" data-ws="'+esc(m.workspace_id)+'">Revoke</button>':'')
+    +'</div>').join('')+'</div>'
+    :'<div class="prj-note">not shared with anyone yet</div>';
+  el.querySelectorAll('.prj-revoke-btn').forEach(b=>b.addEventListener('click',()=>revoke(b.dataset.id,b.dataset.ws)));
+}
+
+async function share(id){
+  const input=document.getElementById('prj-ws-'+id);
+  const btn=root.querySelector('.prj-share-btn[data-id="'+id+'"]');
+  const ws=(input&&input.value||'').trim();
+  if(!ws){toast('enter the recipient’s workspace id');return;}
+  if(btn)btn.disabled=true;               /* never single-flight a write */
+  const res=await apiFetch(API_BASE+'/api/xo-projects/'+encodeURIComponent(id)+'/share',
+    {method:'POST',body:{workspace_id:ws}});
+  if(btn)btn.disabled=false;
+  if(!res.ok){toast('share failed: '+res.error);return;}
+  toast('shared with '+ws);
+  if(input)input.value='';
+  fillMembers(id);
+}
+
+async function revoke(id,ws){
+  const btn=root.querySelector('.prj-revoke-btn[data-id="'+id+'"][data-ws="'+ws+'"]');
+  if(btn)btn.disabled=true;
+  const res=await apiFetch(API_BASE+'/api/xo-projects/'+encodeURIComponent(id)+'/revoke',
+    {method:'POST',body:{workspace_id:ws}});
+  if(btn)btn.disabled=false;
+  if(!res.ok){toast('revoke failed: '+res.error);return;}
+  toast('revoked '+ws);
+  fillMembers(id);
 }
