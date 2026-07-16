@@ -21,6 +21,7 @@ from pathlib import Path
 from services.cowork_agent.adapters.antigravity import transcript as _t
 from services.cowork_agent.adapters.antigravity.paths import transcript_path
 from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
+from services.cowork_agent.helpers import strip_workspace_preamble
 from services.cowork_agent.project_layout import xo_projects_root
 
 USES_PROJECT_SESSIONS = True
@@ -70,9 +71,70 @@ def owns_session(session_id: str) -> bool:
     return False
 
 
+# Tool-call arg fields that name the thing being acted on (checked in order).
+_TARGET_ARG_FIELDS = (
+    "AbsolutePath", "TargetFile", "DirectoryPath", "SearchDirectory",
+    "SearchPath", "CommandLine", "Url", "Query",
+)
+# Non-bulky arg fields worth surfacing as the tool "input" (skip file bodies etc.).
+_INPUT_ARG_FIELDS = (
+    "AbsolutePath", "TargetFile", "DirectoryPath", "SearchDirectory",
+    "SearchPath", "CommandLine", "Cwd", "Query", "Description", "Instruction",
+)
+# agy step types that carry a tool RESULT, paired to a preceding tool_call by order.
+_RESULT_TYPES = {
+    "VIEW_FILE", "LIST_DIRECTORY", "RUN_COMMAND", "CODE_ACTION",
+    "GREP_SEARCH", "CODEBASE_SEARCH", "GENERIC",
+}
+_MAX_TOOL_OUTPUT = 8000
+
+
+def _clean_result(content: str) -> str:
+    """Trim agy's result-step header (Created/Completed At) and cap size so a tool
+    chip's output panel reads as the file/output body, not a metadata dump."""
+    if not content:
+        return ""
+    lines = content.splitlines()
+    while lines and (
+        lines[0].startswith("Created At:")
+        or lines[0].startswith("Completed At:")
+        or not lines[0].strip()
+    ):
+        lines.pop(0)
+    out = "\n".join(lines).strip()
+    if len(out) > _MAX_TOOL_OUTPUT:
+        out = out[:_MAX_TOOL_OUTPUT] + f"\n… (truncated, {len(out)} chars total)"
+    return out
+
+
+def _tool_part_data(call: dict, ts: str) -> dict:
+    """Clean tool part from an agy tool_call: a human title (``toolAction``), the
+    target path/command as ``input``, ``output`` filled later from its result
+    step. This is what makes a ``view_file`` chip actually show the file."""
+    name = call.get("name") or "tool"
+    args = call.get("args") if isinstance(call.get("args"), dict) else {}
+    title = args.get("toolAction") or args.get("toolSummary") or name
+    target = next((str(args[k]) for k in _TARGET_ARG_FIELDS if args.get(k)), None)
+    input_clean = {k: args[k] for k in _INPUT_ARG_FIELDS if args.get(k)}
+    return {
+        "type": "tool", "tool": name, "call_id": "",
+        "state": {
+            "status": "completed", "input": input_clean, "output": None,
+            "metadata": {"target": target} if target else None,
+            "title": title,
+            "time_start": ts, "time_end": ts, "time_compacted": None,
+        },
+    }
+
+
 def _convert(session_id: str, path: Path) -> list[dict]:
     """Convert an agy ``transcript_full.jsonl`` into xo-cowork MessageResponse
-    dicts (same shape ``engine/messages.convert_messages`` produces)."""
+    dicts (same shape ``engine/messages.convert_messages`` produces).
+
+    Walks raw steps so tool calls can be paired with their result step (agy has no
+    linking id, so pairing is by order/FIFO): one agy prompt → one assistant
+    message whose parts are collapsed reasoning + tool chips (title/path/output) +
+    the final text answer."""
     steps: list[dict] = []
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -89,54 +151,91 @@ def _convert(session_id: str, path: Path) -> list[dict]:
     except OSError:
         return []
 
-    messages: list[dict] = []
-    counter = 0
-    for turn in _t.iter_turns(steps):
-        counter += 1
-        mid = f"{session_id}_m{counter}"
-        ts_ms = turn.get("ts_ms")
-        ts = (
+    def _iso(ts_ms: int | None) -> str:
+        return (
             datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
             if ts_ms else datetime.now(timezone.utc).isoformat()
         )
-        if turn["role"] == "user":
+
+    messages: list[dict] = []
+    counter = [0]
+    pending: list[dict] = []              # assistant part-data dicts for this turn
+    pending_ts: list[str | None] = [None]
+    awaiting: list[dict] = []             # FIFO of tool parts awaiting result output
+
+    def _flush_assistant() -> None:
+        if not pending:
+            return
+        counter[0] += 1
+        mid = f"{session_id}_m{counter[0]}"
+        ts = pending_ts[0] or datetime.now(timezone.utc).isoformat()
+        parts = [
+            {"id": f"{mid}_p{i}", "message_id": mid, "session_id": session_id,
+             "time_created": ts, "data": data}
+            for i, data in enumerate(pending)
+        ]
+        messages.append({
+            "id": mid, "session_id": session_id, "time_created": ts,
+            "data": {"role": "assistant", "model_id": None, "provider_id": None,
+                     "cost": None, "tokens": None, "finish": "stop", "error": None},
+            "parts": parts,
+        })
+        pending.clear()
+        pending_ts[0] = None
+        awaiting.clear()
+
+    for step in steps:
+        stype = step.get("type")
+        ts = _iso(_t.created_at_ms(step))
+
+        if stype == "USER_INPUT":
+            _flush_assistant()
+            # Strip the frontend's "> **Project context**" preamble so the user
+            # bubble shows only what the user typed (parity with claude_code).
+            text = strip_workspace_preamble(
+                _t.strip_user_request(step.get("content") or "")
+            ).strip()
+            if not text:
+                continue
+            counter[0] += 1
+            mid = f"{session_id}_m{counter[0]}"
             messages.append({
                 "id": mid, "session_id": session_id, "time_created": ts,
                 "data": {"role": "user"},
                 "parts": [{
                     "id": f"{mid}_p0", "message_id": mid, "session_id": session_id,
-                    "time_created": ts, "data": {"type": "text", "text": turn["text"]},
+                    "time_created": ts, "data": {"type": "text", "text": text},
                 }],
             })
-        else:
-            parts = []
-            if turn["text"]:
-                parts.append({
-                    "id": f"{mid}_p{len(parts)}", "message_id": mid,
-                    "session_id": session_id, "time_created": ts,
-                    "data": {"type": "text", "text": turn["text"]},
+
+        elif stype == "PLANNER_RESPONSE":
+            if pending_ts[0] is None:
+                pending_ts[0] = ts
+            content = step.get("content")
+            content = content.strip() if isinstance(content, str) else ""
+            tool_calls = step.get("tool_calls") or []
+            if content:
+                # Final answer (content, no tools) → visible text; reasoning that
+                # precedes tool calls → collapsed.
+                pending.append({
+                    "type": "text" if not tool_calls else "reasoning",
+                    "text": content,
                 })
-            for tool_name in turn.get("tool_names", []):
-                parts.append({
-                    "id": f"{mid}_p{len(parts)}", "message_id": mid,
-                    "session_id": session_id, "time_created": ts,
-                    "data": {
-                        "type": "tool", "tool": tool_name, "call_id": "",
-                        "state": {
-                            "status": "completed", "input": {}, "output": None,
-                            "metadata": None, "title": tool_name,
-                            "time_start": ts, "time_end": ts, "time_compacted": None,
-                        },
-                    },
-                })
-            messages.append({
-                "id": mid, "session_id": session_id, "time_created": ts,
-                "data": {
-                    "role": "assistant", "model_id": None, "provider_id": None,
-                    "cost": None, "tokens": None, "finish": "stop", "error": None,
-                },
-                "parts": parts,
-            })
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                data = _tool_part_data(call, ts)
+                pending.append(data)
+                awaiting.append(data)          # same object; result fills its output
+
+        elif stype in _RESULT_TYPES:
+            # Pair to the oldest tool call still awaiting a result (FIFO — agy emits
+            # one result per call, in order). Fills the chip's output → clicking
+            # the tool shows the file/dir/command output.
+            if awaiting:
+                awaiting.pop(0)["state"]["output"] = _clean_result(step.get("content") or "")
+
+    _flush_assistant()
     return messages
 
 
