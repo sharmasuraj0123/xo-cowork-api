@@ -7,7 +7,8 @@ event-sourced ``transcript_full.jsonl`` under
 ``brain/<conversation-uuid>/.system_generated/logs/`` (NOT stdout, which is
 human-readable narrative interleaved with task noise). The conversation id is
 never printed; it is recovered from the ``--log-file`` (``conversation=<uuid>``),
-with fallbacks to ``cache/last_conversations.json`` and newest-brain-dir.
+with fallbacks to ``cache/last_conversations.json``, the workspace-indexed
+``conversation_summaries.db``, and finally newest-brain-dir.
 
 Event envelope (verified, agy v1.1.2): ``step_index`` (int), ``source`` ∈
 {USER_EXPLICIT, MODEL, SYSTEM}, ``type``, ``status`` ∈ {RUNNING, DONE},
@@ -19,15 +20,23 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import unquote, urlparse
 
 from services.cowork_agent.adapters.antigravity.paths import (
+    AGY_HOME,
     BRAIN_DIR,
     LAST_CONVERSATIONS,
     transcript_path,
 )
+
+# The agy-maintained SQLite index of conversations (one row per conversation),
+# keyed by ``conversation_id`` with a ``workspace_uris`` JSON array and a
+# ``last_modified_time``. Derived locally from the state ROOT (no paths.py edit).
+_SUMMARIES_DB: Path = AGY_HOME / "conversation_summaries.db"
 
 _CONV_RE = re.compile(r"conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 _USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
@@ -63,6 +72,89 @@ def conversation_id_for_cwd(cwd: str | Path) -> str | None:
     return val if isinstance(val, str) and val else None
 
 
+def _path_key(p: str | Path) -> str | None:
+    """Normalize a filesystem path to a comparable key (resolved when possible)."""
+    if not p:
+        return None
+    try:
+        pp = Path(p)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return str(pp.resolve())
+    except OSError:
+        return str(pp)
+
+
+def _workspace_uri_to_path_key(uri: Any) -> str | None:
+    """Normalize a ``workspace_uris`` entry to a comparable path key.
+
+    Entries are ``file://…`` URIs (e.g. ``file:///tmp/ws``) but a bare path is
+    tolerated too. Returns None for anything unparseable."""
+    if not isinstance(uri, str) or not uri:
+        return None
+    if uri.startswith("file:"):
+        raw = unquote(urlparse(uri).path)
+        return _path_key(raw) if raw else None
+    return _path_key(uri)
+
+
+def conversation_id_from_summaries(
+    cwd: str | Path, db_path: str | Path | None = None
+) -> str | None:
+    """Fallback locator: the newest conversation in ``conversation_summaries.db``
+    whose ``workspace_uris`` includes ``cwd``.
+
+    agy maintains an indexed summaries DB with one row per conversation;
+    ``workspace_uris`` is a JSON array of ``file://`` launch-workspace URIs. We
+    return the ``conversation_id`` of the most-recent matching row (by
+    ``last_modified_time``) — robust under concurrent sessions, where the racy
+    ``newest_conversation_id()`` could return an unrelated workspace's run.
+
+    Opened read-only; returns None on absence / lock / parse / schema errors
+    (never raises)."""
+    if not cwd:
+        return None
+    path = _SUMMARIES_DB if db_path is None else Path(db_path)
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    target = _path_key(cwd)
+    if target is None:
+        return None
+    con: sqlite3.Connection | None = None
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        cur = con.execute(
+            "SELECT conversation_id, workspace_uris FROM conversation_summaries "
+            "ORDER BY last_modified_time DESC"
+        )
+        for cid, workspace_uris in cur:
+            if not isinstance(cid, str) or not cid:
+                continue
+            if not isinstance(workspace_uris, str):
+                continue
+            try:
+                uris = json.loads(workspace_uris)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(uris, list):
+                continue
+            if any(_workspace_uri_to_path_key(u) == target for u in uris):
+                return cid
+    except sqlite3.Error:
+        return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
+    return None
+
+
 def newest_conversation_id() -> str | None:
     """Last-resort locator: the most recently modified ``brain/<uuid>/`` dir."""
     if not BRAIN_DIR.is_dir():
@@ -76,10 +168,17 @@ def newest_conversation_id() -> str | None:
 def resolve_conversation_id(
     log_path: str | Path | None = None, cwd: str | Path | None = None
 ) -> str | None:
-    """Best-effort conversation-id resolution: log → last_conversations[cwd] → newest."""
+    """Best-effort conversation-id resolution, most→least reliable:
+
+        log-file → last_conversations[cwd] → summaries.db[workspace=cwd] → newest.
+
+    The workspace-scoped summaries.db lookup sits ahead of the racy
+    newest-brain-dir last resort so concurrent sessions resolve to the right
+    conversation for ``cwd``."""
     return (
         conversation_id_from_log(log_path)
         or (conversation_id_for_cwd(cwd) if cwd else None)
+        or (conversation_id_from_summaries(cwd) if cwd else None)
         or newest_conversation_id()
     )
 
@@ -210,7 +309,8 @@ def iter_turns(steps: list[dict]) -> Iterator[dict[str, Any]]:
 
 
 __all__ = [
-    "conversation_id_from_log", "conversation_id_for_cwd", "newest_conversation_id",
+    "conversation_id_from_log", "conversation_id_for_cwd",
+    "conversation_id_from_summaries", "newest_conversation_id",
     "resolve_conversation_id", "read_steps", "strip_user_request", "final_answer",
     "created_at_ms", "created_at_iso", "iter_tool_names", "iter_turns",
 ]
