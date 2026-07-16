@@ -248,7 +248,7 @@ class AntigravityAdapter(BaseAgentAdapter):
         return (
             requested
             or self.config.get("default_model")
-            or "Gemini 3.5 Flash (Medium)"
+            or "Gemini 3.5 Flash (Low)"
         )
 
     def _build_cmd(
