@@ -18,9 +18,13 @@ blob, one row per model call. Field paths inside ``gen_metadata.data``:
     ``context_peak`` (max per-call = context-window peak).
 
 **WAL gotcha:** the DB is WAL-mode and agy writes ``gen_metadata`` rows into the
-``-wal`` sidecar. Opening read-only can miss them; we open a short read-write
-connection to ``PRAGMA wal_checkpoint(TRUNCATE)`` first (agy has exited by the
-time we read, so this is safe), then read.
+``-wal`` sidecar. A read-only (``mode=ro``) connection still honors the ``-wal``
+when the ``-shm`` sidecar is readable, so we open **read-only first** and never
+mutate agy's store on the accounting path. Only if that read-only path can't
+surface the data — it raises, or returns no rows while a non-empty ``-wal``
+suggests uncheckpointed rows are hidden — do we fall back to a short read-write
+open that runs ``PRAGMA wal_checkpoint(TRUNCATE)`` and re-reads. The fallback is
+the exception, not the default.
 
 Stdlib-only. Best-effort throughout: any failure yields zeros, never raises.
 """
@@ -86,17 +90,73 @@ def _str(d, fn):
 # ── Extraction ────────────────────────────────────────────────────────────────
 
 
-def _checkpoint(db_path: Path) -> None:
-    """Flush the -wal sidecar into the main db so a read sees all rows."""
+def _read_calls(con: sqlite3.Connection) -> list[tuple]:
+    """Parse one ``(idx, model, in_tokens, out_tokens)`` per ``gen_metadata`` row.
+
+    The protobuf/row parsing is unchanged — only the connection strategy differs
+    between the read-only and checkpointing callers. May raise ``sqlite3.Error``
+    (e.g. missing table), which the callers translate into a fallback / zeros."""
+    calls: list[tuple] = []
+    cur = con.execute("SELECT idx, data FROM gen_metadata ORDER BY idx")
+    for idx, data in cur:
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        m1 = _dec(_sub(_dec(data), 1) or b"")
+        model = _str(m1, 21) or _str(m1, 19)
+        out_t = _var(_dec(_sub(m1, 4) or b""), 3)
+        in_t = _var(_dec(_sub(_dec(_sub(m1, 9) or b""), 10) or b""), 1)
+        calls.append((idx, model, in_t or 0, out_t or 0))
+    return calls
+
+
+def _read_ro(db_path: Path) -> list[tuple] | None:
+    """Read token rows via a **read-only** (non-mutating) connection.
+
+    ``mode=ro`` still honors the ``-wal`` sidecar when ``-shm`` is readable, so
+    this is the default accounting path — it never touches agy's store. Returns
+    the parsed calls, or ``None`` if the DB could not be opened/read read-only
+    (so the caller can fall back to a checkpointing open)."""
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        return _read_calls(con)
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def _read_checkpointed(db_path: Path) -> list[tuple]:
+    """Fallback: open **read-write**, flush the ``-wal`` into the main db via
+    ``PRAGMA wal_checkpoint(TRUNCATE)``, then read.
+
+    This mutates agy's store, so it runs only when :func:`_read_ro` can't see
+    the data. Numbers match the historical (always-checkpoint) behavior."""
     try:
         con = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return []
+    try:
         try:
             con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             con.commit()
-        finally:
-            con.close()
+        except sqlite3.Error:
+            pass
+        return _read_calls(con)
     except sqlite3.Error:
-        pass
+        return []
+    finally:
+        con.close()
+
+
+def _has_pending_wal(db_path: Path) -> bool:
+    """True if a non-empty ``-wal`` sidecar exists (maybe uncheckpointed rows)."""
+    try:
+        return Path(f"{db_path}-wal").stat().st_size > 0
+    except OSError:
+        return False
 
 
 def extract_usage(db_path: str | Path) -> dict:
@@ -105,32 +165,24 @@ def extract_usage(db_path: str | Path) -> dict:
         {"num_calls", "total_input", "total_output", "context_peak",
          "model", "calls": [(idx, model, in_tokens, out_tokens), …]}
 
-    Best-effort — missing DB / table / malformed blob → zeros."""
+    Reads **read-only** by default (no mutation of agy's store); only falls back
+    to a checkpointing read-write open when the read-only path can't surface the
+    data. Best-effort — missing DB / table / malformed blob → zeros."""
     empty = {"num_calls": 0, "total_input": 0, "total_output": 0,
              "context_peak": 0, "model": None, "calls": []}
     p = Path(db_path)
     if not p.is_file():
         return empty
-    _checkpoint(p)
-    calls: list[tuple] = []
-    try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return empty
-    try:
-        cur = con.execute("SELECT idx, data FROM gen_metadata ORDER BY idx")
-        for idx, data in cur:
-            if not isinstance(data, (bytes, bytearray)):
-                continue
-            m1 = _dec(_sub(_dec(data), 1) or b"")
-            model = _str(m1, 21) or _str(m1, 19)
-            out_t = _var(_dec(_sub(m1, 4) or b""), 3)
-            in_t = _var(_dec(_sub(_dec(_sub(m1, 9) or b""), 10) or b""), 1)
-            calls.append((idx, model, in_t or 0, out_t or 0))
-    except sqlite3.Error:
-        return empty
-    finally:
-        con.close()
+
+    # Default: non-mutating read-only read (honors -wal via -shm).
+    calls = _read_ro(p)
+    # Fall back to the (mutating) checkpointing open only when the read-only
+    # path genuinely failed to surface data: it raised (calls is None), or it
+    # saw no rows while a non-empty -wal suggests uncheckpointed data is hidden
+    # from a read-only connection. Genuinely-empty DBs are left untouched.
+    if calls is None or (not calls and _has_pending_wal(p)):
+        calls = _read_checkpointed(p)
+
     return {
         "num_calls": len(calls),
         "total_input": sum(c[2] for c in calls),
