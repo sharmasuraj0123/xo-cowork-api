@@ -288,6 +288,20 @@ def project_dir_exists(name: str) -> bool:
     return project_dir(name).is_dir()
 
 
+def git_repo_dirs() -> list[Path]:
+    """Immediate subdirs of xo-projects that are git repos (have a ``.git`` dir).
+
+    Used by the commit relay, which assumes 1 repo per workspace (1:1). Callers decide
+    what to do when this returns zero or more than one.
+    """
+    root = xo_projects_root()
+    out: list[Path] = []
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and not entry.name.startswith(".") and (entry / ".git").is_dir():
+            out.append(entry)
+    return out
+
+
 def list_project_tree(name: str, relative_path: str = "") -> dict | None:
     """List dirs/files at a path inside a project.
 
