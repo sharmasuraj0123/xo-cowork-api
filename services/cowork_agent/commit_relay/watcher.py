@@ -27,6 +27,16 @@ async def run_tick_repo(workspace_id: str, repo: str, repo_dir, branch: str) -> 
         return "baseline"
     if remote == last:
         return "noop"
+    if not await git_ops.commit_present(repo_dir, remote):
+        # The branch moved but we don't have the objects yet (someone else's
+        # push, seen only through ls-remote metadata). Never announce commits
+        # you haven't seen: fetch first, then name every commit in the range —
+        # otherwise the enumerate fallback reports just the tip and the middle
+        # commits of a multi-commit push never reach the ledger.
+        ok, err = await git_ops.fetch_origin(repo_dir)
+        if not ok or not await git_ops.commit_present(repo_dir, remote):
+            log_line(f"⚠️ relay: {repo} advanced but fetch failed before reporting — retrying next tick ({err or 'git fetch failed'})")
+            return "skip"
     hashes = await git_ops.enumerate_hashes(repo_dir, last, remote)
     ok = await swarm_client.report_commits(repo, workspace_id, hashes)
     if not ok:
