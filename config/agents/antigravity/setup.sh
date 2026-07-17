@@ -125,23 +125,35 @@ PY
 #
 # agy's OAuth token and its first-run onboarding are INDEPENDENT
 # subsystems: a pod can hold a valid token yet still block on the
-# interactive onboarding TUI (the Terms-of-Use / usage-mode page),
-# because onboarding completion is tracked separately in
-# jetski_state.pbtxt (protobuf text format), not in the token file.
-# This step pre-seeds a completed `post_onboarding` block so a
-# freshly-provisioned pod is never gated on that TUI.
+# interactive onboarding TUI, because the completion of those steps is
+# tracked separately in jetski_state.pbtxt (protobuf text format), not
+# in the token file. This step pre-seeds a completed `post_onboarding`
+# block so a freshly-provisioned pod is never gated on those pages.
+#
+# SCOPE — this seed covers the four post_onboarding pages only
+# (MANAGER_WELCOME / USAGE_MODE / AGENT_CONFIGURATION / ADD_WORKSPACE).
+# The Terms-of-Use page is NOT one of them and CANNOT be seeded here:
+# it is gated by UserStatus.accepted_latest_terms_of_service (field 34,
+# codeium_common_go_proto) — server-side state, per Google account,
+# cleared only via the AcceptTermsOfService RPC. The local state proto
+# has no field that can represent it, so no local file can suppress it.
+# First interactive `agy` use therefore still needs a one-time, manual
+# terms acceptance per Google account. As of agy v1.1.3 `agy -p` is not
+# terms-gated, so the API/Connect flow and chat are unaffected (a
+# version-pinned observation — re-check on upgrade, not an invariant).
 #
 # Idempotent + non-destructive:
-#  - A state that already records the usage-mode step (the page that
-#    actually blocks) is left completely untouched — we never clobber
-#    a real onboarding state nor regenerate its installation_uuid.
+#  - A state that already records the usage-mode step is left completely
+#    untouched — we never clobber a real onboarding state nor
+#    regenerate its installation_uuid.
 #  - An existing installation_uuid is always preserved; a fresh one is
 #    minted (uuidgen / kernel / python3) only when creating from scratch.
 #  - Any other recorded state (e.g. schema `migrations`) is carried over.
 # ==============================================================
 seed_onboarding_state() {
-    # The usage-mode/terms page is the step that actually gates the TUI;
-    # if agy already recorded it, onboarding won't block — leave state as-is.
+    # Treat a recorded usage-mode step as the marker of a real onboarding
+    # state we must not clobber — leave it as-is. (Conservative on purpose:
+    # this proves the post_onboarding block was written by agy itself.)
     if [ -f "$STATE_FILE" ] \
        && grep -q 'POST_ONBOARDING_STEP_TYPE_USAGE_MODE' "$STATE_FILE" 2>/dev/null; then
         log "agy onboarding already complete ($STATE_FILE) — leaving it untouched"
