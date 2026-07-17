@@ -82,6 +82,17 @@ def _strip_ansi(line: str) -> str:
     return line.replace("\x07", "")
 
 
+def _err_event(text: str) -> str:
+    """Build an SSE error frame.
+
+    Carries the reason under BOTH keys on purpose: the deployed xo-swarm dialog
+    reads `data.message` (setup-antigravity-dialog.tsx:129) and renders a generic
+    "Stream error" without it, while `error` is kept for any other consumer.
+    Emitting both from one place keeps them from drifting apart.
+    """
+    return f"data: {json.dumps({'type': 'error', 'error': text, 'message': text})}\n\n"
+
+
 # agy prints the OAuth URL on its own (indented) line after
 # "Please visit the URL to log in:". Capture the Google OAuth authorize URL
 # (host-flexible: any https URL bearing the oauth2 authorize path), with a
@@ -395,7 +406,7 @@ async def antigravity_connect():
                 # If a login is already in flight, reject a second start (keep it simple —
                 # unlike claude we don't multiplex; the UI opens one dialog).
                 if _process is not None and _process.returncode is None:
-                    yield f"data: {json.dumps({'type': 'error', 'error': 'An antigravity login is already in progress.'})}\n\n"
+                    yield _err_event('An antigravity login is already in progress.')
                     return
                 if _process is not None:
                     _close_pty_master()
@@ -403,7 +414,7 @@ async def antigravity_connect():
 
             process = await _spawn_login()
             if process is None:
-                yield f"data: {json.dumps({'type': 'error', 'error': 'PTY unavailable; antigravity login needs a terminal.'})}\n\n"
+                yield _err_event('PTY unavailable; antigravity login needs a terminal.')
                 return
 
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
@@ -420,7 +431,7 @@ async def antigravity_connect():
                         if process and process.returncode is None:
                             process.kill()
                         clear_session(process)
-                        yield f"data: {json.dumps({'type': 'error', 'error': 'Antigravity login timed out'})}\n\n"
+                        yield _err_event('Antigravity login timed out')
                         break
                     yield ": heartbeat\n\n"
                     continue
@@ -431,7 +442,17 @@ async def antigravity_connect():
                     ok = has_usable_login() or (kind == "login_ok")
                     if ok:
                         clear_session(process)
-                        yield f"data: {json.dumps({'type': 'done', 'returncode': 0})}\n\n"
+                        # COMPAT SHIM — the deployed xo-swarm dialog flips to success ONLY by
+                        # scraping this exact string from a stdout event
+                        # (setup-antigravity-dialog.tsx:29-32 @ HEAD 2815131). agy never prints
+                        # it (verified: 0 hits in the binary). Re-added after c3bacaa removed it
+                        # on the premise of a purpose-built frontend that was never shipped.
+                        # Must precede the `done` yield: `done` triggers es.close(), so anything
+                        # emitted after it is never read.
+                        # REMOVE ONLY AFTER xo-swarm keys success off
+                        # `data.type === "done" && data.ok === true`.
+                        yield f"data: {json.dumps({'type': 'stdout', 'line': 'Authentication token created successfully'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'returncode': 0, 'ok': True})}\n\n"
                         break
                     if kind == "exit":
                         # agy exited without writing a token. If it had reached the
@@ -448,7 +469,7 @@ async def antigravity_connect():
                                 yield f"data: {json.dumps({'type': 'stdout', 'line': 'Sign-in link expired — issuing a fresh one…'})}\n\n"
                                 continue
                         clear_session(process)
-                        yield f"data: {json.dumps({'type': 'error', 'error': 'Antigravity login failed. Please try again.'})}\n\n"
+                        yield _err_event('Antigravity login failed. Please try again.')
                         break
                     # login_ok without a usable token (shouldn't happen) — keep waiting.
                     continue
@@ -469,11 +490,11 @@ async def antigravity_connect():
         except FileNotFoundError:
             if process is not None:
                 clear_session(process)
-            yield f"data: {json.dumps({'type': 'error', 'error': f'agy CLI not found: {agy_path}'})}\n\n"
+            yield _err_event(f'agy CLI not found: {agy_path}')
         except Exception as e:
             if process is not None:
                 clear_session(process)
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            yield _err_event(str(e))
         finally:
             # On generator close (SSE client disconnect) or any exit, tear down the
             # current throwaway agy if it is still alive, so a login process never
