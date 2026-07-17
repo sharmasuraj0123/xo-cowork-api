@@ -659,6 +659,17 @@ from routers.space import router as space_router, mount_space
 app.include_router(space_router)
 mount_space(app)
 
+# The Space UI footer pill polls /space/server/status every 5s as a liveness
+# probe; keep that heartbeat out of the access log so real traffic stays
+# readable (standard health-check log suppression).
+import logging as _logging
+
+class _SpaceStatusLogFilter(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        return "/space/server/status" not in record.getMessage()
+
+_logging.getLogger("uvicorn.access").addFilter(_SpaceStatusLogFilter())
+
 # =============================================================================
 # Endpoints
 # =============================================================================
