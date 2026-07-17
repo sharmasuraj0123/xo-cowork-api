@@ -13,6 +13,12 @@ from . import git_ops, poller, state, status, swarm_client
 log = logging.getLogger(__name__)
 
 
+def _log(msg: str) -> None:
+    """print(flush=True) so relay activity shows in the service log file —
+    module-level log.info is invisible under default logging config."""
+    print(msg, flush=True)
+
+
 def _branch() -> str:
     return (os.getenv("RELAY_WATCH_BRANCH", "main") or "main").strip()
 
@@ -26,14 +32,17 @@ async def run_tick_repo(workspace_id: str, repo: str, repo_dir, branch: str) -> 
     last = state.load_last_reported(repo_dir)
     if last is None:
         state.save_last_reported(repo_dir, remote)   # baseline; never report history
+        _log(f"   relay: baseline {repo} @ {remote[:10]} (pushes before this are not relayed)")
         return "baseline"
     if remote == last:
         return "noop"
     hashes = await git_ops.enumerate_hashes(repo_dir, last, remote)
     ok = await swarm_client.report_commits(repo, workspace_id, hashes)
     if not ok:
+        _log(f"⚠️ relay: report failed for {repo} ({len(hashes)} commit(s)) — retrying next tick")
         return "report_failed"                        # marker stays; retry next tick
     state.save_last_reported(repo_dir, remote)
+    _log(f"📤 relay: reported {len(hashes)} commit(s) for {repo} @ {remote[:10]}")
     return "reported"
 
 

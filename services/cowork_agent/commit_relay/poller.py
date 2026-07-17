@@ -23,6 +23,12 @@ log = logging.getLogger(__name__)
 DRAIN_INTERVAL = 5.0
 
 
+def _log(msg: str) -> None:
+    """print(flush=True) so relay activity shows in the service log file —
+    module-level log.info is invisible under default logging config."""
+    print(msg, flush=True)
+
+
 def _enabled() -> bool:
     return os.getenv("RELAY_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 
@@ -124,8 +130,10 @@ async def run_tick() -> float:
                     if await git_ops.commit_present(d, e.get("commit", "")):
                         present.append(e)
                 if present:
-                    state.save_cursor(d, max(int(e.get("seq", 0)) for e in present))
+                    top = max(int(e.get("seq", 0)) for e in present)
+                    state.save_cursor(d, top)
                     status.record_fetch(repo, d.name, len(present))
+                    _log(f"📥 relay: fetched {len(present)} commit(s) into {d.name} (cursor → {top})")
                 if len(present) < len(events):
                     drain = True     # rest retries next (short) tick
         if entry.get("has_more"):
