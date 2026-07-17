@@ -15,18 +15,12 @@ from pathlib import Path
 
 from services.cowork_agent.project_layout import git_repo_dirs
 
-from . import git_ops, state, status, swarm_client
+from . import git_ops, log_line, state, status, swarm_client, watcher
 from .repo_identity import normalize_repo
 
 log = logging.getLogger(__name__)
 
 DRAIN_INTERVAL = 5.0
-
-
-def _log(msg: str) -> None:
-    """print(flush=True) so relay activity shows in the service log file —
-    module-level log.info is invisible under default logging config."""
-    print(msg, flush=True)
 
 
 def _enabled() -> bool:
@@ -130,14 +124,28 @@ async def run_tick() -> float:
                     if await git_ops.commit_present(d, e.get("commit", "")):
                         present.append(e)
                 if present:
-                    top = max(int(e.get("seq", 0)) for e in present)
-                    state.save_cursor(d, top)
+                    top = max(present, key=lambda e: int(e.get("seq", 0)))
+                    state.save_cursor(d, int(top.get("seq", 0)))
+                    # These commits came FROM the ledger — mark them reported so
+                    # the publish step below has nothing to boomerang back.
+                    state.save_last_reported(d, top.get("commit", ""))
                     status.record_fetch(repo, d.name, len(present))
-                    _log(f"📥 relay: fetched {len(present)} commit(s) into {d.name} (cursor → {top})")
+                    log_line(f"📥 relay: fetched {len(present)} commit(s) into {d.name} "
+                             f"(cursor → {int(top.get('seq', 0))})")
                 if len(present) < len(events):
                     drain = True     # rest retries next (short) tick
         if entry.get("has_more"):
             drain = True
+
+    # Publish step: with membership fresh from THIS tick (not borrowed from
+    # another loop's memory), check each member repo for local pushes and
+    # report them. Runs after the fetch step, so ledger-delivered commits have
+    # already advanced last_reported and can't be re-reported.
+    for repo in membership & set(repos):
+        try:
+            await watcher.run_tick_repo(ws, repo, repos[repo], watcher._branch())
+        except Exception as exc:  # noqa: BLE001 — one repo's failure stays its own
+            log.warning("commit_relay publish: %s: %s", repo, exc)
 
     n_shared_cloned = len(membership & set(repos))
     cadence = decide_cadence(n_shared_cloned)

@@ -537,17 +537,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ xo.json: setup failed (non-fatal): {exc}")
 
-    # Cross-workspace commit relay: always-on pull poller + publish watcher.
-    # RELAY_ENABLED (default true) is an emergency brake only; with no PROJECT_ID
-    # the poller PARKS (no network calls). Non-fatal on failure.
-    _relay_poller_task = None
-    _relay_watcher_task = None
+    # Cross-workspace commit relay: one always-on pull loop (poll + fetch +
+    # publish in a single tick — see commit_relay/poller.py). RELAY_ENABLED
+    # (default true) is an emergency brake only; with no PROJECT_ID the loop
+    # PARKS (no network calls). Non-fatal on failure.
+    _relay_task = None
     try:
         from services.cowork_agent.commit_relay.poller import run_relay_poller
-        from services.cowork_agent.commit_relay.watcher import start_commit_relay_watcher
-        _relay_poller_task = asyncio.create_task(run_relay_poller())
-        _relay_watcher_task = asyncio.create_task(start_commit_relay_watcher())
-        print("   relay: poller + watcher started (always-on; RELAY_ENABLED=false to brake)")
+        _relay_task = asyncio.create_task(run_relay_poller())
+        print("   relay: loop started (always-on; RELAY_ENABLED=false to brake)")
     except Exception as exc:
         print(f"⚠️ relay failed to start (non-fatal): {exc}")
 
@@ -605,17 +603,10 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    if _relay_poller_task and not _relay_poller_task.done():
-        _relay_poller_task.cancel()
+    if _relay_task and not _relay_task.done():
+        _relay_task.cancel()
         try:
-            await _relay_poller_task
-        except asyncio.CancelledError:
-            pass
-
-    if _relay_watcher_task and not _relay_watcher_task.done():
-        _relay_watcher_task.cancel()
-        try:
-            await _relay_watcher_task
+            await _relay_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")
