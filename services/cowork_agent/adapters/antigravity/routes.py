@@ -142,6 +142,12 @@ def _resolve_agy_path() -> str:
 
 
 CONNECT_TIMEOUT_SECONDS = int(os.getenv("ANTIGRAVITY_CONNECT_TIMEOUT", "180"))
+# Terminal event for a stream a newer connect took over. Mirrors the reference's
+# wording (claude_setup_token.py:713): the SESSION is still alive and pastable —
+# only this connection ended.
+_SUPERSEDED_MESSAGE = (
+    "This connection was superseded by a newer one; the login session is still active."
+)
 SSE_HEARTBEAT_SECONDS = int(os.getenv("ANTIGRAVITY_CONNECT_HEARTBEAT", "15"))
 _TRIGGER_MODEL = "Gemini 3.5 Flash (Low)"
 
@@ -188,6 +194,17 @@ _last_completed_ok: bool = False
 # True once the user has pasted a code this session — suppresses the auth-timer
 # respawn so we never kill an agy that is mid token-exchange.
 _code_submitted: bool = False
+# Ownership token for the in-flight session, ALWAYS compared by identity (`is`),
+# never equality: each generate() mints its own `object()`. Invariant:
+# `_owner is not None` ⟺ some generator currently owns the session. It is what
+# makes attach safe — without it, a superseded generator would clear globals or
+# kill a process that a newer stream has taken over. See _spawn_login/clear_session.
+_owner: Optional[object] = None
+# Anchors the overall budget to the ORIGINAL session start. Deliberately distinct
+# from `_started_at`, which _spawn_login re-sets on EVERY respawn — anchoring the
+# deadline to that would re-extend the budget on each reattach instead of bounding
+# it, i.e. the exact opposite of the intent.
+_session_started_at: Optional[float] = None
 
 
 def _deliver(session_id: str, item: tuple) -> None:
@@ -276,12 +293,17 @@ async def antigravity_connect():
     async def generate() -> AsyncGenerator[str, None]:
         global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
         global _last_completed_session_id, _last_completed_ok, _code_submitted
+        global _owner, _session_started_at
 
         session_id = str(uuid.uuid4())
         queue: asyncio.Queue = asyncio.Queue()
         ready_event = asyncio.Event()
         process: Optional[asyncio.subprocess.Process] = None
         auth_url_sent = False
+        # This stream's identity for every ownership check below.
+        owner = object()
+        adopted = False
+        adopted_url: Optional[str] = None
 
         # Idempotent short-circuit: already logged in → nothing to do.
         if has_usable_login():
@@ -292,14 +314,19 @@ async def antigravity_connect():
         def clear_session(proc) -> None:
             async def _clear():
                 global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
+                global _owner, _session_started_at
                 async with _lock:
-                    if _process is proc:
+                    # Owner-guarded as well as proc-guarded: once a newer stream has
+                    # adopted this session, THIS generator must never tear it down.
+                    if _owner is owner and _process is proc:
                         _process = None
                         _session_id = None
                         _ready = None
                         _queue = None
                         _auth_url = None
                         _started_at = None
+                        _owner = None
+                        _session_started_at = None
                         _close_pty_master()
             asyncio.create_task(_clear())
 
@@ -357,6 +384,7 @@ async def antigravity_connect():
             Reused for the initial spawn and for each respawn when agy's own ~60s
             auth timer expires. Returns the process, or None if no PTY is available."""
             global _process, _pty_master, _session_id, _ready, _queue, _auth_url, _started_at
+            global _owner
             if not _pty_wanted():
                 return None
             env = os.environ.copy()
@@ -385,6 +413,33 @@ async def antigravity_connect():
                 raise
             os.close(slave_fd)
             async with _lock:
+                # INTERLOCK. Between creating `proc` above and taking this lock, a
+                # newer stream may have adopted the session. Publishing now would
+                # (a) leave two live agy processes at the respawn boundary — the
+                # loser's `finally` never runs because the proxy swallows the
+                # disconnect, so the reject would re-arm; and (b) let
+                # _close_pty_master() below close a global fd the other generator
+                # is concurrently reinstalling, and fd numbers get recycled, so the
+                # reader thread could end up on a recycled descriptor.
+                # `_owner is None` is NOT supersession: clear_session releases it on
+                # the respawn path, and we are then free to re-claim it below.
+                if _owner is not None and _owner is not owner:
+                    try:
+                        os.close(master_fd)  # slave_fd is already closed above
+                    except OSError:
+                        pass
+                    try:
+                        proc.kill()  # clean up the agy we just spawned; never orphan it
+                    except ProcessLookupError:
+                        pass
+                    return None
+                # Close the PREVIOUS master before publishing the new one. On the
+                # respawn path clear_session() usually gets there first (its
+                # `_process is proc` guard still matches), but if it loses the race to
+                # this spawn that guard stops matching and the old master would leak.
+                # Defensive and idempotent: a no-op when already closed.
+                _close_pty_master()
+                _owner = owner
                 _process = proc
                 _pty_master = master_fd
                 _session_id = session_id
@@ -403,30 +458,101 @@ async def antigravity_connect():
 
         try:
             async with _lock:
-                # If a login is already in flight, reject a second start (keep it simple —
-                # unlike claude we don't multiplex; the UI opens one dialog).
-                if _process is not None and _process.returncode is None:
-                    yield _err_event('An antigravity login is already in progress.')
-                    return
-                if _process is not None:
-                    _close_pty_master()
-                _code_submitted = False
+                # ATTACH, mirroring the proven reference (claude_setup_token.py:572-599).
+                # A second connect is NOT an error: the dialog re-mounts, or the user
+                # closes and reopens it. Crucially the xo-swarm proxy passes no
+                # `signal` (app/api/antigravity/stream/route.ts:27 — identical to the
+                # claude proxy), so closing the dialog never reaches us and the old
+                # stream stays live. Rejecting therefore locked the user out for the
+                # FULL CONNECT_TIMEOUT_SECONDS budget (measured: 3 chained agy spawns).
+                # Taking the session over keeps the same session_id, agy and PTY, so a
+                # code pasted against the original session_id still completes. Only the
+                # consumer queue moves (last stream wins); the superseded stream sees
+                # the owner poll below and ends with a terminal event.
+                # `_session_id is not None` matters: at the respawn boundary
+                # clear_session may have released the session while its generator is
+                # still mid-respawn — there is nothing coherent to adopt, so we start
+                # fresh and the _spawn_login interlock makes that generator kill its
+                # own spawn rather than leaving two live agy processes.
+                if _owner is not None and _session_id is not None:
+                    _owner = owner
+                    adopted = True
+                    session_id = _session_id
+                    adopted_url = _auth_url
+                    old_queue = _queue
+                    _queue = queue
+                    # Hand over anything the previous stream never consumed, so an
+                    # unconsumed auth_url or exit isn't stranded in a dead queue
+                    # (claude_setup_token.py:592-599).
+                    if old_queue is not None:
+                        while True:
+                            try:
+                                queue.put_nowait(old_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+                    # Reuse the live agy; a session caught at the respawn boundary has
+                    # none, so we spawn for ourselves below rather than waiting on a
+                    # queue that nothing will feed.
+                    process = _process if (_process is not None and _process.returncode is None) else None
+                    # Deliberately NOT touched on this path:
+                    #  - `_ready`: the live reader thread sets the ORIGINAL Event;
+                    #    installing ours would hang the callback's readiness gate.
+                    #  - `_code_submitted`: a re-mounted dialog must not re-arm the
+                    #    respawn and kill an agy that is mid token-exchange (P1.2).
+                else:
+                    _owner = owner
+                    _session_started_at = time.monotonic()
+                    _code_submitted = False
+                    if _process is not None:
+                        _close_pty_master()
 
-            process = await _spawn_login()
             if process is None:
-                yield _err_event('PTY unavailable; antigravity login needs a terminal.')
-                return
+                process = await _spawn_login()
+                if process is None:
+                    # Either no PTY, or we lost the interlock race while spawning.
+                    # `_owner is None` means the session was merely released, not
+                    # stolen — that is not supersession, so use the same two-part
+                    # predicate as every other ownership check.
+                    superseded = _owner is not None and _owner is not owner
+                    yield _err_event(
+                        _SUPERSEDED_MESSAGE if superseded
+                        else 'PTY unavailable; antigravity login needs a terminal.'
+                    )
+                    return
 
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+            if adopted and adopted_url:
+                # Replay the URL so a reopened dialog renders immediately, and arm the
+                # respawn guard correctly. If a respawn had already reset `_auth_url`,
+                # leave auth_url_sent False — self-healing: the new URL arrives on the
+                # swapped queue and is extracted below.
+                auth_url_sent = True
+                yield f"data: {json.dumps({'type': 'auth_url', 'url': adopted_url})}\n\n"
             # The overall budget spans ALL respawns: each agy self-times-out at ~60s,
             # and we refresh the URL on timeout so a slow-but-valid user (opening the
             # link, signing in, pasting the code) isn't hard-failed by that 60s.
-            overall_deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
+            # Anchored to the ORIGINAL session start so reattaching cannot extend it.
+            overall_deadline = (_session_started_at or time.monotonic()) + CONNECT_TIMEOUT_SECONDS
 
             while True:
+                if _owner is not None and _owner is not owner:
+                    # A newer stream adopted the session (last one wins). End THIS
+                    # stream only — the login itself is untouched and a paste against
+                    # the same session_id still works. Dropping our local `process`
+                    # reference is the whole mechanism: the `finally` is guarded on it,
+                    # so we exit without killing the agy the adopter now owns and
+                    # without clearing globals out from under it.
+                    process = None
+                    yield _err_event(_SUPERSEDED_MESSAGE)
+                    break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_SECONDS)
                 except asyncio.TimeoutError:
+                    if _owner is not None and _owner is not owner:
+                        # Superseded while we idled — loop so the poll above handles
+                        # it. Falling through to the deadline check would kill the
+                        # adopted agy.
+                        continue
                     if time.monotonic() >= overall_deadline:
                         if process and process.returncode is None:
                             process.kill()
@@ -468,6 +594,12 @@ async def antigravity_connect():
                                 process = new_proc
                                 yield f"data: {json.dumps({'type': 'stdout', 'line': 'Sign-in link expired — issuing a fresh one…'})}\n\n"
                                 continue
+                            if _owner is not None and _owner is not owner:
+                                # The interlock declined our respawn and killed it: a
+                                # newer stream owns the session. Let the poll at the
+                                # top of the loop end this stream cleanly.
+                                process = None
+                                continue
                         clear_session(process)
                         yield _err_event('Antigravity login failed. Please try again.')
                         break
@@ -500,6 +632,20 @@ async def antigravity_connect():
             # current throwaway agy if it is still alive, so a login process never
             # lingers to its own ~60s timeout. (A succeeded run is already dead here —
             # login_watcher killed it — so this only fires on disconnect/abort.)
+            #
+            # `process is None` here means we were superseded: the adopter owns the
+            # agy now and must NOT be torn down.
+            #
+            # This kill is deliberately NOT the reference's DETACH
+            # (claude_setup_token.py:812-818). Claude can leave its CLI running on
+            # disconnect because it has no respawn loop; we do, so an unread-but-live
+            # generator could keep spawning fresh agy processes to the deadline.
+            # ATTACH is what makes DETACH unnecessary: a re-mounted dialog adopts the
+            # live session instead of needing it to survive an unnoticed disconnect.
+            # NOTE: if `signal: request.signal` is ever added to the xo-swarm proxy
+            # (route.ts:27), this calculus flips — every dialog close would then kill
+            # agy and invalidate the user's in-flight OAuth code, and this must become
+            # DETACH plus a standalone watchdog.
             if process is not None:
                 if process.returncode is None:
                     try:
@@ -507,6 +653,12 @@ async def antigravity_connect():
                     except ProcessLookupError:
                         pass
                 clear_session(process)
+            elif _owner is owner:
+                # No process to clear, but we still hold the session (e.g. PTY
+                # unavailable). Release it so the next connect starts fresh rather
+                # than adopting a session with no generator behind it.
+                _owner = None
+                _session_started_at = None
 
     return StreamingResponse(
         generate(),
