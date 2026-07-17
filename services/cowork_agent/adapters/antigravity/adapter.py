@@ -244,12 +244,62 @@ class AntigravityAdapter(BaseAgentAdapter):
             return str(project)
         return str(xo_projects_root())
 
+    def _agy_model_catalog(self) -> tuple[set[str], str]:
+        """The agy LLM names valid for ``agy --model``, plus the default.
+
+        `agy --model` accepts ONLY names from agy's own LLM catalog (``agy
+        models``: "Gemini 3.5 Flash (Low)", "Claude Sonnet 4.6 (Thinking)", …).
+        The declared source of truth is the manifest's ``models`` block, which
+        is pinned to the CLI version and verified to match ``agy models``.
+        Cached per adapter instance; fail-safe — an unreadable manifest yields an
+        empty catalog, so `_model` falls back to the default and never forwards
+        an invalid ``--model``.
+        """
+        cache = getattr(self, "_model_catalog_cache", None)
+        if cache is not None:
+            return cache
+        catalog: set[str] = set()
+        default = ""
+        try:
+            from services.cowork_agent.registry.agent_registry import get_agent
+
+            models = get_agent(_BACKEND).raw.get("models") or {}
+            catalog = {str(n) for n in (models.get("catalog") or [])}
+            default = str(models.get("default") or "")
+            if default:
+                catalog.add(default)
+        except Exception:
+            pass
+        cache = (catalog, default)
+        self._model_catalog_cache = cache
+        return cache
+
     def _model(self, requested: str | None) -> str:
-        return (
-            requested
-            or self.config.get("default_model")
+        catalog, manifest_default = self._agy_model_catalog()
+        default = (
+            self.config.get("default_model")
+            or manifest_default
             or "Gemini 3.5 Flash (Low)"
         )
+        if not requested:
+            return default
+        # `requested` may be a real agy LLM name, or — the common case — an
+        # /api/models agent-profile id ("main" or "<prefix>/main"), which agy's
+        # --model would reject ("model main is not recognized…"). Honor it only
+        # when it names a catalog LLM; otherwise fall back to the default LLM.
+        # `catalog` is empty only when the manifest is unreadable — then we always
+        # fall back, matching the pre-P3.2 behavior (model picker inert, chat OK).
+        if not catalog:
+            return default
+        if requested in catalog:
+            return requested
+        # /api/models ids are "<prefix>/<leaf>" and catalog LLM names never
+        # contain "/", so the part after the last "/" is the only thing that
+        # could name an LLM (prefix-agnostic — works whatever the model_prefix is).
+        leaf = requested.rsplit("/", 1)[-1]
+        if leaf in catalog:
+            return leaf
+        return default
 
     def _build_cmd(
         self,
