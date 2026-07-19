@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -223,7 +225,7 @@ class ExperimentAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {
                 "EXPERIMENT_RUNTIME_ROLE": "sandbox",
-                "EXPERIMENT_PARENT_SPACE_URL": "http://127.0.0.1:5002/space/#/experiment",
+                "EXPERIMENT_PARENT_SPACE_URL": "http://127.0.0.1:5002/space/#/chat",
             },
         ), patch.object(runtime, "_run_process", process):
             result = await provider.availability()
@@ -233,7 +235,7 @@ class ExperimentAvailabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["context"], "sandbox")
         self.assertEqual(
             result["manager_url"],
-            "http://127.0.0.1:5002/space/#/experiment",
+            "http://127.0.0.1:5002/space/#/chat",
         )
         self.assertNotIn("OPENAI_API_KEY is not configured", result["issues"])
         self.assertNotIn("agent-api-sdk is not installed", result["issues"])
@@ -259,7 +261,7 @@ class ExperimentAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("EXPERIMENT_PARENT_SPACE_URL", None)
             self.assertEqual(
                 runtime._parent_space_url(),
-                "http://127.0.0.1:5111/space/#/experiment",
+                "http://127.0.0.1:5111/space/#/chat",
             )
         for value in ["javascript:alert(1)", "http://user:pass@host/space/"]:
             with self.subTest(value=value), patch.dict(
@@ -279,6 +281,10 @@ class ExperimentSnapshotTests(unittest.IsolatedAsyncioTestCase):
             (root / "src" / ".env.local").write_text("TOKEN=secret\n")
             (root / "node_modules").mkdir()
             (root / "node_modules" / "dep.js").write_text("large")
+            (root / ".next" / "cache").mkdir(parents=True)
+            (root / ".next" / "cache" / "bundle.js").write_text("generated")
+            (root / ".next-old-11611").mkdir()
+            (root / ".next-old-11611" / "bundle.js").write_text("generated")
             (root / "secrets.toml").write_text("secret=true")
             external = Path(outside) / "outside.txt"
             external.write_text("must not be copied")
@@ -291,6 +297,8 @@ class ExperimentSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((staged / ".env").exists())
             self.assertFalse((staged / "src" / ".env.local").exists())
             self.assertFalse((staged / "node_modules").exists())
+            self.assertFalse((staged / ".next").exists())
+            self.assertFalse((staged / ".next-old-11611").exists())
             self.assertFalse((staged / "secrets.toml").exists())
             self.assertFalse((staged / "outside-link").exists())
             await runtime._remove_source_snapshot(record)
@@ -321,6 +329,50 @@ class ExperimentSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((staged / "xo-cowork-api" / ".env").exists())
             await runtime._remove_source_snapshot(record)
 
+    async def test_git_snapshot_keeps_only_the_current_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Experiment Test"],
+                check=True,
+            )
+            for revision in range(3):
+                (root / "revision.txt").write_text(str(revision))
+                subprocess.run(["git", "-C", str(root), "add", "revision.txt"], check=True)
+                subprocess.run(
+                    ["git", "-C", str(root), "commit", "--quiet", "-m", str(revision)],
+                    check=True,
+                )
+            record = runtime.ExperimentRecord(id="exp_git", project_id="demo")
+
+            staged = await runtime._prepare_source_snapshot(record, root)
+
+            count = subprocess.run(
+                ["git", "-C", str(staged), "rev-list", "--count", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(count.stdout.strip(), "1")
+            self.assertEqual((staged / "revision.txt").read_text(), "2")
+            await runtime._remove_source_snapshot(record)
+
+    async def test_source_bundle_reserves_workspace_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            payload = root / "payload.bin"
+            with payload.open("wb") as stream:
+                stream.truncate(900)
+
+            with patch.dict(os.environ, {"EXPERIMENT_WORKSPACE_SIZE": "1k"}):
+                with self.assertRaisesRegex(runtime.ExperimentError, "source bundle is too large"):
+                    await runtime._validate_source_bundle(root)
+
 
 class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_session_uses_selected_sandbox_project_directory(self) -> None:
@@ -342,7 +394,11 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime._create_agent_session(client, record)
 
+        agent = client.sessions.create.await_args.kwargs["agent"]
         environment = client.sessions.create.await_args.kwargs["environment"]
+        self.assertTrue(agent["code_mode"])
+        self.assertEqual(agent["tools"][0]["name"], runtime.SANDBOX_EXEC_TOOL_NAME)
+        self.assertIn("always-on shell fallback", agent["instructions"])
         self.assertEqual(
             environment["workspace_directory"],
             "/workspace/xo-projects/demo root",
@@ -376,17 +432,18 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(process.killed)
         self.assertEqual(process.communicate_calls, 2)
 
-    async def test_docker_command_uses_staged_read_only_mount_and_env_secret(self) -> None:
+    async def test_unrestricted_docker_command_uses_root_and_writable_rootfs(self) -> None:
         secret = "sk-command-secret"
         process = AsyncMock(
             side_effect=[
                 runtime.ProcessResult(0, "container-id\n"),
                 runtime.ProcessResult(0, "127.0.0.1:49173\n"),
+                runtime.ProcessResult(0, "127.0.0.1:49174\n"),
             ]
         )
         staged = Path("/tmp/staged project")
         with patch.object(runtime, "_run_process", process):
-            port = await runtime._start_docker_executor(
+            ports = await runtime._start_docker_executor(
                 source_root=staged,
                 api_key=secret,
                 environment_id="env_123",
@@ -395,26 +452,193 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 session_id="sess_123",
                 container_name="xo-experiment-123",
                 project_id="demo",
-                parent_space_url="http://127.0.0.1:5002/space/#/experiment",
+                parent_space_url="http://127.0.0.1:5002/space/#/chat",
             )
 
         command = process.await_args_list[0].args[0]
         env = process.await_args_list[0].kwargs["env"]
-        self.assertEqual(port, 49173)
+        self.assertEqual(ports, (49173, 49174))
         self.assertNotIn(secret, " ".join(command))
         self.assertEqual(env["CODEX_API_KEY"], secret)
         self.assertEqual(env["XO_PROJECTS_ROOT"], "/workspace/xo-projects")
         self.assertEqual(env["AI_WORKSPACE_ROOT"], "/workspace/xo-projects/demo")
         self.assertEqual(env["EXPERIMENT_RUNTIME_ROLE"], "sandbox")
+        self.assertEqual(env["EXPERIMENT_PERMISSION_PROFILE"], "unrestricted")
         self.assertEqual(
             env["EXPERIMENT_PARENT_SPACE_URL"],
-            "http://127.0.0.1:5002/space/#/experiment",
+            "http://127.0.0.1:5002/space/#/chat",
         )
         self.assertIn(f"{staged}:/xo-sources:ro", command)
+        self.assertIn("0:0", command)
+        self.assertNotIn("no-new-privileges", command)
+        self.assertNotIn("--read-only", command)
+        self.assertNotIn("--cap-drop", command)
+        self.assertIn("127.0.0.1::5002", command)
+        self.assertIn("127.0.0.1::3000", command)
+        self.assertIn('sandbox_mode="danger-full-access"', command[-1])
+        self.assertIn('approval_policy="never"', command[-1])
+
+    async def test_hardened_profile_retains_outer_container_restrictions(self) -> None:
+        process = AsyncMock(
+            side_effect=[
+                runtime.ProcessResult(0, "container-id\n"),
+                runtime.ProcessResult(0, "127.0.0.1:49173\n"),
+                runtime.ProcessResult(0, "127.0.0.1:49174\n"),
+            ]
+        )
+        with patch.dict(os.environ, {"EXPERIMENT_PERMISSION_PROFILE": "hardened"}), patch.object(
+            runtime,
+            "_run_process",
+            process,
+        ):
+            await runtime._start_docker_executor(
+                source_root=Path("/tmp/staged"),
+                api_key="sk-test",
+                environment_id="env_123",
+                api_remote="https://api.openai.com/v1/agents/api",
+                experiment_id="exp_123",
+                session_id="sess_123",
+                container_name="xo-experiment-123",
+                project_id="demo",
+                parent_space_url="http://127.0.0.1:5002/space/#/chat",
+            )
+
+        command = process.await_args_list[0].args[0]
+        env = process.await_args_list[0].kwargs["env"]
+        self.assertEqual(env["EXPERIMENT_PERMISSION_PROFILE"], "hardened")
         self.assertIn("no-new-privileges", command)
         self.assertIn("--read-only", command)
-        self.assertIn("127.0.0.1::5002", command)
-        self.assertIn("ALL", command)
+        self.assertIn("--cap-drop", command)
+        self.assertIn("10001:10001", command)
+
+    async def test_sandbox_exec_routes_to_owned_container_and_redacts_output(self) -> None:
+        secret = "sk-sandbox-command-secret"
+        process = AsyncMock(
+            side_effect=[
+                runtime.ProcessResult(0, "true\n"),
+                runtime.ProcessResult(0, f"uid=0(root) {secret}\n"),
+            ]
+        )
+        record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
+        record.sandbox_id = "xo-experiment-123"
+        record.workspace_directory = "/workspace/xo-projects/demo"
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}), patch.object(
+            runtime,
+            "_run_process",
+            process,
+        ):
+            result = await runtime._run_sandbox_command(
+                record,
+                {"command": "id", "timeout_seconds": 12},
+            )
+
+        command = process.await_args_list[1].args[0]
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("uid=0(root)", result["output"])
+        self.assertNotIn(secret, result["output"])
+        self.assertEqual(command[:4], ["docker", "exec", "--workdir", record.workspace_directory])
+        self.assertEqual(command[-3:], ["sh", "-lc", "id"])
+        self.assertIn("12", command)
+
+    async def test_boot_turn_requires_successful_command_tool_call(self) -> None:
+        record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
+        record.sandbox_id = "xo-experiment-123"
+        record.workspace_directory = "/workspace/xo-projects/demo"
+
+        class Session:
+            def __init__(self) -> None:
+                self.tool_results = []
+
+            async def tool_result(self, **result):
+                self.tool_results.append(result)
+
+            def stream(self, *, input):
+                async def events():
+                    call = {
+                        "name": runtime.SANDBOX_EXEC_TOOL_NAME,
+                        "call_id": "call_boot",
+                        "arguments": {"command": "pwd", "cwd": record.workspace_directory},
+                    }
+                    event = SimpleNamespace(
+                        type="session.turn.item.added",
+                        turn_id="turn_boot",
+                        function_call=call,
+                    )
+                    yield event
+                    yield event
+                    yield SimpleNamespace(type="session.turn.output_text.done", output_text="READY")
+
+                self.input = input
+                return events()
+
+        with patch.object(
+            runtime,
+            "_run_sandbox_command",
+            AsyncMock(return_value={"exit_code": 0, "output": "ok", "cwd": record.workspace_directory}),
+        ):
+            session = Session()
+            await runtime._run_boot_turn(session, record)
+
+        self.assertIn(runtime.SANDBOX_EXEC_TOOL_NAME, session.input)
+        self.assertIn("READY", record.output)
+        self.assertEqual(len(session.tool_results), 1)
+        self.assertTrue(session.tool_results[0]["success"])
+
+    async def test_boot_turn_rejects_text_only_readiness(self) -> None:
+        record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
+        record.sandbox_id = "xo-experiment-123"
+        record.workspace_directory = "/workspace/xo-projects/demo"
+
+        class Session:
+            def stream(self, *, input):
+                async def events():
+                    yield SimpleNamespace(type="session.turn.output_text.done", output_text="READY")
+
+                return events()
+
+        with self.assertRaisesRegex(runtime.ExperimentError, "command tools are unavailable"):
+            await runtime._run_boot_turn(Session(), record)
+
+    def test_permission_profile_defaults_to_unrestricted_and_rejects_unknown(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EXPERIMENT_PERMISSION_PROFILE", None)
+            self.assertEqual(runtime._permission_profile(), "unrestricted")
+        with patch.dict(os.environ, {"EXPERIMENT_PERMISSION_PROFILE": "host-root"}):
+            with self.assertRaises(runtime.ExperimentUnavailable):
+                runtime._permission_profile()
+
+    async def test_container_diagnostic_surfaces_exit_logs_and_redacts_keys(self) -> None:
+        secret = "sk-diagnostic-secret"
+        process = AsyncMock(
+            side_effect=[
+                runtime.ProcessResult(0, "exited\t2\t\n"),
+                runtime.ProcessResult(
+                    0,
+                    f"OPENAI_API_KEY={secret}\n"
+                    "tar: Cannot write: No space left on device\n"
+                    "tar: Exiting with failure status\n",
+                ),
+            ]
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": secret}), patch.object(
+            runtime,
+            "_run_process",
+            process,
+        ):
+            detail = await runtime._sandbox_container_diagnostic("sandbox-test")
+
+        assert detail is not None
+        self.assertIn("exit code 2", detail)
+        self.assertIn("No space left on device", detail)
+        self.assertNotIn(secret, detail)
+
+    async def test_running_container_has_no_failure_diagnostic(self) -> None:
+        process = AsyncMock(return_value=runtime.ProcessResult(0, "running\t0\t\n"))
+        with patch.object(runtime, "_run_process", process):
+            detail = await runtime._sandbox_container_diagnostic("sandbox-test")
+
+        self.assertIsNone(detail)
+        process.assert_awaited_once()
 
     def test_invalid_image_cannot_become_a_docker_flag(self) -> None:
         with patch.dict(os.environ, {"EXPERIMENT_DOCKER_IMAGE": "--privileged"}):
@@ -438,6 +662,19 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.assertRaises(runtime.ExperimentUnavailable):
                     runtime._sandbox_space_url(49173)
+
+    def test_app_url_uses_its_dynamic_published_port(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EXPERIMENT_APP_URL_TEMPLATE", None)
+            self.assertEqual(runtime._sandbox_app_url(49174), "http://127.0.0.1:49174/")
+        with patch.dict(
+            os.environ,
+            {"EXPERIMENT_APP_URL_TEMPLATE": "https://sandbox.example.test:{port}/"},
+        ):
+            self.assertEqual(
+                runtime._sandbox_app_url(49174),
+                "https://sandbox.example.test:49174/",
+            )
 
     def test_output_is_bounded_and_key_redacted(self) -> None:
         record = runtime.ExperimentRecord(id="exp_output", project_id="demo")

@@ -42,11 +42,17 @@ STOPPABLE_STATUSES = {"starting", "ready", "cleanup_failed"}
 MAX_OUTPUT_CHARS = 16_000
 MAX_MESSAGE_CHARS = 20_000
 MAX_TRANSCRIPT_MESSAGES = 40
+MAX_COMMAND_CHARS = 20_000
+MAX_COMMAND_OUTPUT_CHARS = 20_000
 DEFAULT_IMAGE = "xo-experiment-sandbox:latest"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_API_BASE = "https://api.openai.com/v1/agents"
 DEFAULT_MAX_ACTIVE = 2
+DEFAULT_PERMISSION_PROFILE = "unrestricted"
+PERMISSION_PROFILES = {"unrestricted", "hardened"}
+SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
 SPACE_PORT = 5002
+APP_PORT = 3000
 SANDBOX_PROJECTS_ROOT = "/workspace/xo-projects"
 SANDBOX_API_ROOT = "/workspace/xo-cowork-api"
 SANDBOX_RUNTIME_ROLE = "sandbox"
@@ -63,11 +69,23 @@ cd "$XO_COWORK_API_ROOT"
 python -m uvicorn server:app \
   --host 0.0.0.0 \
   --port "$SPACE_PORT" \
-  --lifespan off \
-  >/tmp/xo-space.log 2>&1 &
+  --lifespan off &
 
 cd "$project_dir"
+if [ "$EXPERIMENT_PERMISSION_PROFILE" = "unrestricted" ]; then
+  set -- \
+    -c 'sandbox_mode="danger-full-access"' \
+    -c 'approval_policy="never"'
+else
+  set -- \
+    -c 'sandbox_mode="workspace-write"' \
+    -c 'approval_policy="never"'
+fi
 exec codex exec-server \
+  --strict-config \
+  "$@" \
+  --enable shell_tool \
+  --enable unified_exec \
   --remote "$AGENTS_API_REMOTE" \
   --environment-id "$AGENT_ENVIRONMENT_ID"
 """.strip()
@@ -123,6 +141,7 @@ class ExperimentRecord:
     project_id: str
     provider: str = "local_docker"
     model: str = DEFAULT_MODEL
+    permission_profile: str = DEFAULT_PERMISSION_PROFILE
     status: ExperimentStatus = "starting"
     stage: str = "queued"
     output: str = ""
@@ -132,6 +151,7 @@ class ExperimentRecord:
     sandbox_id: str | None = None
     failed_stage: str | None = None
     space_url: str | None = None
+    app_url: str | None = None
     workspace_directory: str | None = None
     turn_status: Literal["idle", "running", "failed"] = "idle"
     turn_error: str | None = None
@@ -154,6 +174,7 @@ class ExperimentRecord:
             "project_id": self.project_id,
             "provider": self.provider,
             "model": self.model,
+            "permission_profile": self.permission_profile,
             "status": self.status,
             "stage": self.stage,
             "failed_stage": self.failed_stage,
@@ -162,6 +183,7 @@ class ExperimentRecord:
             "agent_session_id": self.session_id,
             "sandbox_id": self.sandbox_id,
             "space_url": self.space_url,
+            "app_url": self.app_url,
             "workspace_directory": self.workspace_directory,
             "turn_status": self.turn_status,
             "turn_error": self.turn_error,
@@ -243,6 +265,11 @@ class LocalDockerExperimentProvider:
             }
 
         issues: list[str] = []
+        try:
+            permission_profile = _permission_profile()
+        except ExperimentUnavailable as error:
+            permission_profile = "invalid"
+            issues.append(str(error))
         api_key = _api_key()
         sdk_available = importlib.util.find_spec("agent_api_sdk") is not None
         if not api_key:
@@ -287,13 +314,14 @@ class LocalDockerExperimentProvider:
                 issues.append("Agents API access check failed")
         return {
             "name": self.name,
-            "label": "Local Docker · Agents API",
+            "label": f"Local Docker · {permission_profile} agent",
             "ready": not issues,
             "issues": issues,
             "production": False,
             "context": "host",
             "launch_allowed": not issues,
             "manager_url": None,
+            "permission_profile": permission_profile,
         }
 
     async def launch(self, record: ExperimentRecord, source_dir: Path) -> None:
@@ -303,6 +331,7 @@ class LocalDockerExperimentProvider:
             raise ExperimentUnavailable("OPENAI_API_KEY is not configured")
 
         record.model = os.getenv("AGENT_API_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        record.permission_profile = _permission_profile()
         record.workspace_directory = _sandbox_project_directory(record.project_id)
         record.stage = "creating_session"
         record.touch()
@@ -315,21 +344,28 @@ class LocalDockerExperimentProvider:
             record.touch()
 
             staged_sources = await _prepare_experiment_sources(record, source_dir)
-            record.sandbox_id = _container_name(record.id)
-            host_port = await _start_docker_executor(
+            await _validate_source_bundle(staged_sources)
+            container_name = _container_name(record.id)
+            record.sandbox_id = container_name
+            host_port, app_host_port = await _start_docker_executor(
                 source_root=staged_sources,
                 api_key=api_key,
                 environment_id=record.environment_id or "",
                 api_remote=f"{api_base}/api",
                 experiment_id=record.id,
                 session_id=record.session_id or "",
-                container_name=record.sandbox_id,
+                container_name=container_name,
                 project_id=record.project_id,
                 parent_space_url=_parent_space_url(),
             )
+            record.app_url = _sandbox_app_url(app_host_port)
             record.stage = "starting_space"
             record.touch()
-            await _wait_for_sandbox_space(host_port, record.project_id)
+            await _wait_for_sandbox_space(
+                host_port,
+                record.project_id,
+                container_name,
+            )
             record.stage = "connecting_agent"
             record.touch()
 
@@ -371,10 +407,17 @@ class LocalDockerExperimentProvider:
             if session.status != "idle":
                 raise ExperimentTurnBusy(f"Agent session is {session.status}")
             saw_delta = False
+            handled_call_ids: set[str] = set()
             try:
                 async with asyncio.timeout(float(os.getenv("EXPERIMENT_TURN_TIMEOUT", "600"))):
                     async with aclosing(session.stream(input=prompt)) as events:
                         async for event in events:
+                            await _handle_sandbox_tool_call(
+                                session,
+                                event,
+                                record,
+                                handled_call_ids,
+                            )
                             event_type = getattr(event, "type", "")
                             delta = getattr(event, "output_text_delta", None)
                             text = getattr(event, "output_text", None)
@@ -408,6 +451,7 @@ class LocalDockerExperimentProvider:
         async with record.cleanup_lock:
             warnings: list[str] = []
             record.space_url = None
+            record.app_url = None
             if record.sandbox_id:
                 warning = await _remove_owned_container(record)
                 if warning:
@@ -744,11 +788,19 @@ async def _create_agent_session(client: Any, record: ExperimentRecord) -> Any:
             return await client.sessions.create(
                 agent={
                     "model": record.model,
+                    "code_mode": True,
                     "instructions": (
-                        f"Operate only inside {record.workspace_directory}. Read project instructions "
-                        "before acting, never inspect process credentials or /xo-sources, keep the "
-                        "project unchanged during the boot check, and answer concisely."
+                        "You are the autonomous agent for an isolated XO Experiment container. "
+                        "You may read and modify files, execute commands, install packages, start "
+                        "servers, and use outbound network access inside the container without asking "
+                        f"for approval. Begin work in {record.workspace_directory}. Use the built-in "
+                        f"command tool when it is available; {SANDBOX_EXEC_TOOL_NAME} is an always-on "
+                        "shell fallback and also provides filesystem access. Never claim command or "
+                        "filesystem access is unavailable before calling that fallback. Bind project "
+                        f"web servers to 0.0.0.0:{APP_PORT}; Experiment publishes that port to a "
+                        "loopback URL for the user."
                     ),
+                    "tools": [_sandbox_exec_tool()],
                 },
                 environment={
                     "type": "self_hosted",
@@ -769,6 +821,40 @@ async def _create_agent_session(client: Any, record: ExperimentRecord) -> Any:
         raise
     _remember_agent_session(record, session)
     return session
+
+
+def _sandbox_exec_tool() -> dict[str, Any]:
+    """Explicit shell fallback for preview sessions that omit the built-in tool."""
+    return {
+        "type": "function",
+        "name": SANDBOX_EXEC_TOOL_NAME,
+        "description": (
+            "Run a shell command inside the current XO Experiment container. This tool has "
+            "filesystem, package-install, process, and network access inside that container. "
+            "Use it whenever built-in command execution is absent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute with sh -lc.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Absolute working directory inside the container.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600,
+                    "description": "Command timeout; defaults to 300 seconds.",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    }
 
 
 def _remember_agent_session(record: ExperimentRecord, session: Any) -> None:
@@ -821,7 +907,10 @@ async def _stage_sanitized_source(source_dir: Path, destination: Path) -> None:
                 "git",
                 "clone",
                 "--quiet",
-                "--no-hardlinks",
+                "--depth",
+                "1",
+                "--no-local",
+                "--no-tags",
                 "--",
                 str(source_dir),
                 str(destination),
@@ -927,6 +1016,11 @@ def _sensitive_snapshot_name(name: str) -> bool:
             "node_modules",
             "venv",
             ".venv",
+            ".turbo",
+            ".cache",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
             "__pycache__",
             "dist",
             "build",
@@ -942,6 +1036,8 @@ def _sensitive_snapshot_name(name: str) -> bool:
         }
         or lowered == ".env"
         or lowered.startswith(".env.")
+        or lowered == ".next"
+        or lowered.startswith(".next-")
         or lowered.endswith((".pem", ".p12", ".pfx", ".key"))
     )
 
@@ -1003,6 +1099,48 @@ async def _remove_source_snapshot(record: ExperimentRecord) -> None:
     record.touch()
 
 
+async def _validate_source_bundle(source_root: Path) -> None:
+    size = await asyncio.to_thread(_tree_size_bytes, source_root)
+    workspace_limit = _size_bytes(
+        _tmpfs_size("EXPERIMENT_WORKSPACE_SIZE", "2g")
+    )
+    source_limit = workspace_limit * 3 // 4
+    if size > source_limit:
+        raise ExperimentError(
+            "Sandbox source bundle is too large "
+            f"({_format_bytes(size)}; {_format_bytes(workspace_limit)} workspace limit). "
+            "Remove generated artifacts or increase EXPERIMENT_WORKSPACE_SIZE."
+        )
+
+
+def _tree_size_bytes(root: Path) -> int:
+    total = 0
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        dirs[:] = [name for name in dirs if not (directory_path / name).is_symlink()]
+        for name in files:
+            path = directory_path / name
+            if path.is_symlink():
+                continue
+            with suppress(OSError):
+                total += path.stat().st_size
+    return total
+
+
+def _size_bytes(value: str) -> int:
+    suffixes = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+    suffix = value[-1]
+    if suffix in suffixes:
+        return int(value[:-1]) * suffixes[suffix]
+    return int(value)
+
+
+def _format_bytes(value: int) -> str:
+    if value >= 1 << 30:
+        return f"{value / (1 << 30):.1f} GiB"
+    return f"{value / (1 << 20):.1f} MiB"
+
+
 def _container_name(experiment_id: str) -> str:
     return f"xo-experiment-{experiment_id.removeprefix('exp_')[:12]}"
 
@@ -1047,7 +1185,8 @@ async def _start_docker_executor(
     container_name: str,
     project_id: str,
     parent_space_url: str,
-) -> int:
+) -> tuple[int, int]:
+    permission_profile = _permission_profile()
     command = [
         "docker",
         "run",
@@ -1061,13 +1200,47 @@ async def _start_docker_executor(
         "--label",
         f"xo.experiment.session_id={session_id}",
         "--init",
-        "--security-opt",
-        "no-new-privileges",
-        "--cap-drop",
-        "ALL",
-        "--read-only",
-        "--user",
-        "10001:10001",
+    ]
+    if permission_profile == "hardened":
+        command.extend(
+            [
+                "--security-opt",
+                "no-new-privileges",
+                "--cap-drop",
+                "ALL",
+                "--read-only",
+                "--user",
+                "10001:10001",
+            ]
+        )
+        workspace_mount = (
+            "rw,nosuid,nodev,uid=10001,gid=10001,mode=1770,"
+            f"size={_tmpfs_size('EXPERIMENT_WORKSPACE_SIZE', '2g')}"
+        )
+        codex_home_mount = (
+            "rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,"
+            f"size={_tmpfs_size('EXPERIMENT_CODEX_HOME_SIZE', '512m')}"
+        )
+        temp_mount = (
+            "rw,nosuid,nodev,uid=10001,gid=10001,mode=1770,"
+            f"size={_tmpfs_size('EXPERIMENT_TMP_SIZE', '512m')}"
+        )
+    else:
+        command.extend(["--user", "0:0"])
+        workspace_mount = (
+            "rw,exec,uid=0,gid=0,mode=1777,"
+            f"size={_tmpfs_size('EXPERIMENT_WORKSPACE_SIZE', '2g')}"
+        )
+        codex_home_mount = (
+            "rw,exec,uid=0,gid=0,mode=0700,"
+            f"size={_tmpfs_size('EXPERIMENT_CODEX_HOME_SIZE', '512m')}"
+        )
+        temp_mount = (
+            "rw,exec,uid=0,gid=0,mode=1777,"
+            f"size={_tmpfs_size('EXPERIMENT_TMP_SIZE', '512m')}"
+        )
+    command.extend(
+        [
         "--pids-limit",
         os.getenv("EXPERIMENT_PIDS_LIMIT", "512"),
         "--memory",
@@ -1075,13 +1248,15 @@ async def _start_docker_executor(
         "--cpus",
         os.getenv("EXPERIMENT_CPU_LIMIT", "2"),
         "--tmpfs",
-        f"/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=1770,size={_tmpfs_size('EXPERIMENT_WORKSPACE_SIZE', '2g')}",
+        f"/workspace:{workspace_mount}",
         "--tmpfs",
-        f"/codex-home:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size={_tmpfs_size('EXPERIMENT_CODEX_HOME_SIZE', '512m')}",
+        f"/codex-home:{codex_home_mount}",
         "--tmpfs",
-        f"/tmp:rw,nosuid,nodev,uid=10001,gid=10001,mode=1770,size={_tmpfs_size('EXPERIMENT_TMP_SIZE', '512m')}",
+        f"/tmp:{temp_mount}",
         "--publish",
         f"127.0.0.1::{SPACE_PORT}",
+        "--publish",
+        f"127.0.0.1::{APP_PORT}",
         "--volume",
         f"{source_root}:/xo-sources:ro",
         "-e",
@@ -1110,11 +1285,14 @@ async def _start_docker_executor(
         "EXPERIMENT_RUNTIME_ROLE",
         "-e",
         "EXPERIMENT_PARENT_SPACE_URL",
+        "-e",
+        "EXPERIMENT_PERMISSION_PROFILE",
         _docker_image(),
         "sh",
         "-lc",
         BOOTSTRAP_SCRIPT,
-    ]
+        ]
+    )
     env = os.environ.copy()
     env["CODEX_API_KEY"] = api_key
     env["AGENT_ENVIRONMENT_ID"] = environment_id
@@ -1129,32 +1307,44 @@ async def _start_docker_executor(
     env["STARTUP_WARMUP_ENABLED"] = "false"
     env["EXPERIMENT_RUNTIME_ROLE"] = SANDBOX_RUNTIME_ROLE
     env["EXPERIMENT_PARENT_SPACE_URL"] = parent_space_url
+    env["EXPERIMENT_PERMISSION_PROFILE"] = permission_profile
     result = await _run_process(command, env=env, timeout=60)
     if result.returncode != 0:
         detail = _redact(result.output[-500:], api_key).strip()
         raise ExperimentError(f"Docker sandbox failed to start{': ' + detail if detail else ''}")
 
+    space_host_port = await _published_port(container_name, SPACE_PORT, "Space")
+    app_host_port = await _published_port(container_name, APP_PORT, "app")
+    return space_host_port, app_host_port
+
+
+async def _published_port(container_name: str, container_port: int, label: str) -> int:
     port_result = await _run_process(
-        ["docker", "port", container_name, f"{SPACE_PORT}/tcp"],
-        timeout=10,
+        ["docker", "port", container_name, f"{container_port}/tcp"], timeout=10
     )
     match = re.search(r"127\.0\.0\.1:(\d+)\s*$", port_result.stdout)
     if port_result.returncode != 0 or match is None:
-        raise ExperimentError("Sandbox Space port could not be discovered")
+        raise ExperimentError(f"Sandbox {label} port could not be discovered")
     port = int(match.group(1))
     if not 1 <= port <= 65_535:
-        raise ExperimentError("Sandbox Space returned an invalid port")
+        raise ExperimentError(f"Sandbox {label} returned an invalid port")
     return port
 
 
-async def _wait_for_sandbox_space(host_port: int, project_id: str) -> None:
+async def _wait_for_sandbox_space(
+    host_port: int,
+    project_id: str,
+    container_name: str,
+) -> None:
     base_url = f"http://127.0.0.1:{host_port}"
-    deadline = asyncio.get_running_loop().time() + float(
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(
         os.getenv("EXPERIMENT_SPACE_TIMEOUT", "90")
     )
+    next_container_check = 0.0
     last_error = "Space did not respond"
     async with httpx.AsyncClient(timeout=3, follow_redirects=True) as client:
-        while asyncio.get_running_loop().time() < deadline:
+        while loop.time() < deadline:
             try:
                 health = await client.get(f"{base_url}/health")
                 space = await client.get(f"{base_url}/space/")
@@ -1167,8 +1357,68 @@ async def _wait_for_sandbox_space(host_port: int, project_id: str) -> None:
                 last_error = "Sandbox Space project inventory was not ready"
             except (httpx.HTTPError, json.JSONDecodeError, ValueError) as error:
                 last_error = type(error).__name__
+            now = loop.time()
+            if now >= next_container_check:
+                container_failure = await _sandbox_container_diagnostic(container_name)
+                if container_failure:
+                    raise ExperimentError(container_failure)
+                next_container_check = now + 1.0
             await asyncio.sleep(0.5)
+    container_diagnostic = await _sandbox_container_diagnostic(
+        container_name,
+        include_running_logs=True,
+    )
+    if container_diagnostic:
+        raise ExperimentError(container_diagnostic)
     raise ExperimentError(f"Sandbox Space failed its readiness check ({last_error})")
+
+
+async def _sandbox_container_diagnostic(
+    container_name: str,
+    *,
+    include_running_logs: bool = False,
+) -> str | None:
+    state = await _run_process(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.Error}}",
+            container_name,
+        ],
+        timeout=10,
+    )
+    if state.returncode != 0:
+        return "Sandbox container disappeared during Space startup"
+
+    status, _, remainder = state.stdout.strip().partition("\t")
+    exit_code, _, state_error = remainder.partition("\t")
+    if status == "running" and not include_running_logs:
+        return None
+
+    logs = await _run_process(
+        ["docker", "logs", "--tail", "40", container_name],
+        timeout=10,
+    )
+    log_tail = _diagnostic_tail(logs.stdout if logs.returncode == 0 else "")
+    if status == "running":
+        if log_tail:
+            return f"Sandbox Space did not become ready: {log_tail}"
+        return None
+
+    detail = f"Sandbox container {status or 'stopped'}"
+    if exit_code:
+        detail += f" with exit code {exit_code}"
+    if state_error.strip():
+        detail += f": {state_error.strip()}"
+    if log_tail:
+        detail += f": {log_tail}"
+    return _redact(detail, _api_key())
+
+
+def _diagnostic_tail(output: str, limit: int = 700) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return _redact(" | ".join(lines[-8:])[-limit:], _api_key())
 
 
 async def _ensure_container_running(container_name: str) -> None:
@@ -1180,17 +1430,147 @@ async def _ensure_container_running(container_name: str) -> None:
         raise ExperimentNotReady("Sandbox is no longer running")
 
 
+async def _handle_sandbox_tool_call(
+    session: Any,
+    event: Any,
+    record: ExperimentRecord,
+    handled_call_ids: set[str],
+    on_success: Any = None,
+) -> bool:
+    if getattr(event, "type", "") != "session.turn.item.added":
+        return False
+    call = getattr(event, "function_call", None)
+    if not isinstance(call, dict) or call.get("name") != SANDBOX_EXEC_TOOL_NAME:
+        return False
+    call_id = call.get("call_id")
+    turn_id = getattr(event, "turn_id", None)
+    if not isinstance(call_id, str) or not isinstance(turn_id, str):
+        return False
+    if call_id in handled_call_ids:
+        return True
+    handled_call_ids.add(call_id)
+
+    raw_arguments = call.get("arguments", {})
+    if isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            arguments = None
+    else:
+        arguments = raw_arguments
+    if not isinstance(arguments, dict):
+        await session.tool_result(
+            turn_id=turn_id,
+            call_id=call_id,
+            success=False,
+            output=None,
+            error="sandbox_exec arguments must be a JSON object",
+        )
+        return True
+
+    try:
+        result = await _run_sandbox_command(record, arguments)
+    except Exception as error:
+        await session.tool_result(
+            turn_id=turn_id,
+            call_id=call_id,
+            success=False,
+            output=None,
+            error=_public_error(error),
+        )
+    else:
+        await session.tool_result(
+            turn_id=turn_id,
+            call_id=call_id,
+            success=True,
+            output=result,
+            error=None,
+        )
+        if result["exit_code"] == 0 and on_success is not None:
+            on_success()
+    return True
+
+
+async def _run_sandbox_command(
+    record: ExperimentRecord,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    container_name = record.sandbox_id
+    if not container_name or container_name != _container_name(record.id):
+        raise ExperimentNotReady("Experiment sandbox is unavailable")
+    await _ensure_container_running(container_name)
+
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ExperimentError("sandbox_exec requires a non-empty command")
+    if len(command) > MAX_COMMAND_CHARS:
+        raise ExperimentError(f"sandbox_exec command exceeds {MAX_COMMAND_CHARS} characters")
+
+    cwd = arguments.get("cwd") or record.workspace_directory or "/workspace"
+    if not isinstance(cwd, str) or not cwd.startswith("/") or "\x00" in cwd:
+        raise ExperimentError("sandbox_exec cwd must be an absolute container path")
+
+    timeout_value = arguments.get("timeout_seconds", 300)
+    if isinstance(timeout_value, bool) or not isinstance(timeout_value, int):
+        raise ExperimentError("sandbox_exec timeout_seconds must be an integer")
+    timeout_seconds = max(1, min(600, timeout_value))
+    result = await _run_process(
+        [
+            "docker",
+            "exec",
+            "--workdir",
+            cwd,
+            container_name,
+            "timeout",
+            "--signal=KILL",
+            str(timeout_seconds),
+            "sh",
+            "-lc",
+            command,
+        ],
+        timeout=timeout_seconds + 10,
+    )
+    output = _redact(result.output, _api_key())
+    truncated = len(output) > MAX_COMMAND_OUTPUT_CHARS
+    if truncated:
+        output = output[-MAX_COMMAND_OUTPUT_CHARS:]
+    return {
+        "exit_code": result.returncode,
+        "output": output,
+        "cwd": cwd,
+        "truncated": truncated,
+    }
+
+
 async def _run_boot_turn(session: Any, record: ExperimentRecord) -> None:
     prompt = (
-        "Perform a read-only boot check for this XO project. Read AGENTS.md if present, "
-        "list the workspace root, do not modify any file, and reply with a one-sentence "
-        f"READY summary for project {record.project_id}."
+        f"Call {SANDBOX_EXEC_TOOL_NAME} now to prove command and filesystem access. Run "
+        "`pwd; id; test -w .; probe=.xo-experiment-access-probe; printf ready > \"$probe\"; "
+        "test -s \"$probe\"; rm -f \"$probe\"; command -v sh git python node npm` in "
+        f"{record.workspace_directory}. If it succeeds, read AGENTS.md when present, list the "
+        f"workspace root, and reply with a one-sentence READY summary for {record.project_id}. "
+        f"For later web-app tasks, bind the server to 0.0.0.0:{APP_PORT} and report the public "
+        f"URL {record.app_url}."
     )
     record.stage = "booting_agent"
     record.touch()
+    command_succeeded = False
+
+    def remember_success() -> None:
+        nonlocal command_succeeded
+        command_succeeded = True
+
     async with asyncio.timeout(float(os.getenv("EXPERIMENT_BOOT_TIMEOUT", "300"))):
+        handled_call_ids: set[str] = set()
         async with aclosing(session.stream(input=prompt)) as events:
             async for event in events:
+                await _handle_sandbox_tool_call(
+                    session,
+                    event,
+                    record,
+                    handled_call_ids,
+                    on_success=remember_success,
+                )
                 event_type = getattr(event, "type", "")
                 if event_type == "session.environment.connected":
                     record.stage = "booting_agent"
@@ -1208,6 +1588,10 @@ async def _run_boot_turn(session: Any, record: ExperimentRecord) -> None:
                     "session.turn.failed",
                 }:
                     raise ExperimentError(_event_failure(event))
+    if not command_succeeded:
+        raise ExperimentError(
+            "Agent boot check did not execute a sandbox command; command tools are unavailable"
+        )
 
 
 async def _retrieve_terminal_session(session: Any) -> Any:
@@ -1304,18 +1688,31 @@ def _sandbox_project_directory(project_id: str) -> str:
 
 
 def _sandbox_space_url(host_port: int) -> str:
-    template = os.getenv(
-        "EXPERIMENT_SPACE_URL_TEMPLATE",
-        "http://127.0.0.1:{port}/space/#/projects",
-    ).strip()
+    return _templated_port_url(
+        host_port,
+        env_name="EXPERIMENT_SPACE_URL_TEMPLATE",
+        default="http://127.0.0.1:{port}/space/#/projects",
+    )
+
+
+def _sandbox_app_url(host_port: int) -> str:
+    return _templated_port_url(
+        host_port,
+        env_name="EXPERIMENT_APP_URL_TEMPLATE",
+        default="http://127.0.0.1:{port}/",
+    )
+
+
+def _templated_port_url(host_port: int, *, env_name: str, default: str) -> str:
+    template = os.getenv(env_name, default).strip()
     if "{port}" not in template:
-        raise ExperimentUnavailable("EXPERIMENT_SPACE_URL_TEMPLATE must contain {port}")
+        raise ExperimentUnavailable(f"{env_name} must contain {{port}}")
     try:
         url = template.format(port=host_port)
         parsed = urlsplit(url)
         parsed_port = parsed.port
     except (KeyError, ValueError) as error:
-        raise ExperimentUnavailable("EXPERIMENT_SPACE_URL_TEMPLATE is invalid") from error
+        raise ExperimentUnavailable(f"{env_name} is invalid") from error
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
@@ -1323,7 +1720,7 @@ def _sandbox_space_url(host_port: int) -> str:
         or parsed.password is not None
         or parsed_port is None
     ):
-        raise ExperimentUnavailable("EXPERIMENT_SPACE_URL_TEMPLATE is invalid")
+        raise ExperimentUnavailable(f"{env_name} is invalid")
     return url
 
 
@@ -1361,7 +1758,7 @@ def _parent_space_url() -> str:
             raise ExperimentUnavailable("PORT is invalid") from error
         if not 1 <= port <= 65_535:
             raise ExperimentUnavailable("PORT is invalid")
-        value = f"http://127.0.0.1:{port}/space/#/experiment"
+        value = f"http://127.0.0.1:{port}/space/#/chat"
     try:
         parsed = urlsplit(value)
         parsed_port = parsed.port
@@ -1383,6 +1780,19 @@ def _docker_image() -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/@:-]*", image):
         raise ExperimentUnavailable("EXPERIMENT_DOCKER_IMAGE is invalid")
     return image
+
+
+def _permission_profile() -> str:
+    profile = (
+        os.getenv("EXPERIMENT_PERMISSION_PROFILE", DEFAULT_PERMISSION_PROFILE).strip().lower()
+        or DEFAULT_PERMISSION_PROFILE
+    )
+    if profile not in PERMISSION_PROFILES:
+        allowed = ", ".join(sorted(PERMISSION_PROFILES))
+        raise ExperimentUnavailable(
+            f"EXPERIMENT_PERMISSION_PROFILE must be one of: {allowed}"
+        )
+    return profile
 
 
 def _max_active_experiments() -> int:

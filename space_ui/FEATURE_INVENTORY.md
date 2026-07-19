@@ -1,7 +1,7 @@
 # `/space` implemented feature and calculation inventory
 
 This document records what `/space` actually implements on
-`feat/commit-telepathy` as of 19 July 2026. It separates current behavior from
+`feat/commit-telepathy` as of 20 July 2026. It separates current behavior from
 product copy and future seams. The companion [ONE_PAGER.md](./ONE_PAGER.md)
 explains the product utility and architecture at a glance.
 
@@ -15,7 +15,7 @@ process. It combines three independent read/operation planes:
 2. **Telemetry plane** — Sessions merges request-built, read-only projections
    from Claude Code's Argus database, Codex's local state/rollout store, and
    Cursor's local agent transcripts / optional chat state.
-3. **Operational plane** — Projects, Chat, and Experiment use live BFF,
+3. **Operational plane** — Projects and the combined Chat/Experiments workspace use live BFF,
    commit-relay, session, message, agent-dispatch, Docker, and Agents API
    lifecycle services.
 
@@ -33,8 +33,8 @@ Sessions telemetry providers.
 | Graph, Timeline, Six Degrees | `space_ui/js/views/atlas.js` |
 | Sessions | `space_ui/js/views/sessions.js` |
 | Projects | `space_ui/js/views/projects.js` |
-| Chat | `space_ui/js/views/chat.js`, `space_ui/js/core/markdown.js` |
-| Experiment | `space_ui/js/views/experiment.js`, `space_ui/css/experiment.css` |
+| Chat + Experiments composition | `space_ui/js/views/chat.js`, `space_ui/css/chat.css` |
+| Experiment controller/workbench | `space_ui/js/views/experiment.js`, `space_ui/css/experiment.css` |
 | `/space` routes and static mount | `routers/space.py`, `server.py` |
 | Atlas builder | `services/cowork_agent/visualizer/space_index.py` |
 | Telemetry discovery/merge | `services/cowork_agent/visualizer/session_telemetry.py` |
@@ -55,7 +55,7 @@ Sessions telemetry providers.
 ### Persistent UI
 
 - XO mark, `Space` name, and “a workspace knowledge graph” tagline.
-- Seven generated view buttons in registry order.
+- Generated view buttons in registry order; Experiment is composed inside Chat rather than registered separately.
 - Persistent Root picker and artifact search. These control Atlas and can switch
   the user back to Graph even when another tab is visible.
 - Shared right-side detail drawer, pointer hover card, and transient toast.
@@ -63,8 +63,10 @@ Sessions telemetry providers.
 
 Desktop geometry is a 58 px header, flexible stage, and 42 px footer. Graph-like
 views occupy absolute stacked panels. Sessions and Projects are centered,
-scrollable dashboards up to 1,180 px wide. Experiment uses the same dashboard
-width; Chat is a two-column workspace. The
+scrollable dashboards up to 1,180 px wide. Chat is a three-column workspace:
+sessions on the left, a retained conversation/workbench center, and Experiments
+on the right. Below 1,180 px the Experiment rail becomes an inert-while-closed
+drawer with a labelled toggle, scrim, and Escape handling. The
 352 px graph detail drawer becomes full-width below 760 px.
 
 ### View registry
@@ -76,10 +78,9 @@ width; Chat is a two-column workspace. The
 | 3 | `#/six` | Six Degrees | Lazy, once |
 | 4 | `#/sessions` | Sessions | Lazy, once |
 | 5 | `#/projects` | Projects | Lazy, once; section generated dynamically |
-| 6 | `#/chat` | Chat | Lazy, once; section generated dynamically |
-| 7 | `#/experiment` | Experiment | Lazy, once; section generated dynamically |
+| 6 | `#/chat` | Chat + Experiments | Lazy, once; section generated dynamically |
 
-- An unknown hash falls back to Graph.
+- Legacy `#/experiment` redirects to `#/chat`; any other unknown hash falls back to Graph.
 - Tab changes use `history.replaceState`; they do not add a browser-history entry.
 - Each view's closure survives tab changes and resets only on full page reload.
 - A mount failure is caught and rendered inside that view instead of blanking the
@@ -686,6 +687,13 @@ states that sharing is disabled and cards mostly show `solo`.
 - Transcript area.
 - Project selector used only when starting a new session.
 - Multiline composer: Enter sends, Shift+Enter inserts a newline.
+- Right Experiments rail with project picker, one-click launch, provider state,
+  eight-stage lifecycle cards, Stop/Retry/Open controls, and two-second polling.
+- The center retains both the normal Chat pane and the selected Experiment
+  workbench. Selecting either rail toggles `hidden` state instead of replacing
+  DOM, so an in-flight Chat EventSource keeps its live output node.
+- At viewport widths at or below 1,180 px, the Experiments rail is an accessible
+  overlay drawer; selecting an experiment closes it and focuses the workbench.
 
 Selecting a session loads messages from its owning adapter. The request uses
 `limit=50&offset=-1`; backend `offset=-1` currently returns the full transcript,
@@ -762,7 +770,7 @@ reconnects end cleanly rather than show a spurious missing-stream error.
 
 ## 11. Experiment sandbox lifecycle
 
-Experiment lists the existing `/api/xo-projects` inventory and sends only a
+Chat's right Experiments rail lists the existing `/api/xo-projects` inventory and sends only a
 selected project ID. The backend resolves the immediate child under
 `XO_PROJECTS_ROOT`; traversal, hidden/control-character IDs, files, and symlink
 aliases are rejected.
@@ -771,28 +779,45 @@ The first provider is `local_docker`, explicitly marked local-development only:
 
 1. preflight the SDK, Docker daemon/image, and a one-item Agents API list call;
 2. create a self-hosted Agents API session for
-   `/workspace/xo-projects/<selected-project>`;
+   `/workspace/xo-projects/<selected-project>` with explicit `code_mode=true`
+   and a container-scoped `sandbox_exec` function-tool fallback;
 3. independently clone/snapshot the selected project and current
    `xo-cowork-api` worktree into temporary staging;
 4. recursively omit dotenv files, credential stores, dependencies, caches,
    build output, symlinks, and special files, and remove every Git remote;
-5. mount only staging read-only, copy both trees into tmpfs-backed writable
-   sandbox paths, and start sandbox Space plus `codex exec-server`;
+5. mount only staging read-only, copy both trees into writable sandbox paths,
+   and start sandbox Space plus `codex exec-server`; the default
+   `unrestricted` profile uses root, a writable container root, outbound
+   networking, Codex `danger-full-access`, and approval policy `never`;
 6. bind Space to a dynamic loopback host port and verify `/health`, `/space/`,
    and an inventory containing exactly the selected project;
-7. run a read-only boot turn, require terminal session status `idle`, verify the
-   container is running, and then publish `ready` plus `space_url`;
-8. accept serialized follow-up turns on the same Agents API session and expose
+7. run a boot probe that must produce evidence of an actual command-tool
+   invocation in the selected workspace, require terminal session status
+   `idle`, verify the container is running, and only then publish `ready` plus
+   `space_url`; a textual success/refusal without command evidence fails launch;
+8. publish container port 3000 on a second dynamic loopback `app_url`, allowing
+   the workbench to open a web server started by the sandbox agent;
+9. accept serialized follow-up turns on the same Agents API session and expose
    a bounded, redacted transcript in the outer Space workbench;
-9. delete staging, then release the container, Space URL, and session on Stop,
+10. delete staging, then release the container, Space/app URLs and session on Stop,
    one-hour default TTL, or normal API shutdown.
 
-Containers carry ownership/reconciliation labels, run as an unprivileged user
-with a read-only root filesystem, tmpfs workspace, all Linux capabilities
-dropped, and `no-new-privileges`. Defaults are two CPUs, 4 GiB, 512 PIDs, two
-concurrent experiments, and a one-hour TTL. Credentials enter Docker through
-inherited environment values, never command arguments or API responses. Agent
-output, transcripts, and public errors are bounded and credential-redacted.
+`EXPERIMENT_PERMISSION_PROFILE=unrestricted` is the default trusted-user mode.
+It gives the agent full permissions inside the disposable container so it can
+install dependencies, edit files, and start servers. `hardened` is an opt-in
+profile that restores the non-root UID/GID 10001, read-only root filesystem,
+dropped-capability, `no-new-privileges`, and tmpfs-write posture.
+
+The permission profile does not widen the host boundary. Containers keep
+ownership/reconciliation labels, receive no host Docker socket or unrelated
+host mounts, and see only filtered staging mounted read-only. The fallback
+executor targets only the owned labelled container. CPU, memory, PID, workspace
+size, concurrency, and TTL quotas remain configurable; defaults are two CPUs,
+4 GiB, 512 PIDs, two concurrent experiments, and a one-hour TTL. Credentials
+enter Docker through inherited environment values, never command arguments or
+API responses. Agent output, transcripts, and public errors are bounded and
+credential-redacted.
+
 The launcher explicitly states that the OpenAI-hosted agent can inspect both
 filtered copies; filtering is defense in depth, not a proof that project
 content is non-sensitive.
@@ -862,7 +887,7 @@ dependency is discovery: once the watcher creates `.xo/project.json`,
 | Projects | full initial/manual load; relay status on show + every 60 s | interval continues |
 | Chat list | initial/manual consequences only; no polling | in-flight EventSource continues unless closed |
 | Chat stream watchdog | every 10 s; 45 s silence limit | tied to stream |
-| Experiment | initial load + every 2 s while visible | interval cleared on hide |
+| Experiments rail | initial load + every 2 s while Chat is visible | interval cleared when Chat hides |
 | Visualizer watcher | tick + 1 s sleep | server background task |
 | Commit relay | parked/dormant/active adaptive loop | server background task |
 
@@ -891,13 +916,17 @@ source:
 - Projects rendered 36 cards, relay parked state, commits, behind counts, and
   sharing failure/degraded states.
 - Chat rendered three current sessions, loaded a stored user/assistant exchange,
-  and showed the project-binding composer. No prompt was sent during this audit.
+  and showed the project-binding composer. Its right Experiments rail and shared
+  center workbench are now one retained three-column workspace.
 - Experiment preflight verified SDK import, Docker/image readiness, and live
   Agents API authorization. A generated non-sensitive fixture was launched once
   through the API and once through the browser: both reached `ready` with an idle
-  `gpt-5.5` session and READY boot summary in about ten seconds. Browser Stop
-  cleared both resource IDs; no labelled Docker container remained; the fixture
-  was removed. An existing private project was deliberately not transmitted.
+  `gpt-5.5` session and READY boot summary in about ten seconds. That historical
+  textual check is no longer sufficient: the current readiness contract also
+  requires an observed command-tool invocation in the selected workspace.
+  Browser Stop cleared both resource IDs; no labelled Docker container remained;
+  the fixture was removed. An existing private project was deliberately not
+  transmitted.
 
 ## 15. Known drift, correctness risks, and test gaps
 
@@ -935,25 +964,26 @@ source:
 
 ### Tests
 
-- Twenty-eight backend regression tests cover Experiment lifecycle/snapshot/
-  command safety plus source discovery/degradation,
-  malformed-provider isolation, mixed-agent Argus filtering and all-time project
-  counts, loader import failures, successful and failed single-flight route
-  waves, Codex cumulative-token/state reconciliation, daily attribution,
-  namespaced tools, zero-token parent trees and state-lag recovery,
-  compatible-schema fallback, invalid-path fallback, malformed numeric rows,
-  and exclusion of content-bearing fields.
+- Backend regression tests cover Experiment lifecycle/snapshot/command safety,
+  permission-profile selection, explicit code mode, the owned-container
+  `sandbox_exec` fallback, and command-proven boot readiness plus source
+  discovery/degradation, malformed-provider isolation, mixed-agent Argus
+  filtering and all-time project counts, loader import failures, successful and
+  failed single-flight route waves, Codex cumulative-token/state reconciliation,
+  daily attribution, namespaced tools, zero-token parent trees and state-lag
+  recovery, compatible-schema fallback, invalid-path fallback, malformed
+  numeric rows, and exclusion of content-bearing fields.
 - No dedicated frontend unit/component harness exists for `space_ui`; source
   toggle behavior is verified through the running UI.
-- There is still no single test spanning browser → Atlas/Sessions/Projects/Chat/Experiment.
+- There is still no single test spanning browser → Atlas/Sessions/Projects/combined Chat + Experiments.
 - The most valuable next regression suite would fixture the three data planes,
-  assert formulas/counts, navigate all seven routes, and validate one real
+  assert formulas/counts, navigate all registered routes, and validate one real
   streamed agent turn with progress and text events.
 
 ## 16. Extension seams for Agent SDK work
 
-- **Registry seam:** Experiment demonstrates that a seventh view can be added
-  without changing shell routing internals.
+- **Composition seam:** Experiment demonstrates that an independent lifecycle
+  controller can mount into Chat's rail and retained center without merging APIs.
 - **API seam:** all UI calls already pass through one fetch boundary.
 - **Agent seam:** `/api/chat/prompt` already delegates through an adapter
   capability or shared dispatcher and emits generic SSE events.
@@ -969,8 +999,8 @@ source:
   Argus projection, or a new trace-specific panel while keeping Atlas purely
   deterministic.
 
-The implemented first increment boot-verifies a provider-neutral sandbox/session
-lifecycle. The next useful increment is a prompt/stream surface for a ready
-experiment with typed `tool-start/tool-result` progress and persisted canonical
+The implemented flow boot-verifies a provider-neutral sandbox/session lifecycle
+and already supports follow-up prompts from the shared center. The next useful
+increment is typed `tool-start/tool-result` progress and a persisted canonical
 transcript. After that, Graph selections can become structured agent context
 without coupling the agent runtime into visualization code.

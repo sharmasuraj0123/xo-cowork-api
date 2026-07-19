@@ -1,7 +1,9 @@
-/* Experiment tab — one-click, local-development XO project sandboxes.
+/* Experiment panel — one-click, local-development XO project sandboxes.
    The browser sends only a project id. The BFF resolves the host path, keeps
    credentials server-side, and exposes a provider-neutral lifecycle snapshot.
-   Writes disable while pending; one named poll replaces its predecessor. */
+   The Chat view provides two mount points: a right rail for launch/history and
+   a retained center workbench for interaction. Writes disable while pending;
+   one named poll replaces its predecessor. */
 import {API_BASE,apiFetch} from '../core/api.js';
 import {clearSlottedInterval,setSlottedInterval} from '../core/store.js';
 import {toast} from '../core/ui.js';
@@ -19,22 +21,28 @@ const STAGES=[
   ['ready','Ready'],
 ];
 
-let root=null,projects=[],experiments=[],options=null,selected='',launching=false,visible=false;
+let sidebarRoot=null,workbenchRoot=null,projects=[],experiments=[],options=null,selected='',launching=false,visible=false;
 let actionError='',renderKey='',activeId='',sending=false,workbenchKey='';
-let draft='',announcedReady='';
+let draft='',announcedReady='',panelActive=false,onActivate=()=>{};
+let navigationRevision=0,stateRevision=0,refreshPromise=null,refreshRequested=false;
 const pendingStops=new Set();
 
 export default {
-  id:'experiment',label:'Experiment',order:7,
-  async mount(el){
-    root=el;
-    activeId=new URLSearchParams(location.search).get('experiment')||activeId;
-    root.innerHTML='<div class="exp"><div id="exp-launcher" class="exp-launcher"></div>'
-      +'<section id="exp-workbench" class="exp-workbench" hidden></section>'
+  async mount(sidebarEl,{workbenchEl,activate}={}){
+    sidebarRoot=sidebarEl;
+    workbenchRoot=workbenchEl;
+    onActivate=typeof activate==='function'?activate:()=>{};
+    const requestedId=new URLSearchParams(location.search).get('experiment')||'';
+    const openRequested=Boolean(requestedId||document.documentElement.dataset.openExperiment==='true');
+    const openRevision=navigationRevision;
+    delete document.documentElement.dataset.openExperiment;
+    activeId=requestedId||activeId;
+    sidebarRoot.innerHTML='<div class="exp exp-rail"><div id="exp-launcher" class="exp-launcher"></div>'
       +'<div class="exp-listhead"><span class="exp-eyebrow">RECENT EXPERIMENTS</span>'
       +'<span id="exp-live" class="exp-live" role="status" aria-live="polite" aria-atomic="true"></span></div>'
       +'<div id="exp-list" class="exp-list"><div class="exp-note">loading experiments…</div></div></div>';
-    await loadInitial();
+    workbenchRoot.innerHTML='<section id="exp-workbench" class="exp-workbench" hidden></section>';
+    await loadInitial({requestedId,openRequested,openRevision});
   },
   show(){
     visible=true;
@@ -42,10 +50,22 @@ export default {
     refreshExperiments();
     setSlottedInterval('space-experiments',()=>{if(visible)refreshExperiments();},2000);
   },
-  hide(){visible=false;clearSlottedInterval('space-experiments');}
+  hide(){visible=false;clearSlottedInterval('space-experiments');},
+  setActive(active){
+    navigationRevision+=1;
+    panelActive=Boolean(active);
+    renderKey='';
+    renderExperiments();
+    renderWorkbench();
+  },
+  activateCurrent(){
+    const row=experiments.find(item=>item.id===activeId)
+      ||experiments.find(item=>ACTIVE.has(item.status))||experiments[0];
+    if(row)activateExperiment(row.id);
+  }
 };
 
-async function loadInitial(){
+async function loadInitial({requestedId='',openRequested=false,openRevision=0}={}){
   const [projectRes,optionRes,experimentRes]=await Promise.all([
     apiFetch(API_BASE+'/api/xo-projects'),
     apiFetch(API_BASE+'/api/experiments/options'),
@@ -59,27 +79,29 @@ async function loadInitial(){
   renderLauncher(projectRes,optionRes);
   renderExperiments(experimentRes);
   renderWorkbench();
+  const requestedIsValid=!requestedId||experiments.some(row=>row.id===requestedId);
+  if(openRequested&&requestedIsValid&&activeId&&navigationRevision===openRevision)activateExperiment(activeId);
 }
 
 function renderLauncher(projectRes={ok:true},optionRes={ok:true}){
-  const el=document.getElementById('exp-launcher');
+  const el=sidebarRoot?.querySelector('#exp-launcher');
   if(!el)return;
   if(!projects.some(project=>project.id===selected))selected=projects[0]?.id||'';
   const provider=options&&options.provider;
   const managedSandbox=provider&&provider.context==='sandbox';
-  const listHead=root?.querySelector('.exp-listhead');
-  const list=document.getElementById('exp-list');
+  const listHead=sidebarRoot?.querySelector('.exp-listhead');
+  const list=sidebarRoot?.querySelector('#exp-list');
   if(listHead)listHead.hidden=Boolean(managedSandbox);
   if(list)list.hidden=Boolean(managedSandbox);
   if(managedSandbox){
     const managerUrl=safeHttpUrl(provider.manager_url);
     el.innerHTML='<div class="exp-copy"><span class="exp-eyebrow">MANAGED SANDBOX</span>'
-      +'<h1>You are already inside an experiment.</h1>'
-      +'<p>This Space is the isolated copy for inspecting the selected project. New sandboxes and agent turns are managed by the parent Experiment workbench.</p>'
+      +'<h2>You are inside an experiment.</h2>'
+      +'<p>This Space is the isolated copy for inspecting the selected project. New sandboxes and agent turns are managed by the parent Chat workspace.</p>'
       +'<div class="exp-provider"><span class="exp-dot is-ready"></span><b>'+esc(provider.label||'Managed Experiment sandbox')+'</b></div></div>'
       +'<div class="exp-action"><b>Nested launches are intentionally disabled</b>'
       +'<p class="exp-data-note">The sandbox does not receive your host .env, the Agents API SDK, or Docker access. This protects the host and prevents a sandbox from creating more sandboxes.</p>'
-      +(managerUrl?'<a class="exp-primary exp-manager-link" href="'+esc(managerUrl)+'">Open parent Experiment workbench ↗</a>'
+      +(managerUrl?'<a class="exp-primary exp-manager-link" href="'+esc(managerUrl)+'">Open parent Chat workspace ↗</a>'
         :'<p class="exp-hint">Return to the original Space tab to launch or message the agent.</p>')+'</div>';
     return;
   }
@@ -90,8 +112,8 @@ function renderLauncher(projectRes={ok:true},optionRes={ok:true}){
     :issue;
   el.innerHTML=
     '<div class="exp-copy"><span class="exp-eyebrow">SANDBOX LAB</span>'
-    +'<h1>Clone the workspace. Wake an agent.</h1>'
-    +'<p>Each sandbox receives filtered working copies of xo-cowork-api and your selected XO project, starts its own Space server, and connects an Agents API executor. Your live folders are never mounted.</p>'
+    +'<h2>Experiments</h2>'
+    +'<p>Clone an XO project into an isolated sandbox and wake an Agents API executor.</p>'
     +'<div class="exp-provider"><span class="exp-dot'+(ready?' is-ready':'')+'"></span>'
     +'<b>'+esc(provider&&provider.label||'Experiment provider')+'</b>'
     +(provider&&provider.production===false?'<span class="exp-dev">local dev</span>':'')+'</div></div>'
@@ -105,10 +127,10 @@ function renderLauncher(projectRes={ok:true},optionRes={ok:true}){
     +(unavailable?'<p class="exp-warning">'+esc(unavailable)+'</p>':'')
     +(!projects.length&&projectRes.ok?'<p class="exp-warning">No XO projects are available yet.</p>':'')
     +(actionError?'<p class="exp-error exp-actionerror" role="alert">'+esc(actionError)+'</p>':'')
-    +'<p class="exp-data-note">Launching allows the OpenAI-hosted agent to read the filtered project and xo-cowork-api copies. Choose only a project you intend to expose to this agent.</p>'
+    +'<p class="exp-data-note">The unrestricted profile gives the agent root command execution, writable files, package installs, processes, and outbound network access inside the filtered container. The host Docker socket and unrelated host files stay outside.</p>'
     +'<p class="exp-hint">One active experiment per project. Stop it before launching another.</p></div>';
-  document.getElementById('exp-project')?.addEventListener('change',event=>{selected=event.target.value;});
-  document.getElementById('exp-launch')?.addEventListener('click',launchSelected);
+  sidebarRoot?.querySelector('#exp-project')?.addEventListener('change',event=>{selected=event.target.value;});
+  sidebarRoot?.querySelector('#exp-launch')?.addEventListener('click',launchSelected);
 }
 
 async function refreshOptions(){
@@ -120,6 +142,7 @@ async function refreshOptions(){
 async function launchSelected(){
   if(!projects.some(project=>project.id===selected))selected=projects[0]?.id||'';
   if(!selected||launching)return;
+  const activationRevision=navigationRevision;
   actionError='';launching=true;renderLauncher();
   const res=await apiFetch(API_BASE+'/api/experiments',{
     method:'POST',body:{project_id:selected}
@@ -128,42 +151,57 @@ async function launchSelected(){
   if(!res.ok){
     actionError='Launch failed: '+failureText(res);
     renderLauncher();
-    document.getElementById('exp-launch')?.focus();
+    if(!sidebarRoot?.closest('[hidden],[inert]'))sidebarRoot?.querySelector('#exp-launch')?.focus();
     toast('launch failed: '+res.error);
     return;
   }
-  activeId=res.data.experiment.id;
+  const launched=res.data.experiment;
+  const shouldActivate=activationRevision===navigationRevision;
+  if(shouldActivate)activeId=launched.id;
+  upsertExperiment(launched,true);
+  stateRevision+=1;
   toast(res.data.reused?'existing experiment opened':'experiment queued');
-  await refreshExperiments();
-  renderLauncher();
-  const card=[...document.querySelectorAll('.exp-card')]
-    .find(element=>element.dataset.id===res.data.experiment.id);
-  card?.focus({preventScroll:true});
+  renderLauncher();renderExperiments();renderWorkbench();
+  if(shouldActivate)activateExperiment(launched.id);
+  refreshExperiments();
 }
 
-async function refreshExperiments(){
-  const res=await apiFetch(API_BASE+'/api/experiments');
-  if(res.ok)experiments=res.data.items||[];
-  renderExperiments(res);
-  renderWorkbench();
+function refreshExperiments(){
+  refreshRequested=true;
+  if(refreshPromise)return refreshPromise;
+  refreshPromise=(async()=>{
+    let last={ok:true};
+    while(refreshRequested){
+      refreshRequested=false;
+      const requestRevision=stateRevision;
+      const res=await apiFetch(API_BASE+'/api/experiments');
+      if(res.ok&&requestRevision===stateRevision)experiments=res.data.items||[];
+      renderExperiments(res);
+      renderWorkbench();
+      last=res;
+    }
+    return last;
+  })().finally(()=>{refreshPromise=null;});
+  return refreshPromise;
 }
 
 function renderExperiments(res={ok:true}){
-  const el=document.getElementById('exp-list');
-  const live=document.getElementById('exp-live');
+  const el=sidebarRoot?.querySelector('#exp-list');
+  const live=sidebarRoot?.querySelector('#exp-live');
   if(!el)return;
   if(!res.ok){
     renderKey='';
     el.innerHTML='<div class="exp-note" role="alert">'+esc(failureText(res))+'</div>';
-    if(live)live.textContent='Experiment refresh failed';
+    setLiveText(live,'Experiment refresh failed');
     return;
   }
   const active=experiments.filter(x=>ACTIVE.has(x.status)).length;
   const newestActive=experiments.find(row=>ACTIVE.has(row.status));
-  if(live)live.textContent=newestActive
+  setLiveText(live,newestActive
     ?projectName(newestActive.project_id)+' · '+stageLabel(newestActive.stage)
-    :(active?active+' active':'');
-  const nextKey=JSON.stringify(experiments)+'|'+[...pendingStops].sort().join(',');
+    :(active?active+' active':''));
+  const nextKey=JSON.stringify(experiments)+'|'+[...pendingStops].sort().join(',')
+    +'|'+activeId+'|'+panelActive;
   if(nextKey===renderKey){updateRelativeTimes();return;}
   renderKey=nextKey;
   const focus=focusedControl();
@@ -185,13 +223,20 @@ function renderExperiments(res={ok:true}){
 
 function selectExperiment(id){
   if(!experiments.some(row=>row.id===id))return;
-  activeId=id;workbenchKey='';renderWorkbench();
-  document.getElementById('exp-workbench')?.scrollIntoView({behavior:'smooth',block:'start'});
-  document.getElementById('exp-prompt')?.focus({preventScroll:true});
+  activateExperiment(id);
+}
+
+function activateExperiment(id){
+  if(!experiments.some(row=>row.id===id))return;
+  navigationRevision+=1;
+  panelActive=true;
+  activeId=id;workbenchKey='';renderKey='';renderExperiments();renderWorkbench();
+  onActivate(id);
+  requestAnimationFrame(()=>workbenchRoot?.querySelector('#exp-prompt')?.focus({preventScroll:true}));
 }
 
 function renderWorkbench(){
-  const el=document.getElementById('exp-workbench');
+  const el=workbenchRoot?.querySelector('#exp-workbench');
   if(!el)return;
   let row=experiments.find(item=>item.id===activeId);
   if(!row){
@@ -204,6 +249,7 @@ function renderWorkbench(){
     workbenchKey=row.id;
     el.innerHTML='<div class="exp-workhead"><div><span class="exp-eyebrow">LIVE WORKBENCH</span>'
       +'<h2 id="exp-work-title"></h2></div><div class="exp-workactions"><span id="exp-agent-state" class="exp-agent-state"></span>'
+      +'<a id="exp-app-link" class="exp-space-link exp-app-link" target="_blank" rel="noopener noreferrer" hidden>Open app ↗</a>'
       +'<a id="exp-space-link" class="exp-space-link" target="_blank" rel="noopener noreferrer" hidden>Open sandbox Space ↗</a></div></div>'
       +'<div class="exp-workmeta"><span>Agent workspace <code id="exp-workspace"></code></span>'
       +'<span>Sandbox <code id="exp-work-sandbox"></code></span></div>'
@@ -231,6 +277,12 @@ function renderWorkbench(){
   el.querySelector('#exp-workspace').textContent=row.workspace_directory||'preparing…';
   el.querySelector('#exp-work-sandbox').textContent=row.sandbox_id?short(row.sandbox_id):'preparing…';
 
+  const appLink=el.querySelector('#exp-app-link');
+  const appHref=safeHttpUrl(row.app_url);
+  appLink.hidden=!appHref;
+  if(appHref)appLink.href=appHref;
+  else appLink.removeAttribute('href');
+
   const link=el.querySelector('#exp-space-link');
   const href=safeHttpUrl(row.space_url);
   link.hidden=!href;
@@ -238,8 +290,8 @@ function renderWorkbench(){
   else link.removeAttribute('href');
   if(href&&announcedReady!==row.id){
     announcedReady=row.id;
-    const live=document.getElementById('exp-live');
-    if(live)live.textContent=projectName(row.project_id)+' sandbox Space is ready';
+    const live=sidebarRoot?.querySelector('#exp-live');
+    setLiveText(live,projectName(row.project_id)+' sandbox Space is ready');
   }
 
   const transcript=el.querySelector('#exp-transcript');
@@ -285,10 +337,10 @@ async function sendTurn(){
     renderLauncher();renderWorkbench();return;
   }
   draft='';actionError='';
-  const index=experiments.findIndex(item=>item.id===row.id);
-  if(index>=0)experiments[index]=res.data;
-  renderLauncher();renderWorkbench();
-  const textarea=document.getElementById('exp-prompt');
+  upsertExperiment(res.data);
+  stateRevision+=1;
+  renderLauncher();renderExperiments();renderWorkbench();
+  const textarea=workbenchRoot?.querySelector('#exp-prompt');
   if(textarea)textarea.value='';
   toast('task sent to sandbox');
 }
@@ -302,7 +354,7 @@ function safeHttpUrl(value){
 }
 
 function cardHTML(row){
-  const stateClass=' is-'+esc(row.status);
+  const stateClass=' is-'+esc(row.status)+(panelActive&&row.id===activeId?' is-selected':'');
   const output=row.output?'<pre class="exp-output">'+esc(row.output.trim())+'</pre>':'';
   const error=row.error?'<div class="exp-error">'+esc(row.error)+'</div>':'';
   const refs=(row.sandbox_id||row.agent_session_id)
@@ -318,10 +370,10 @@ function cardHTML(row){
     +'<span class="exp-time"><time data-relative="'+esc(row.created_at)+'">'+relative(row.created_at)+'</time></span></div>'
     +progressHTML(row.failed_stage||row.stage,row.status)
     +'<div class="exp-cardbody"><div><span class="exp-label">Current stage</span><strong>'+esc(stageLabel(row.stage))+'</strong></div>'
-    +'<div><span class="exp-label">Runtime</span><strong>'+esc(row.model)+' · '+esc(row.provider)+'</strong></div></div>'
+    +'<div><span class="exp-label">Runtime</span><strong>'+esc(row.model)+' · '+esc(row.provider)+' · '+esc(row.permission_profile||'unrestricted')+'</strong></div></div>'
     +refs+expiry+output+error
     +'<div class="exp-cardfoot">'
-    +(row.status==='ready'||(row.messages||[]).length?'<button class="exp-secondary exp-interact" type="button" data-id="'+esc(row.id)+'">Interact</button>':'')
+    +(row.status==='ready'||(row.messages||[]).length?'<button class="exp-secondary exp-interact" type="button" data-id="'+esc(row.id)+'" aria-pressed="'+String(panelActive&&row.id===activeId)+'">Interact</button>':'')
     +(spaceUrl?'<a class="exp-secondary exp-cardlink" href="'+esc(spaceUrl)+'" target="_blank" rel="noopener noreferrer">Open Space ↗</a>':'')
     +(row.can_stop?'<button class="exp-secondary exp-stop" type="button" data-id="'+esc(row.id)+'" '
       +(isStopping?'disabled':'')+'>'+(isStopping?'Stopping…':'Stop sandbox')+'</button>':'')
@@ -345,7 +397,10 @@ async function stop(id,button){
   const res=await apiFetch(API_BASE+'/api/experiments/'+encodeURIComponent(id)+'/stop',{method:'POST'});
   pendingStops.delete(id);
   if(!res.ok){actionError='Stop failed: '+failureText(res);renderLauncher();toast('stop failed: '+res.error);}
-  else{actionError='';renderLauncher();toast('sandbox stopped');}
+  else{
+    actionError='';upsertExperiment(res.data);stateRevision+=1;
+    renderLauncher();renderExperiments();renderWorkbench();toast('sandbox stopped');
+  }
   await refreshExperiments();
 }
 
@@ -355,6 +410,13 @@ async function retry(projectId){
 }
 
 function projectName(id){return projects.find(project=>project.id===id)?.display_name||id;}
+function upsertExperiment(snapshot,prepend=false){
+  const index=experiments.findIndex(row=>row.id===snapshot.id);
+  if(index>=0)experiments[index]=snapshot;
+  else if(prepend)experiments.unshift(snapshot);
+  else experiments.push(snapshot);
+}
+function setLiveText(element,value){if(element&&element.textContent!==value)element.textContent=value;}
 function stageLabel(stage){return ({
   queued:'Waiting for the provider',creating_session:'Creating Agents API session',
   cloning_project:'Cloning selected project',cloning_cowork_api:'Cloning xo-cowork-api',
@@ -377,13 +439,13 @@ function relative(iso,future=false){
   if(seconds<86400)return Math.floor(seconds/3600)+'h ago';return Math.floor(seconds/86400)+'d ago';
 }
 function updateRelativeTimes(){
-  document.querySelectorAll('#exp-list time[data-relative]').forEach(element=>{
+  sidebarRoot?.querySelectorAll('#exp-list time[data-relative]').forEach(element=>{
     element.textContent=relative(element.dataset.relative,element.dataset.future==='true');
   });
 }
 function focusedControl(){
   const element=document.activeElement;
-  if(!element||!element.closest('#exp-list'))return null;
+  if(!element||!sidebarRoot?.contains(element)||!element.closest('#exp-list'))return null;
   if(element.classList.contains('exp-stop'))return{kind:'stop',id:element.dataset.id};
   if(element.classList.contains('exp-retry'))return{kind:'retry',id:element.dataset.project};
   if(element.classList.contains('exp-interact'))return{kind:'interact',id:element.dataset.id};
@@ -392,9 +454,9 @@ function focusedControl(){
 }
 function restoreFocusedControl(focus){
   if(!focus)return;
-  const candidates=[...document.querySelectorAll(
+  const candidates=[...(sidebarRoot?.querySelectorAll(
     focus.kind==='stop'?'.exp-stop':focus.kind==='retry'?'.exp-retry':focus.kind==='interact'?'.exp-interact':'.exp-card'
-  )];
+  )||[])];
   const match=candidates.find(element=>(
     focus.kind==='retry'?element.dataset.project:element.dataset.id
   )===focus.id);

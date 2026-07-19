@@ -13,6 +13,10 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from services.cowork_agent.adapters.loader import (
+    list_capability_providers,
+    try_load_capability,
+)
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.visualizer.space_index import _is_hidden
 
@@ -83,14 +87,15 @@ def _scan_dir(base: Path) -> list[Path]:
     return out
 
 
-def _build_tree(base: Path, depth: int, budget: dict) -> dict:
+def _build_tree(base: Path, depth: int, budget: dict,
+                max_depth: int = _TREE_MAX_DEPTH) -> dict:
     """One directory as {name, type, children[], more} with pruned traversal."""
     node: dict = {"name": base.name, "type": "dir", "children": []}
     try:
         entries = _scan_dir(base)
     except OSError:
         return node
-    if depth >= _TREE_MAX_DEPTH or budget["nodes"] <= 0:
+    if depth >= max_depth or budget["nodes"] <= 0:
         if entries:
             node["more"] = len(entries)
         return node
@@ -100,7 +105,7 @@ def _build_tree(base: Path, depth: int, budget: dict) -> dict:
             break
         budget["nodes"] -= 1
         if e.is_dir():
-            node["children"].append(_build_tree(e, depth + 1, budget))
+            node["children"].append(_build_tree(e, depth + 1, budget, max_depth))
         else:
             try:
                 size = e.stat().st_size
@@ -160,4 +165,49 @@ def build_xo_overview() -> dict:
         "known_sessions": len(sessions_list) if isinstance(sessions_list, dict) else None,
         "tree": tree,
         "xo_files": _xo_inventory(xo_dir),
+    }
+
+
+class SessionDataUnavailable(RuntimeError):
+    """Raised when no runtime exposes readable session data."""
+
+
+def build_sessions_overview() -> dict:
+    """Sessions-space Overview: every runtime's on-disk session data.
+
+    Providers are discovered by capability (adapters/<name>/session_data.py),
+    so the aggregator names no runtime. Each provider fails independently."""
+    sources: list[dict] = []
+    for provider in list_capability_providers("session_data"):
+        module = try_load_capability("session_data", agent=provider)
+        if module is None:
+            continue
+        try:
+            contribution = module.collect_session_data()
+            budget = {"nodes": _TREE_MAX_NODES}
+            roots = []
+            for r in contribution.get("roots", []):
+                base = Path(r["path"])
+                if not base.is_dir():
+                    continue
+                depth = int(r.get("depth") or _TREE_MAX_DEPTH)
+                tree = _build_tree(base, 0, budget, max_depth=depth)
+                tree["name"] = base.name
+                roots.append({"label": str(r.get("label") or base.name),
+                              "path": str(base), "tree": tree})
+            sources.append({
+                "id": str(contribution["source"]["id"]),
+                "label": str(contribution["source"].get("label")
+                             or contribution["source"]["id"]),
+                "roots": roots,
+                "meta": contribution.get("meta") or {},
+            })
+        except Exception as exc:
+            print(f"xo_overview: session_data provider '{provider}' failed: {exc}")
+            continue
+    if not sources:
+        raise SessionDataUnavailable("no runtime session data readable")
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sources": sources,
     }

@@ -4,9 +4,9 @@ An explorable map of `~/xo-projects`: a force-directed **graph** (click to
 focus, double-click clusters, re-root on any node), a scrubbable **timeline**,
 and **six degrees** pathfinding between any two artifacts. The same shell also
 includes multi-runtime **sessions**, project commit-relay/sharing state, and streamed
-agent **chat**. The **Experiment** tab turns any listed XO project into a
-short-lived Docker sandbox with its own Space server and an interactive,
-boot-verified Agents API executor.
+agent **chat**. Chat's right-hand **Experiments** rail turns any listed XO
+project into a short-lived Docker sandbox with its own Space server and an
+interactive, boot-verified Agents API executor.
 
 This folder is a bundled snapshot of the xo-atlas UI (originally a standalone
 folder with no remote), trimmed to the single endpoint-driven page and served
@@ -35,8 +35,8 @@ directly. Descended from the single-file xo-atlas `v3.html`.
 | `js/views/atlas.js` | Graph + Timeline + Six Degrees — three lenses over one dataset, one shared closure, three exported views. |
 | `js/views/sessions.js` | The Sessions multi-runtime telemetry view and source filters. |
 | `js/views/projects.js` | The Projects view: project inventory, local/remote commit feed, commit-relay health, members, share, and revoke. |
-| `js/views/chat.js` | The Chat view: Plane-B chat (`/api/chat/prompt` → SSE stream → transcript refetch) with session sidebar, project binding for new sessions, and mini-markdown rendering. Works across claude_code / hermes / openclaw. |
-| `js/views/experiment.js` | The Experiment view: project-root picker, one-click launch, interactive agent workbench, sandbox Space link, lifecycle polling, and cleanup controls. |
+| `js/views/chat.js` | The three-column Chat workspace: session sidebar, retained conversation/workbench center, responsive Experiments rail, Plane-B SSE chat, and project binding. |
+| `js/views/experiment.js` | The embedded Experiment controller: right-rail project picker/history plus the selected sandbox's center workbench, lifecycle polling, links, and cleanup controls. |
 | `js/core/markdown.js` | Escape-first mini-markdown (fences, inline code, emphasis, links, headings, lists, quotes, rules, and tables). |
 
 The view contract and current operating details are documented in
@@ -64,19 +64,28 @@ to 60 units — generated data can put 100+ leaves in one cluster, whose summed
 spring stiffness makes the original explicit-Euler sim diverge (positions hit
 1e20 and the canvas goes blank).
 
-## Experiment tab
+## Experiments inside Chat
 
 See the dedicated [Experiment technical one-pager](../docs/EXPERIMENT_ONE_PAGER.md)
 for the complete architecture, current Agents API contract, isolation model,
 technology stack, and production path.
 
-The topbar has seven views: Graph, Timeline, Six Degrees, Sessions, Projects,
-Chat, and Experiment. `#/experiment` loads the XO project inventory and checks
-the local provider before enabling Launch. A launch creates an Agents API
+`#/chat` is a three-column workspace: normal chat sessions on the left, a
+retained conversation pane in the center, and Experiments on the right. The
+right rail loads the XO project inventory and checks the local provider before
+enabling Launch. Selecting a chat keeps the normal transcript in the center;
+selecting or launching an experiment swaps the center to its Live Workbench
+without destroying an in-flight normal chat stream. Below 1,180 px the right
+rail becomes a keyboard-accessible drawer. Legacy `#/experiment` links redirect
+to `#/chat`.
+
+A launch creates an Agents API
 self-hosted session, prepares sanitized copies of both the selected project and
 the current `xo-cowork-api` worktree, starts a sandbox-local Space server plus
-`codex exec-server`, runs a read-only boot turn, and becomes ready only after
-both services and the selected project inventory pass readiness checks.
+`codex exec-server`, and runs a non-mutating command boot probe. It becomes ready
+only after both services and the selected project inventory pass readiness
+checks and the remote session proves that a real command tool ran inside the
+selected workspace.
 
 Local setup, from `xo-cowork-api`:
 
@@ -90,9 +99,11 @@ image, endpoint reachability, and project authorization without returning the
 credential. The UI then uses `POST /api/experiments`, polls
 `GET /api/experiments`, sends follow-up work through
 `POST /api/experiments/{id}/turns`, opens the returned loopback-only sandbox
-`space_url`, and stops through `POST /api/experiments/{id}/stop`.
-The Experiment tab inside that returned sandbox Space is inspection-only: it
-links back to the parent workbench and never reports the child container's
+`space_url`, and stops through `POST /api/experiments/{id}/stop`. A project web
+server bound to `0.0.0.0:3000` is published on a second dynamic loopback
+`app_url`, shown as **Open app** in the live workbench.
+The Experiments rail inside that returned sandbox Space is inspection-only: it
+links back to the parent Chat workspace and never reports the child container's
 intentionally absent API key, SDK, or Docker CLI as host setup failures. Set
 `EXPERIMENT_PARENT_SPACE_URL` when the parent is exposed through a Coder/XO
 proxy instead of local loopback.
@@ -101,12 +112,20 @@ The host project is never mounted into the agent container. A temporary staging
 copy recursively omits dotenv files, common credential stores, dependency
 trees, caches, build output, symlinks, and special files; Git projects retain a
 local Git checkout with remotes removed and receive sanitized modified/untracked
-work. Staging is mounted read-only and deleted after boot. Containers run as an
-unprivileged user with a read-only root filesystem, tmpfs-backed writable
-workspace, dropped Linux capabilities, `no-new-privileges`, CPU/memory/PID
-limits, a default one-hour auto-stop, and a default capacity of two. Startup
-reconciles labelled containers left by an unclean exit; normal shutdown stops
-all tracked experiments.
+work. Staging is mounted read-only and deleted after boot.
+
+`EXPERIMENT_PERMISSION_PROFILE=unrestricted` is the default trusted-user mode.
+It explicitly requests Agents API `code_mode`, supplies a container-scoped
+`sandbox_exec` fallback, starts Codex with `danger-full-access` and approvals
+set to `never`, and gives the agent root, a writable container filesystem, and
+outbound networking. Set the profile to `hardened` to opt into the former
+non-root, read-only-root, capability-dropped, `no-new-privileges` posture.
+
+Both profiles retain the outer Docker boundary: no host Docker socket, no
+unrelated host mounts, read-only filtered staging, loopback-only published
+Space, and configurable CPU/memory/PID quotas. The default one-hour auto-stop
+and capacity of two still apply. Startup reconciles labelled containers left by
+an unclean exit; normal shutdown stops all tracked experiments.
 
 Launch is still a data-boundary decision: the OpenAI-hosted agent can inspect
 the filtered sandbox copy. The UI states this next to the button; choose only a

@@ -21,6 +21,7 @@
    active is a stub): the transcript reloads from the DB with partial text. */
 import {API_BASE,apiFetch,withPageQuery} from '../core/api.js';
 import {mdToHtml} from '../core/markdown.js';
+import experimentPanel from './experiment.js';
 
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function rel(iso){
@@ -37,13 +38,16 @@ const trunc=(s,n)=>{s=String(s??'');return s.length>n?s.slice(0,n)+'\n… ('+(s.
 const asText=v=>typeof v==='string'?v:JSON.stringify(v,null,2);
 
 let root=null,logEl=null,sessEl=null,inputEl=null,sendBtn=null,stopBtn=null,projEl=null,statusEl=null;
+let chatSideEl=null,chatCenterEl=null,chatMainEl=null,experimentMainEl=null,experimentSideEl=null,experimentToggle=null,experimentScrim=null;
 let currentId=null;
 let stream=null; /* {id, es, liveEl, text, newSession, lastEvent, watchdog} */
 let searchT=null;
+let experimentMounted=false,drawerOpen=false,chatVisible=false,pendingExperimentOpen=false;
+const drawerMedia=matchMedia('(max-width:1180px)');
 
 export default {
   id:'chat',label:'Chat',order:6,
-  async mount(el){
+  mount(el){
     root=el;
     el.innerHTML=
       '<div class="chat">'
@@ -52,22 +56,38 @@ export default {
         +'<input id="chat-search" placeholder="Search sessions…" autocomplete="off" spellcheck="false">'
         +'<div class="chat-sess" id="chat-sess"><div class="chat-note">loading sessions…</div></div>'
       +'</aside>'
-      +'<section class="chat-main">'
-        +'<div class="chat-log" id="chat-log">'+emptyHint()+'</div>'
-        +'<div class="chat-status" id="chat-status" hidden></div>'
-        +'<form class="chat-form" id="chat-form">'
-          +'<select id="chat-proj" title="Bind a NEW session to a project (agent works in its folder)"><option value="">no project</option></select>'
-          +'<textarea id="chat-input" rows="2" placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)"></textarea>'
-          +'<div class="chat-btns">'
-            +'<button id="chat-send" type="submit">Send</button>'
-            +'<button id="chat-stop" type="button" hidden>Stop</button>'
-          +'</div>'
-        +'</form>'
-      +'</section></div>';
+      +'<div class="chat-center">'
+        +'<button id="chat-exp-toggle" class="chat-exp-toggle" type="button" aria-controls="chat-exp-side" aria-expanded="false">Experiments <span aria-hidden="true">→</span></button>'
+        +'<section class="chat-main" id="chat-main">'
+          +'<div class="chat-log" id="chat-log">'+emptyHint()+'</div>'
+          +'<div class="chat-status" id="chat-status" hidden></div>'
+          +'<form class="chat-form" id="chat-form">'
+            +'<select id="chat-proj" title="Bind a NEW session to a project (agent works in its folder)"><option value="">no project</option></select>'
+            +'<textarea id="chat-input" rows="2" placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)"></textarea>'
+            +'<div class="chat-btns">'
+              +'<button id="chat-send" type="submit">Send</button>'
+              +'<button id="chat-stop" type="button" hidden>Stop</button>'
+            +'</div>'
+          +'</form>'
+        +'</section>'
+        +'<section class="chat-experiment-main" id="chat-experiment-main" aria-label="Experiment workbench" hidden></section>'
+      +'</div>'
+      +'<button id="chat-exp-scrim" class="chat-exp-scrim" type="button" tabindex="-1" aria-label="Close Experiments" hidden></button>'
+      +'<aside class="chat-exp-side" id="chat-exp-side" tabindex="-1" aria-label="Experiments">'
+        +'<div id="chat-exp-panel" class="chat-exp-panel"></div>'
+      +'</aside>'
+      +'</div>';
     logEl=el.querySelector('#chat-log');sessEl=el.querySelector('#chat-sess');
     inputEl=el.querySelector('#chat-input');sendBtn=el.querySelector('#chat-send');
     stopBtn=el.querySelector('#chat-stop');projEl=el.querySelector('#chat-proj');
     statusEl=el.querySelector('#chat-status');
+    chatSideEl=el.querySelector('.chat-side');
+    chatCenterEl=el.querySelector('.chat-center');
+    chatMainEl=el.querySelector('#chat-main');
+    experimentMainEl=el.querySelector('#chat-experiment-main');
+    experimentSideEl=el.querySelector('#chat-exp-side');
+    experimentToggle=el.querySelector('#chat-exp-toggle');
+    experimentScrim=el.querySelector('#chat-exp-scrim');
     el.querySelector('#chat-form').addEventListener('submit',e=>{e.preventDefault();send();});
     stopBtn.addEventListener('click',stop);
     el.querySelector('#chat-new').addEventListener('click',newChat);
@@ -79,8 +99,37 @@ export default {
       const q=e.target.value.trim();
       searchT=setTimeout(()=>q.length>=2?searchSessions(q):loadSessions(),300);
     });
+    experimentToggle.addEventListener('click',()=>setDrawerOpen(!drawerOpen));
+    experimentScrim.addEventListener('click',()=>setDrawerOpen(false,true));
+    drawerMedia.addEventListener('change',syncDrawer);
+    el.addEventListener('keydown',event=>{
+      if(event.key==='Escape'&&drawerOpen){event.stopPropagation();setDrawerOpen(false,true);}
+    });
+    addEventListener('space:open-experiment',requestExperimentOpen);
+    syncDrawer();
     loadSessions();
     loadProjects();
+    experimentPanel.mount(el.querySelector('#chat-exp-panel'),{
+        workbenchEl:experimentMainEl,
+        activate:showExperimentConversation,
+      }).then(()=>{
+        experimentMounted=true;
+        if(pendingExperimentOpen){pendingExperimentOpen=false;experimentPanel.activateCurrent();}
+        if(chatVisible)experimentPanel.show();
+      }).catch(error=>{
+        console.error('Experiment panel failed to mount:',error);
+        el.querySelector('#chat-exp-panel').innerHTML='<div class="chat-exp-failed">'
+          +'<b>Experiments unavailable</b><span>The Chat workspace is still available. Check the browser console for details.</span></div>';
+      });
+  },
+  show(){
+    chatVisible=true;
+    if(experimentMounted)experimentPanel.show();
+  },
+  hide(){
+    chatVisible=false;
+    if(experimentMounted)experimentPanel.hide();
+    setDrawerOpen(false);
   }
 };
 
@@ -107,20 +156,27 @@ function normalizeSessions(d){
 }
 function renderSessions(list){
   if(!list.length){sessEl.innerHTML='<div class="chat-note">no sessions yet</div>';return;}
-  sessEl.innerHTML=list.map(s=>'<button class="chat-si'+(s.id===currentId?' is-on':'')+'" data-id="'+esc(s.id)+'">'
+  sessEl.innerHTML=list.map(s=>'<button class="chat-si'+(s.id===currentId?' is-on':'')+'" data-id="'+esc(s.id)+'"'
+    +(s.id===currentId?' aria-current="true"':'')+'>'
     +'<span class="t">'+esc(s.title||'Untitled')+'</span>'
     +'<span class="m">'+esc(s.agent||'')+(s.time_updated?' · '+rel(s.time_updated):'')+'</span>'
     +'</button>').join('');
   sessEl.querySelectorAll('.chat-si').forEach(b=>b.addEventListener('click',()=>selectSession(b.dataset.id)));
 }
 async function selectSession(id){
+  showChatConversation();
   currentId=id;
-  sessEl.querySelectorAll('.chat-si').forEach(b=>b.classList.toggle('is-on',b.dataset.id===id));
+  sessEl.querySelectorAll('.chat-si').forEach(b=>{
+    const selected=b.dataset.id===id;
+    b.classList.toggle('is-on',selected);
+    if(selected)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current');
+  });
   await loadMessages(id);
 }
 function newChat(){
+  showChatConversation();
   currentId=null;
-  sessEl.querySelectorAll('.chat-si').forEach(b=>b.classList.remove('is-on'));
+  sessEl.querySelectorAll('.chat-si').forEach(b=>{b.classList.remove('is-on');b.removeAttribute('aria-current');});
   logEl.innerHTML=emptyHint();
   inputEl.focus();
 }
@@ -267,4 +323,58 @@ function hideStatus(){statusEl.hidden=true;}
 function note(t){logEl.insertAdjacentHTML('beforeend','<div class="chat-err">'+esc(t)+'</div>');pinScroll();}
 function pinScroll(){
   if(logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<120)logEl.scrollTop=logEl.scrollHeight;
+}
+
+/* ---- shared center + responsive Experiment drawer ---- */
+function showChatConversation(){
+  if(!chatMainEl||!experimentMainEl)return;
+  chatMainEl.hidden=false;
+  experimentMainEl.hidden=true;
+  root?.classList.remove('is-experiment-open');
+  experimentPanel.setActive(false);
+}
+
+function showExperimentConversation(){
+  if(!chatMainEl||!experimentMainEl)return;
+  chatMainEl.hidden=true;
+  experimentMainEl.hidden=false;
+  root?.classList.add('is-experiment-open');
+  setDrawerOpen(false);
+}
+
+function requestExperimentOpen(){
+  delete document.documentElement.dataset.openExperiment;
+  if(experimentMounted)experimentPanel.activateCurrent();
+  else pendingExperimentOpen=true;
+}
+
+function setDrawerOpen(open,returnFocus=false){
+  const wasOpen=drawerOpen;
+  drawerOpen=Boolean(open)&&drawerMedia.matches;
+  syncDrawer();
+  if(drawerOpen&&!wasOpen){
+    requestAnimationFrame(()=>{
+      const first=experimentSideEl?.querySelector('button:not([disabled]),select:not([disabled]),input:not([disabled]),textarea:not([disabled]),a[href]');
+      (first||experimentSideEl)?.focus({preventScroll:true});
+    });
+  }
+  if(returnFocus)experimentToggle?.focus({preventScroll:true});
+}
+
+function syncDrawer(){
+  if(!experimentSideEl||!experimentToggle||!experimentScrim)return;
+  const compact=drawerMedia.matches;
+  if(!compact)drawerOpen=false;
+  const closing=compact&&!drawerOpen;
+  const returnFocus=closing&&experimentSideEl.contains(document.activeElement);
+  experimentToggle.hidden=!compact;
+  experimentToggle.setAttribute('aria-expanded',String(compact&&drawerOpen));
+  experimentScrim.hidden=!compact||!drawerOpen;
+  experimentSideEl.hidden=closing;
+  experimentSideEl.inert=closing;
+  const covered=compact&&drawerOpen;
+  chatSideEl.inert=covered;
+  chatCenterEl.inert=covered;
+  root?.classList.toggle('is-exp-drawer-open',compact&&drawerOpen);
+  if(returnFocus)experimentToggle.focus({preventScroll:true});
 }

@@ -349,16 +349,16 @@ build_experiment_image() {
         log_warn "Docker daemon unavailable; skipping the Experiment sandbox image"
         return 0
     fi
-    if ! docker image inspect agent-api-sandbox:latest >/dev/null 2>&1; then
-        if [ ! -f "$base_context/Dockerfile" ]; then
-            log_error "Agents API Docker example not found at $base_context"
-            return 1
-        fi
-        log "Building the Agents API base sandbox image..."
-        if ! docker build --tag agent-api-sandbox:latest "$base_context"; then
-            log_error "Agents API base sandbox image build failed"
-            return 1
-        fi
+    if [ ! -f "$base_context/Dockerfile" ]; then
+        log_error "Agents API Docker example not found at $base_context"
+        return 1
+    fi
+    # The preview image installs @openai/codex@alpha. Rebuild this layer instead
+    # of silently reusing an old alpha against a newer Agents API contract.
+    log "Refreshing the Agents API base sandbox image..."
+    if ! docker build --pull --no-cache --tag agent-api-sandbox:latest "$base_context"; then
+        log_error "Agents API base sandbox image build failed"
+        return 1
     fi
 
     log "Building the XO Experiment sandbox image..."

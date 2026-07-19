@@ -1,4 +1,4 @@
-"""Intent-level API for the Space Experiment tab."""
+"""Intent-level API for the Experiments panel embedded in Space Chat."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ class ExperimentResponse(BaseModel):
     project_id: str
     provider: str
     model: str
+    permission_profile: str
     status: str
     stage: str
     failed_stage: str | None
@@ -53,6 +54,7 @@ class ExperimentResponse(BaseModel):
     agent_session_id: str | None
     sandbox_id: str | None
     space_url: str | None
+    app_url: str | None
     workspace_directory: str | None
     turn_status: str
     turn_error: str | None

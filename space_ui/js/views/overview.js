@@ -40,29 +40,97 @@ const bars=(pairs,fmt)=>{
   </div>`).join('');
 };
 
+/* The Overview follows the topbar's Projects/Sessions space switcher (same
+   persisted key atlas.js uses; switching spaces reloads the page, so reading
+   it once per mount is enough). Projects space shows the workspace tree +
+   .xo state; Sessions space shows every runtime's session-data stores. */
+const SPACE=(()=>{try{return localStorage.getItem('space.graphDataset')==='sessions'?'sessions':'projects';}catch(_e){return 'projects';}})();
+
 export default {
   id:'overview',label:'Overview',order:0,
   async mount(el){
     const wrap=document.createElement('div');
     wrap.className='ovwrap';
     el.appendChild(wrap);
-    let D=null,failed=null,mode='data';  /* 'data' = project tree · 'meta' = .xo state */
+    let D=null,failed=null,mode='data';  /* 'data' = trees · 'meta' = collected state */
 
     async function load(){
-      wrap.innerHTML='<div class="ovload">reading .xo state…</div>';
-      const res=await apiFetch('data/overview.json');
+      wrap.innerHTML=`<div class="ovload">reading ${SPACE==='sessions'?'session data stores':'.xo state'}…</div>`;
+      const res=await apiFetch(SPACE==='sessions'?'data/overview_sessions.json':'data/overview.json');
       if(!res.ok){failed=res.error||'unavailable';D=null;render();return;}
       D=res.data;failed=null;render();
     }
 
     function render(){
       if(failed){
-        wrap.innerHTML=`<div class="ovload">The workspace's .xo state is not readable · ${esc(failed)}
+        wrap.innerHTML=`<div class="ovload">${SPACE==='sessions'?'No runtime session data is readable':"The workspace's .xo state is not readable"} · ${esc(failed)}
           <button class="ovbtn" id="ov-retry">Retry</button></div>`;
         wrap.querySelector('#ov-retry').addEventListener('click',load);
         return;
       }
+      if(SPACE==='sessions'){renderSessions();return;}
       const m=D.manifest||{},ws=D.workspace||{},st=D.stats||{},act=D.activity||{};
+      renderProjects(m,ws,st,act);
+    }
+
+    /* ---- sessions space: runtime session-data stores ---- */
+    const mts=m=>m?new Date(m*1000).toISOString():null;
+    function storeFacts(meta){
+      const rows=[];
+      for(const [k,v] of Object.entries(meta||{})){
+        const label=k.replace(/_/g,' ');
+        if(v&&typeof v==='object'&&'files' in v){
+          rows.push(`<div class="xrow"><span class="xr-main">${esc(label)}</span>
+            <span class="xr-meta">${Number(v.files)||0}${v.capped?'+':''} files · ${kb(v.bytes)}</span>
+            <span class="xr-time">${rel(mts(v.newest_mtime))}</span></div>`);
+        }else if(v&&typeof v==='object'&&'path' in v){
+          rows.push(`<div class="xrow"><span class="xr-main">${esc(label)}</span>
+            <span class="xr-meta" title="${esc(v.path)}">${esc((v.path||'').split('/').pop())} · ${kb(v.bytes)}</span>
+            <span class="xr-time">${rel(mts(v.mtime))}</span></div>`);
+        }else{
+          rows.push(`<div class="xrow"><span class="xr-main">${esc(label)}</span>
+            <span class="xr-meta">${esc(String(v))}</span><span class="xr-time"></span></div>`);
+        }
+      }
+      return rows.join('')||'<div class="xempty">No store metadata reported.</div>';
+    }
+    function renderSessions(){
+      const sources=D.sources||[];
+      const totFiles=sources.reduce((a,s)=>a+Object.values(s.meta||{})
+        .reduce((b,v)=>b+(v&&typeof v==='object'&&'files' in v?(Number(v.files)||0):0),0),0);
+      const dataBody=sources.map(s=>s.roots.map(r=>`
+        <div class="ovcard wide treecard">
+          <h4>${esc(s.label)} · ${esc(r.label)}</h4>
+          <div class="ovsub mono">${esc(r.path)}</div>
+          <div class="ovtree">${(r.tree.children||[]).map(c=>treeHtml(c,0)).join('')||'<div class="xempty">Empty.</div>'}${r.tree.more?`<div class="tf tmore">… ${r.tree.more} more items</div>`:''}</div>
+        </div>`).join('')).join('')||'<div class="xempty">No session data stores found.</div>';
+      const metaBody=`<div class="ovgrid">${sources.map(s=>`
+        <div class="ovcard wide">
+          <h4>${esc(s.label)} — collected stores</h4>
+          ${storeFacts(s.meta)}
+        </div>`).join('')}</div>`;
+      wrap.innerHTML=`
+        <div class="ovhead">
+          <div>
+            <div class="oveye">runtime session data</div>
+            <h2>Sessions</h2>
+            <div class="ovsub">${sources.length} runtime${sources.length===1?'':'s'} · ${totFiles} session files · updated ${rel(D.generated_at)}</div>
+          </div>
+          <div class="grow"></div>
+          <div class="ovmodes">
+            <button data-mode="data" class="${mode==='data'?'is-on':''}">Data</button>
+            <button data-mode="meta" class="${mode==='meta'?'is-on':''}">Metadata</button>
+          </div>
+          <button class="ovbtn" id="ov-refresh">&#8635; Refresh</button>
+        </div>
+        ${mode==='data'?dataBody:metaBody}`;
+      wrap.querySelector('#ov-refresh').addEventListener('click',load);
+      wrap.querySelectorAll('.ovmodes button').forEach(b=>b.addEventListener('click',()=>{
+        if(b.dataset.mode!==mode){mode=b.dataset.mode;render();}
+      }));
+    }
+
+    function renderProjects(m,ws,st,act){
       const projects=ws.projects||[];
       const open=act.open_sessions||[];
       const w7=(st.rolling||{})['7d']||{};

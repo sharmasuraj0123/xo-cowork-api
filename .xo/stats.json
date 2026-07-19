@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "updated_at": "2026-07-19T17:20:08Z",
+  "updated_at": "2026-07-19T18:17:48Z",
   "rolling": {
     "7d": {
       "tokens": {
-        "input": 19681,
-        "output": 240772
+        "input": 19734,
+        "output": 260789
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -13,24 +13,24 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672
+          "input": 662,
+          "output": 249689
         }
       },
       "by_tool": {
-        "Bash": 103,
-        "Read": 23,
-        "Write": 5,
-        "Edit": 93
+        "Bash": 110,
+        "Read": 24,
+        "Write": 7,
+        "Edit": 101
       },
-      "files_edited": 15,
+      "files_edited": 17,
       "sessions": 1,
-      "active_minutes": 7131
+      "active_minutes": 7188
     },
     "30d": {
       "tokens": {
-        "input": 19681,
-        "output": 240772
+        "input": 19734,
+        "output": 260789
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -38,26 +38,26 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672
+          "input": 662,
+          "output": 249689
         }
       },
       "by_tool": {
-        "Bash": 103,
-        "Read": 23,
-        "Write": 5,
-        "Edit": 93
+        "Bash": 110,
+        "Read": 24,
+        "Write": 7,
+        "Edit": 101
       },
-      "files_edited": 15,
+      "files_edited": 17,
       "sessions": 1,
-      "active_minutes": 7131
+      "active_minutes": 7188
     }
   },
   "by_session": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19681,
-        "output": 240772
+        "input": 19734,
+        "output": 260789
       },
       "files": [
         ".claude/launch.json",
@@ -74,14 +74,16 @@
         "services/cowork_agent/visualizer/space_index.py",
         "services/cowork_agent/visualizer/xo_overview.py",
         "space_ui/js/views/overview.js",
-        "space_ui/css/overview.css"
+        "space_ui/css/overview.css",
+        "services/cowork_agent/adapters/claude_code/session_data.py",
+        "services/cowork_agent/adapters/codex/session_data.py"
       ],
-      "duration_ms": 427878196,
+      "duration_ms": 431338026,
       "tools": {
-        "Bash": 103,
-        "Read": 23,
-        "Write": 5,
-        "Edit": 93
+        "Bash": 110,
+        "Read": 24,
+        "Write": 7,
+        "Edit": 101
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -89,8 +91,8 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672
+          "input": 662,
+          "output": 249689
         }
       }
     }
@@ -98,8 +100,8 @@
   "by_runtime": {
     "claude_code": {
       "tokens": {
-        "input": 19681,
-        "output": 240772
+        "input": 19734,
+        "output": 260789
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -107,19 +109,19 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672
+          "input": 662,
+          "output": 249689
         }
       },
       "by_tool": {
-        "Bash": 103,
-        "Read": 23,
-        "Write": 5,
-        "Edit": 93
+        "Bash": 110,
+        "Read": 24,
+        "Write": 7,
+        "Edit": 101
       },
-      "files_edited": 15,
+      "files_edited": 17,
       "sessions": 1,
-      "active_minutes": 7131
+      "active_minutes": 7188
     }
   },
   "by_day": {
@@ -203,29 +205,29 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 609,
-        "output": 229672,
-        "cache_read": 102321490,
-        "cache_write": 3753760
+        "input": 662,
+        "output": 249689,
+        "cache_read": 116536388,
+        "cache_write": 4262962
       },
       "messages": {
-        "total": 672,
-        "user": 349,
-        "assistant": 323,
-        "toolCalls": 192,
+        "total": 729,
+        "user": 378,
+        "assistant": 351,
+        "toolCalls": 210,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672,
-          "count": 323
+          "input": 662,
+          "output": 249689,
+          "count": 351
         }
       },
       "latency": {
-        "count": 323,
-        "sum_ms": 3210739,
+        "count": 351,
+        "sum_ms": 3498317,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
@@ -254,7 +256,7 @@
           5118,
           29270,
           2542,
-          7443,
+          4108,
           2025,
           5107,
           5042,
@@ -277,15 +279,15 @@
           57149,
           5415,
           4246,
-          5895,
+          5070,
           13401,
-          2563,
+          6992,
           5020,
           16569,
           3524,
           4776,
           2579,
-          5336,
+          60610,
           3949,
           7539,
           17560,
@@ -297,10 +299,10 @@
           3699,
           2805,
           29529,
-          5982,
+          13738,
           2824,
           4262,
-          2494,
+          7945,
           6505,
           17362,
           3230,
@@ -318,17 +320,17 @@
           5398,
           11074,
           3249,
-          5392,
+          4922,
           3837,
           2446,
-          9278,
+          4735,
           6770,
           7998,
           5283,
           3720,
           4738,
           4718,
-          3588
+          6734
         ]
       }
     }
@@ -336,8 +338,8 @@
   "_session_totals": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19681,
-        "output": 240772
+        "input": 19734,
+        "output": 260789
       },
       "files": [
         ".claude/launch.json",
@@ -354,11 +356,13 @@
         "services/cowork_agent/visualizer/space_index.py",
         "services/cowork_agent/visualizer/xo_overview.py",
         "space_ui/js/views/overview.js",
-        "space_ui/css/overview.css"
+        "space_ui/css/overview.css",
+        "services/cowork_agent/adapters/claude_code/session_data.py",
+        "services/cowork_agent/adapters/codex/session_data.py"
       ],
-      "duration_ms": 427878196,
+      "duration_ms": 431338026,
       "first_ts": "2026-07-14T18:28:49.664Z",
-      "last_ts": "2026-07-19T17:20:07.860Z",
+      "last_ts": "2026-07-19T18:17:47.690Z",
       "runtime": "claude_code",
       "by_model_tokens": {
         "claude-sonnet-5": {
@@ -366,15 +370,15 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672
+          "input": 662,
+          "output": 249689
         }
       },
       "tools": {
-        "Bash": 103,
-        "Read": 23,
-        "Write": 5,
-        "Edit": 93
+        "Bash": 110,
+        "Read": 24,
+        "Write": 7,
+        "Edit": 101
       }
     }
   },
@@ -459,29 +463,29 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 609,
-        "output": 229672,
-        "cache_read": 102321490,
-        "cache_write": 3753760
+        "input": 662,
+        "output": 249689,
+        "cache_read": 116536388,
+        "cache_write": 4262962
       },
       "messages": {
-        "total": 672,
-        "user": 349,
-        "assistant": 323,
-        "toolCalls": 192,
+        "total": 729,
+        "user": 378,
+        "assistant": 351,
+        "toolCalls": 210,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 609,
-          "output": 229672,
-          "count": 323
+          "input": 662,
+          "output": 249689,
+          "count": 351
         }
       },
       "latency": {
-        "count": 323,
-        "sum_ms": 3210739,
+        "count": 351,
+        "sum_ms": 3498317,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
@@ -510,7 +514,7 @@
           5118,
           29270,
           2542,
-          7443,
+          4108,
           2025,
           5107,
           5042,
@@ -533,15 +537,15 @@
           57149,
           5415,
           4246,
-          5895,
+          5070,
           13401,
-          2563,
+          6992,
           5020,
           16569,
           3524,
           4776,
           2579,
-          5336,
+          60610,
           3949,
           7539,
           17560,
@@ -553,10 +557,10 @@
           3699,
           2805,
           29529,
-          5982,
+          13738,
           2824,
           4262,
-          2494,
+          7945,
           6505,
           17362,
           3230,
@@ -574,17 +578,17 @@
           5398,
           11074,
           3249,
-          5392,
+          4922,
           3837,
           2446,
-          9278,
+          4735,
           6770,
           7998,
           5283,
           3720,
           4738,
           4718,
-          3588
+          6734
         ]
       }
     }

@@ -22,7 +22,10 @@ from services.cowork_agent.visualizer.session_telemetry import (
     build_session_telemetry,
 )
 from services.cowork_agent.visualizer.sessions_graph import build_sessions_graph
-from services.cowork_agent.visualizer.xo_overview import build_xo_overview
+from services.cowork_agent.visualizer.xo_overview import (
+    build_sessions_overview,
+    build_xo_overview,
+)
 from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
@@ -264,6 +267,47 @@ async def overview_data():
             )
         # Stamp after the build so a slow walk still gets a full TTL of reuse.
         _overview_cache = (time.monotonic(), data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Sessions-space Overview: every runtime's on-disk session data (trees +
+# store metadata), aggregated per adapter capability. Same lock+TTL shape.
+_sess_overview_cache: tuple[float, dict] | None = None
+_sess_overview_lock: asyncio.Lock | None = None
+_sess_overview_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_sess_overview_lock() -> asyncio.Lock:
+    global _sess_overview_lock, _sess_overview_lock_loop
+    loop = asyncio.get_running_loop()
+    if _sess_overview_lock is None or _sess_overview_lock_loop is not loop:
+        _sess_overview_lock = asyncio.Lock()
+        _sess_overview_lock_loop = loop
+    return _sess_overview_lock
+
+
+@router.get("/data/overview_sessions.json")
+async def overview_sessions_data():
+    """Runtime session-data stores for the Overview tab's Sessions space."""
+    global _sess_overview_cache
+    now = time.monotonic()
+    if _sess_overview_cache is not None and now - _sess_overview_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_sess_overview_cache[1], headers={"Cache-Control": "no-store"})
+    async with _get_sess_overview_lock():
+        now = time.monotonic()
+        if _sess_overview_cache is not None and now - _sess_overview_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(_sess_overview_cache[1],
+                                headers={"Cache-Control": "no-store"})
+        try:
+            data = await asyncio.to_thread(build_sessions_overview)
+        except Exception as exc:
+            print(f"⚠️ sessions overview failed ({exc})")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "session_data_unavailable",
+                        "message": "No runtime session data is readable."},
+            )
+        _sess_overview_cache = (time.monotonic(), data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 

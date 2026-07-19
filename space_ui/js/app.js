@@ -8,7 +8,6 @@ import overviewView from './views/overview.js';
 import sessionsView from './views/sessions.js';
 import projectsView from './views/projects.js';
 import chatView from './views/chat.js';
-import experimentView from './views/experiment.js';
 
 /* app-shell bulkhead: a fatal script error logs instead of white-screening */
 addEventListener('error',e=>console.error('Space shell error:',e.error||e.message));
@@ -31,8 +30,19 @@ const dashboardView={
   hide(){if(dashInner.hide)dashInner.hide();}
 };
 
-/* legacy deep links from before Sessions + Projects merged into Dashboard */
-if(/^#\/(sessions|projects)$/.test(location.hash))history.replaceState(null,'','#/dashboard');
+/* Legacy deep links: Sessions + Projects merged into Dashboard, and Experiment
+   now lives as the right rail plus retained workbench inside Chat. Run this on
+   later hash changes too so an old in-app link cannot leave a stale URL. */
+function redirectLegacyRoute(){
+  if(/^#\/(sessions|projects)$/.test(location.hash))history.replaceState(null,'','#/dashboard');
+  else if(location.hash==='#/experiment'){
+    document.documentElement.dataset.openExperiment='true';
+    history.replaceState(null,'','#/chat');
+    dispatchEvent(new Event('space:open-experiment'));
+  }
+}
+redirectLegacyRoute();
+addEventListener('hashchange',redirectLegacyRoute);
 
 try{
   registerView(overviewView);   /* order 0 — first tab, before Graph */
@@ -41,7 +51,6 @@ try{
   registerView(sixView);
   registerView(dashboardView);
   registerView(chatView);
-  registerView(experimentView);
   buildModeToggle();  /* topbar Projects/Sessions space switcher, every page */
   startRegistry({defaultView:'graph'});
 }catch(err){console.error('Space registry failed to start:',err);}

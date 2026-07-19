@@ -19,14 +19,15 @@ into one navigable UI. Its job is not to be another editor. Its job is to answer
 The strongest utility is **orientation plus transition to action**. Graph,
 Timeline, and Six Degrees help a person build a mental model; Sessions explains
 agent usage; Projects exposes collaboration state; Chat lets the person continue
-inside a selected project; Experiment creates a boot-verified isolated project
-agent and interactive sandbox Space in one click. This makes `/space` most useful as an engineering
+inside a selected project and mirrors its session rail with a right-hand
+Experiments rail that creates a boot-verified isolated project agent and
+interactive sandbox Space in one click. This makes `/space` most useful as an engineering
 lead's or operator's home screen, an onboarding map, and a future agent control
 surface.
 
 ## What the UI contains
 
-The build-free ES-module SPA has a persistent header, seven hash-routed views, a
+The build-free ES-module SPA has a persistent header, hash-routed views, a
 global graph search/re-root control, a shared detail drawer/toast layer, and a
 footer that polls server status.
 
@@ -37,12 +38,11 @@ footer that polls server status.
 | Six Degrees | Find a weighted shortest path between two artifacts | Same Atlas graph |
 | Sessions | Compare or isolate Claude Code, Codex, and Cursor tokens, sessions, models, tools, and trends | Argus + Codex state/rollouts + Cursor transcripts |
 | Projects | Inspect project inventory, commits, relay state, and sharing | Project BFF + Git + swarm relay |
-| Chat | Browse sessions and stream an agent response, optionally project-bound | Adapter-backed session/chat APIs |
-| Experiment | Launch, inspect, message, and stop a short-lived isolated XO project agent | Docker/Space provider + early-access Agents API |
+| Chat + Experiments | Browse and stream normal sessions from the left rail; launch, inspect, message, and stop isolated project agents from the right rail and shared center | Adapter chat APIs + Docker/Space provider + early-access Agents API |
 
-Routes are `#/graph`, `#/time`, `#/six`, `#/sessions`, `#/projects`, and
-`#/chat`, and `#/experiment`; numeric shortcuts `1`–`7` select them. Views mount lazily once and keep
-their in-memory state until a full page reload.
+The operational conversation route is `#/chat`; legacy `#/experiment` links
+redirect there. Numeric shortcuts follow the visible tab order. Views mount
+lazily once and keep their in-memory state until a full page reload.
 
 ## How the parts connect
 
@@ -52,14 +52,14 @@ flowchart LR
     Atlas["Graph · Timeline · Six Degrees"]
     Sessions["Sessions dashboard"]
     Projects["Projects dashboard"]
-    Chat["Agent chat"]
-    Experiment["One-click experiment"]
+    Chat["Agent chat · shared conversation center"]
+    Experiment["Right-rail experiment lifecycle"]
 
     Browser --> Atlas
     Browser --> Sessions
     Browser --> Projects
     Browser --> Chat
-    Browser --> Experiment
+    Chat --> Experiment
 
     Atlas --> SpaceRoute["GET /space/data/space.json\n30 s server cache"]
     SpaceRoute --> Files["XO_PROJECTS_ROOT\nproject files + .xo/project.json"]
@@ -90,7 +90,8 @@ flowchart LR
 
 This separation matters: `/space` is one UI but not one database. Atlas is a
 request-time filesystem/Git index, Sessions merges independent read-only Claude
-Code and Codex projections, and Projects/Chat/Experiment are live operational
+Code and Codex projections, and Projects plus the combined Chat/Experiments
+workspace are live operational
 APIs. The visualizer watcher maintains `.xo`
 state for the broader product, but Atlas does not read its stats/timeline output;
 it only benefits indirectly when `.xo/project.json` makes a folder discoverable.
@@ -126,8 +127,7 @@ edge count, not weighted cost.
 | Projects | 36 rows but 35 unique IDs; one ID is emitted twice |
 | Sessions, all time | 116 parent sessions (58 Claude Code + 58 Codex), 4,867,409,623 tokens, about $414.90 known Claude cost plus unavailable Codex cost, 33 project paths |
 | Relay | Enabled but parked because `PROJECT_ID` is not configured; watch branch `main` |
-| Chat | Session list, stored transcript, project binding, progressive text SSE, and abort UI all operational |
-| Experiment | SDK/Docker/API preflight green; one-click launch, sandbox Space URL, follow-up turns, and cleanup are covered end-to-end |
+| Chat + Experiments | Left session rail, retained normal transcript, project binding, progressive text SSE, right sandbox rail, one-click launch, selected Live Workbench, sandbox/app URLs, follow-up turns, and cleanup are operational |
 
 The already-open page initially held 26 ties/1,713 links. Adding these audited
 documents introduced more literal path references; a fresh server build derived
@@ -160,7 +160,7 @@ validated both reference-based tie generation and the page-lifetime Atlas cache.
   are not represented. Tool details appear only after the canonical transcript
   is reloaded. Refresh cannot recover an in-flight stream, and Stop is primarily
   local—the agent may finish server-side.
-- Experiment's first provider is intentionally local-development only. It
+- The embedded Experiment provider is intentionally local-development only. It
   hardens and limits Docker, sanitizes the current worktree, auto-stops, and
   reconciles labelled containers, but still assumes one trusted API process and
   places a long-lived project key inside the executor. Production Coder/XO
@@ -177,9 +177,9 @@ validated both reference-based tie generation and the page-lifetime Atlas cache.
 
 ## Agent SDK seam
 
-Keep Atlas and telemetry as deterministic read models. Experiment now proves the
-provider-neutral Agent SDK lifecycle, follow-up turn bridge, and sandbox Space
-URL behind a dedicated BFF and registry view. A future slice can add replayable
+Keep Atlas and telemetry as deterministic read models. The Experiment controller
+inside Chat proves the provider-neutral Agent SDK lifecycle, follow-up turn
+bridge, and sandbox Space URL behind a dedicated BFF. A future slice can add replayable
 typed tool events and durable transcript persistence while preserving the
 local-first **observe → understand → act** loop.
 
