@@ -13,7 +13,8 @@ process. It combines three independent read/operation planes:
 1. **Atlas plane** — Graph, Timeline, and Six Degrees consume a request-built
    projection of project folders and Git history.
 2. **Telemetry plane** — Sessions merges request-built, read-only projections
-   from Claude Code's Argus database and Codex's local state/rollout store.
+   from Claude Code's Argus database, Codex's local state/rollout store, and
+   Cursor's local agent transcripts / optional chat state.
 3. **Operational plane** — Projects, Chat, and Experiment use live BFF,
    commit-relay, session, message, agent-dispatch, Docker, and Agents API
    lifecycle services.
@@ -39,6 +40,7 @@ Sessions telemetry providers.
 | Telemetry discovery/merge | `services/cowork_agent/visualizer/session_telemetry.py` |
 | Claude Code telemetry | `services/cowork_agent/adapters/claude_code/session_telemetry.py`, `services/cowork_agent/visualizer/argus_index.py` |
 | Codex telemetry | `services/cowork_agent/adapters/codex/session_telemetry.py` |
+| Cursor telemetry | `services/cowork_agent/adapters/cursor/session_telemetry.py` |
 | Project inventory BFF | `routers/cowork_agent/bff/xo_projects.py` |
 | Commit/share BFF | `routers/cowork_agent/bff/relay.py` |
 | Relay engine | `services/cowork_agent/commit_relay/*` |
@@ -427,6 +429,19 @@ not branch on runtime names. A telemetry-only package does not need an
 - The current DB reports schema 3 while code expects schema 6; this logs a
   warning and succeeds here because required fields remain compatible.
 
+**Cursor**
+
+- Home: `CURSOR_HOME`, default `~/.cursor`. Host-visible agent transcripts under
+  `projects/*/agent-transcripts/**/*.jsonl` are the primary source (including
+  remote SSH workspaces). Optional enrichment from `chats/**/store.db` and from
+  a desktop `state.vscdb` when `CURSOR_USER_DATA` / platform user-data paths are
+  present.
+- Native bubble `tokenCount` values are preferred when available. Otherwise
+  transcript character length becomes explicit `unclassified` usage with
+  `breakdown_known: false`. Cost is unavailable.
+- Prompt/message text, tool arguments, and tool results are never retained;
+  only metadata, numeric usage, model IDs, and tool names are emitted.
+
 **Codex**
 
 - Home: `CODEX_HOME`, default `~/.codex`; the newest schema-compatible
@@ -499,8 +514,8 @@ cover eight calendar dates, and 30 days can cover 31.
 Sessions, Models, and Trends are all-time views even when a window was selected
 elsewhere.
 
-Independent native checkboxes for Claude Code and Codex are both enabled on
-first load and persist while switching Sessions subviews. Both off is valid and
+Independent native checkboxes for Claude Code, Codex, and Cursor are enabled on
+first load and persist while switching Sessions subviews. All off is valid and
 renders an explicit “No session sources selected” state. Filtering happens at the raw `sessions`,
 `daily_sessions`, `daily_models`, and `daily_tools` boundaries, so every metric
 and table is recalculated rather than merely hiding list rows.

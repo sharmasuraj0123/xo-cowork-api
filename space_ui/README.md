@@ -123,10 +123,10 @@ to `127.0.0.1`.
 
 ## Sessions tab
 
-The fourth view, Sessions, combines Claude Code and Codex session stats in
-cards, tables, and hand-drawn canvas charts (no dependencies), re-skinned to the
-Space theme. Independent checked-by-default source checkboxes show both together
-or isolate either runtime. It lives in its own module
+The fourth view, Sessions, combines Claude Code, Codex, and Cursor session stats
+in cards, tables, and hand-drawn canvas charts (no dependencies), re-skinned to
+the Space theme. Independent checked-by-default source checkboxes show sources
+together or isolate any runtime. It lives in its own module
 (`js/views/sessions.js`), independent of the atlas's `boot()` — either can fail
 without taking the other down, and the registry keeps the tabs switchable
 regardless.
@@ -134,10 +134,11 @@ regardless.
 - Data: `GET /space/data/sessions.json`, one pre-aggregated payload built from
   every discovered `session_telemetry` capability. Claude Code reads Argus
   (`ARGUS_DB`, default `~/.argus/argus.db`); Codex reads its state database and
-  referenced rollouts (`CODEX_HOME`, default `~/.codex`). Fetched lazily on
-  first open; Refresh re-fetches behind the same 30 s server TTL. A failed
-  source degrades independently while another readable source still returns
-  a useful response.
+  referenced rollouts (`CODEX_HOME`, default `~/.codex`); Cursor reads
+  agent transcripts and optional chat/state stores (`CURSOR_HOME`, default
+  `~/.cursor`). Fetched lazily on first open; Refresh re-fetches behind the
+  same 30 s server TTL. A failed source degrades independently while another
+  readable source still returns a useful response.
 - Sub-views: Overview · Sessions (list → detail with sub-agents and
   per-session tools) · Tools · Models · Trends. The `Today/7d/30d/All`
   window selector filters client-side over per-day rollups shipped in the
@@ -145,8 +146,11 @@ regardless.
 - Every session and daily rollup carries an `agent` field plus a collision-safe
   session key. Every subview filters its own raw rollups, so toggling a source
   recalculates overview totals, lists, tools, models, and trends consistently.
-- Codex does not expose authoritative cost, so its cost renders as unavailable;
-  combined cost is explicitly marked partial rather than treating Codex as $0.
+- Codex and Cursor do not expose authoritative cost, so their cost renders as
+  unavailable; combined cost is explicitly marked partial rather than treating
+  those sources as $0. Cursor token totals prefer native bubble counters when
+  a desktop `state.vscdb` is present, otherwise transcript length is an
+  explicit unclassified estimate.
 - No alerts, prompts, titles, reasoning, tool arguments, or tool results enter
   the payload. Only metadata, numeric usage, model IDs, and tool names are kept.
 
@@ -155,9 +159,10 @@ regardless.
 After changing a telemetry provider or the Sessions UI:
 
 - `venv/bin/python -m unittest discover -v` passes.
-- `GET /space/data/sessions.json` returns both sources in `meta.sources` when
-  their stores exist; session keys are unique and every rollup is source-tagged.
-- Both source checkboxes start checked. Claude-only, Codex-only, combined, and
+- `GET /space/data/sessions.json` returns Claude Code, Codex, and Cursor in
+  `meta.sources` when their stores exist; session keys are unique and every
+  rollup is source-tagged.
+- Source checkboxes start checked. Single-source, combined, and
   neither-selected states all render without reloading the page.
 - Overview, Sessions, Tools, Models, and Trends recalculate from the selected
   sources; the checkbox that changed retains keyboard focus.

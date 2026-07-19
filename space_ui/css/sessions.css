@@ -50,6 +50,7 @@
   .source-chip::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
   .source-chip.source-claude_code{color:#d7a75d;background:rgba(215,167,93,.07)}
   .source-chip.source-codex{color:var(--accent);background:rgba(168,217,79,.07)}
+  .source-chip.source-cursor{color:#7eb6ff;background:rgba(126,182,255,.08)}
   .sess-back{font-size:12.5px;color:var(--accent);margin-bottom:14px;display:inline-block;cursor:pointer}
   .sess-note{color:var(--ink-3);font-size:12.5px;padding:26px 0;text-align:center}
   .sess-cost-note{margin-top:10px;color:var(--ink-3);font-size:10.5px;line-height:1.45}

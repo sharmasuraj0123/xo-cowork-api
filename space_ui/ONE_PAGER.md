@@ -35,7 +35,7 @@ footer that polls server status.
 | Graph | Explore projects, directory clusters, artifacts, and derived relationships | Filesystem + Git |
 | Timeline | Scrub and replay retained artifacts by first-seen date | Same Atlas graph |
 | Six Degrees | Find a weighted shortest path between two artifacts | Same Atlas graph |
-| Sessions | Compare or isolate Claude Code and Codex tokens, sessions, models, tools, and trends | Argus + Codex state/rollouts |
+| Sessions | Compare or isolate Claude Code, Codex, and Cursor tokens, sessions, models, tools, and trends | Argus + Codex state/rollouts + Cursor transcripts |
 | Projects | Inspect project inventory, commits, relay state, and sharing | Project BFF + Git + swarm relay |
 | Chat | Browse sessions and stream an agent response, optionally project-bound | Adapter-backed session/chat APIs |
 | Experiment | Launch, inspect, message, and stop a short-lived isolated XO project agent | Docker/Space provider + early-access Agents API |
@@ -69,6 +69,7 @@ flowchart LR
     SessionRoute --> Discovery["multi-provider telemetry discovery"]
     Discovery --> Argus["Claude Code\nread-only Argus SQLite"]
     Discovery --> Codex["Codex\nread-only state SQLite + rollouts"]
+    Discovery --> Cursor["Cursor\ntranscripts + optional state.vscdb"]
 
     Projects --> ProjectAPI["/api/xo-projects/*"]
     ProjectAPI --> ProjectFolders["project metadata + local Git"]

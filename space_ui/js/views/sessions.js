@@ -160,7 +160,7 @@ function render(){
       ?'<b>xo-cowork-api is unreachable</b> — the request never reached the server '
         +'(stopped or restarting; the footer pill tracks it). Not a telemetry-source problem. '
       :'<b>Could not load data/sessions.json</b> ('+esc(failed)+'). '
-        +'The API reads local telemetry for each runtime (Claude Code: <b>ARGUS_DB</b>; Codex: <b>CODEX_HOME</b>). ')
+        +'The API reads local telemetry for each runtime (Claude Code: <b>ARGUS_DB</b>; Codex: <b>CODEX_HOME</b>; Cursor: <b>CURSOR_HOME</b>). ')
       +'<button class="sess-refresh" id="sess-retry">Retry</button></div>';
     document.getElementById('sess-retry').addEventListener('click',load);return;
   }
@@ -190,7 +190,7 @@ function render(){
   document.getElementById('sess-refresh').addEventListener('click',()=>{SD=null;load();});
   const el=document.getElementById('sess-body');
   if(!enabledAgents.size){
-    el.innerHTML='<div class="scard sess-empty-filter"><b>No session sources selected</b><span>Turn on Claude Code, Codex, or both to calculate this view.</span></div>';
+    el.innerHTML='<div class="scard sess-empty-filter"><b>No session sources selected</b><span>Turn on Claude Code, Codex, Cursor, or any combination to calculate this view.</span></div>';
     return;
   }
   if(!sources.some(source=>enabledAgents.has(source.id)&&source.available!==false)){

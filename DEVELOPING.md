@@ -125,9 +125,10 @@ Most capabilities resolve for the active agent. Host-level observability is the
 exception: `list_capability_providers("session_telemetry")` discovers every
 adapter package that implements that read-only capability, even when it has no
 `adapter.py`. `services/cowork_agent/visualizer/session_telemetry.py` uses this
-to merge Claude Code (Argus) and Codex state/rollout telemetry without naming
-either runtime in core. One failed source degrades independently; only an
-all-source failure makes the Sessions endpoint unavailable.
+to merge Claude Code (Argus), Codex state/rollout, and Cursor transcript
+telemetry without naming those runtimes in core. One failed source degrades
+independently; only an all-source failure makes the Sessions endpoint
+unavailable.
 
 `claude_code` has no `chat` capability on purpose: `routers/cowork_agent/chat.py`
 falls through to the shared `AgentDispatcher` when `chat`/`handle_prompt` is

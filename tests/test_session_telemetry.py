@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from services.cowork_agent.adapters.codex import session_telemetry as codex_stats
+from services.cowork_agent.adapters.cursor import session_telemetry as cursor_stats
 from services.cowork_agent.adapters import loader as capability_loader
 from services.cowork_agent.adapters.loader import list_capability_providers
 from services.cowork_agent.registry.adapter_registry import list_adapters
@@ -584,6 +585,10 @@ class CombinedSessionTelemetryTests(unittest.TestCase):
         self.assertIn("codex", list_capability_providers("session_telemetry"))
         self.assertNotIn("codex", list_adapters())
 
+    def test_cursor_is_telemetry_only_not_a_chat_adapter(self) -> None:
+        self.assertIn("cursor", list_capability_providers("session_telemetry"))
+        self.assertNotIn("cursor", list_adapters())
+
     def test_optional_loader_does_not_hide_transitive_import_failures(self) -> None:
         error = ModuleNotFoundError("No module named 'missing_dependency'")
         error.name = "missing_dependency"
@@ -592,6 +597,127 @@ class CombinedSessionTelemetryTests(unittest.TestCase):
         ):
             with self.assertRaises(ModuleNotFoundError):
                 capability_loader.try_load_capability("session_telemetry", agent="good")
+
+
+class CursorSessionTelemetryTests(unittest.TestCase):
+    def _write_transcript(self, path: Path, rows: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    def test_collects_transcript_sessions_with_unclassified_estimates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            transcript = (
+                root / "projects" / "work-demo" / "agent-transcripts"
+                / session_id / f"{session_id}.jsonl"
+            )
+            self._write_transcript(transcript, [
+                {
+                    "role": "user",
+                    "message": {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                "<timestamp>Sunday, Jul 19, 2026, 10:00 AM "
+                                "(UTC)</timestamp>\nhello world"
+                            ),
+                        }],
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "working"},
+                            {"type": "tool_use", "name": "Shell", "input": {}},
+                        ],
+                    },
+                },
+            ])
+
+            with mock.patch.dict(os.environ, {"CURSOR_HOME": str(root)}):
+                data = cursor_stats.collect_session_telemetry()
+
+            self.assertEqual(data["source"]["id"], "cursor")
+            self.assertEqual(data["source"]["cost_status"], "unavailable")
+            self.assertEqual(data["totals"]["sessions"], 1)
+            session = data["sessions"][0]
+            self.assertEqual(session["key"], f"cursor:{session_id}")
+            self.assertEqual(session["agent"], "cursor")
+            self.assertEqual(session["turns"], 1)
+            self.assertGreater(session["tokens"], 0)
+            self.assertEqual(session["tokens"], session["unclassified"])
+            self.assertFalse(session["breakdown_known"])
+            self.assertFalse(session["cost_known"])
+            self.assertEqual(session["tools"][0]["name"], "Shell")
+            self.assertEqual(data["daily_tools"][0]["name"], "Shell")
+            self.assertIn("work-demo", data["project_keys"])
+
+    def test_prefers_native_bubble_tokens_when_state_db_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_data = root / "cursor-user"
+            session_id = "11111111-2222-3333-4444-555555555555"
+            transcript = (
+                root / "projects" / "alpha" / "agent-transcripts"
+                / f"{session_id}.jsonl"
+            )
+            self._write_transcript(transcript, [
+                {
+                    "role": "user",
+                    "message": {"content": [{"type": "text", "text": "hi"}]},
+                },
+            ])
+            db_path = user_data / "User" / "globalStorage" / "state.vscdb"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                "create table cursorDiskKV (key text primary key, value text)"
+            )
+            connection.execute(
+                "insert into cursorDiskKV values (?, ?)",
+                (
+                    f"composerData:{session_id}",
+                    json.dumps({
+                        "createdAt": 1_721_390_400_000,
+                        "lastUpdatedAt": 1_721_390_760_000,
+                        "model": "gpt-test",
+                        "workspaceIdentifier": {
+                            "uri": {"fsPath": "/work/alpha"},
+                        },
+                    }),
+                ),
+            )
+            connection.execute(
+                "insert into cursorDiskKV values (?, ?)",
+                (
+                    f"bubbleId:{session_id}:bubble-1",
+                    json.dumps({
+                        "tokenCount": {"inputTokens": 100, "outputTokens": 20},
+                    }),
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            with mock.patch.dict(os.environ, {
+                "CURSOR_HOME": str(root),
+                "CURSOR_USER_DATA": str(user_data),
+            }):
+                data = cursor_stats.collect_session_telemetry()
+
+            session = data["sessions"][0]
+            self.assertEqual(session["tokens"], 120)
+            self.assertEqual(session["fresh"], 100)
+            self.assertEqual(session["output"], 20)
+            self.assertEqual(session["unclassified"], 0)
+            self.assertTrue(session["breakdown_known"])
+            self.assertEqual(session["model"], "gpt-test")
+            self.assertEqual(session["project_path"], "/work/alpha")
 
 
 class SessionsRouteTests(unittest.IsolatedAsyncioTestCase):
