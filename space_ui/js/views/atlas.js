@@ -7,6 +7,7 @@
    the data lives on disk, next to this page. */
 import {apiFetch} from '../core/api.js';
 import {toast} from '../core/ui.js';
+import {openLeafPreview,closePreview,previewWidth} from '../core/leaf-preview.js';
 
 let go=()=>{};   /* ctx.switchTo, captured on first mount */
 const hooks={};  /* boot() assigns lifecycle hooks here once it has run */
@@ -576,6 +577,12 @@ function onDbl(n){
   else select(n.id,2);
 }
 const PANEL_W=352;
+/* When the leaf preview is open it sits left of the detail panel; keep the
+   selected node visible in the remaining graph viewport. */
+function focusPanOffset(kT){
+  if(GW<=760)return 0;
+  return (PANEL_W+previewWidth())/2/kT;
+}
 function select(id,depth,fly=true){
   selId=id;focusDepth=depth;
   focusSet=neighborhood(id,depth);
@@ -586,8 +593,7 @@ function select(id,depth,fly=true){
   openPanel(n);
   if(fly){
     const kT=Math.max(cam.k,1.6);
-    const off=GW>760?PANEL_W/2/kT:0;
-    flyTo(n.x+off,n.y,kT);
+    flyTo(n.x+focusPanOffset(kT),n.y,kT);
   }
 }
 function clearFocus(){
@@ -908,8 +914,14 @@ function openPanel(n){
     </div>`;
   panel.classList.add('is-open');
   panel.dataset.id=n.id;
+  /* Projects leaves get a content preview; sessions leaves have no file path. */
+  if(n.type==='leaf')openLeafPreview(n,{workspace:DATA.meta?.workspace});
+  else closePreview();
 }
-function closePanel(){panel.classList.remove('is-open');}
+function closePanel(){
+  panel.classList.remove('is-open');
+  closePreview();
+}
 document.getElementById('panel-close').addEventListener('click',()=>{clearFocus();clearPath();});
 panel.addEventListener('click',e=>{
   const c=e.target.closest('.conn,.qlink,.rtitle');
@@ -1005,7 +1017,7 @@ wireAC(document.getElementById('q'),document.getElementById('qac'),n=>{
   clearPath();
   select(n.id,1,false);
   const kT=n.type==='leaf'?2.2:1.3;
-  flyTo(n.x+(GW>760?PANEL_W/2/kT:0),n.y,kT);
+  flyTo(n.x+focusPanOffset(kT),n.y,kT);
   pulseN={id:n.id,t0:performance.now()};
   toast('Found '+n.label);
   document.getElementById('q').value='';

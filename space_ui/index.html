@@ -6,6 +6,7 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/stage.css">
 <link rel="stylesheet" href="css/graph.css">
+<link rel="stylesheet" href="css/preview.css">
 <link rel="stylesheet" href="css/sessions.css">
 <link rel="stylesheet" href="css/timeline.css">
 <link rel="stylesheet" href="css/sixdegrees.css">
@@ -120,6 +121,20 @@
     <div class="sesswrap" id="sesswrap"></div>
   </section>
 </main>
+
+<!-- leaf content preview (editor-like; opens with the detail panel) -->
+<aside id="preview" aria-label="File preview">
+  <div class="pv-bar">
+    <div class="pv-titles">
+      <div class="pv-title" id="preview-title">Preview</div>
+      <div class="pv-meta" id="preview-meta"></div>
+    </div>
+    <button type="button" class="pv-mode" id="preview-mode" hidden>Source</button>
+    <span class="pv-tag" id="preview-tag"></span>
+    <button type="button" class="pv-close" id="preview-close" title="Close preview">&#10005;</button>
+  </div>
+  <div class="pv-body" id="preview-body"></div>
+</aside>
 
 <!-- detail panel -->
 <aside id="panel">
