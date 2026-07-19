@@ -5,7 +5,7 @@
 .env.backup
 main.tf
 
-*.xo/activity.json
+.xo/activity.json
 
 .claude/
 
