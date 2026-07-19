@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "updated_at": "2026-07-19T15:45:56Z",
+  "updated_at": "2026-07-19T17:20:08Z",
   "rolling": {
     "7d": {
       "tokens": {
-        "input": 19664,
-        "output": 233396
+        "input": 19681,
+        "output": 240772
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -13,24 +13,24 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296
+          "input": 609,
+          "output": 229672
         }
       },
       "by_tool": {
-        "Bash": 94,
+        "Bash": 103,
         "Read": 23,
         "Write": 5,
         "Edit": 93
       },
       "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 7037
+      "active_minutes": 7131
     },
     "30d": {
       "tokens": {
-        "input": 19664,
-        "output": 233396
+        "input": 19681,
+        "output": 240772
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -38,26 +38,26 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296
+          "input": 609,
+          "output": 229672
         }
       },
       "by_tool": {
-        "Bash": 94,
+        "Bash": 103,
         "Read": 23,
         "Write": 5,
         "Edit": 93
       },
       "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 7037
+      "active_minutes": 7131
     }
   },
   "by_session": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19664,
-        "output": 233396
+        "input": 19681,
+        "output": 240772
       },
       "files": [
         ".claude/launch.json",
@@ -76,9 +76,9 @@
         "space_ui/js/views/overview.js",
         "space_ui/css/overview.css"
       ],
-      "duration_ms": 422223063,
+      "duration_ms": 427878196,
       "tools": {
-        "Bash": 94,
+        "Bash": 103,
         "Read": 23,
         "Write": 5,
         "Edit": 93
@@ -89,8 +89,8 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296
+          "input": 609,
+          "output": 229672
         }
       }
     }
@@ -98,8 +98,8 @@
   "by_runtime": {
     "claude_code": {
       "tokens": {
-        "input": 19664,
-        "output": 233396
+        "input": 19681,
+        "output": 240772
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -107,19 +107,19 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296
+          "input": 609,
+          "output": 229672
         }
       },
       "by_tool": {
-        "Bash": 94,
+        "Bash": 103,
         "Read": 23,
         "Write": 5,
         "Edit": 93
       },
       "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 7037
+      "active_minutes": 7131
     }
   },
   "by_day": {
@@ -203,29 +203,29 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 592,
-        "output": 222296,
-        "cache_read": 98409441,
-        "cache_write": 3290698
+        "input": 609,
+        "output": 229672,
+        "cache_read": 102321490,
+        "cache_write": 3753760
       },
       "messages": {
-        "total": 654,
-        "user": 340,
-        "assistant": 314,
-        "toolCalls": 183,
+        "total": 672,
+        "user": 349,
+        "assistant": 323,
+        "toolCalls": 192,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296,
-          "count": 314
+          "input": 609,
+          "output": 229672,
+          "count": 323
         }
       },
       "latency": {
-        "count": 314,
-        "sum_ms": 3056413,
+        "count": 323,
+        "sum_ms": 3210739,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
@@ -336,8 +336,8 @@
   "_session_totals": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19664,
-        "output": 233396
+        "input": 19681,
+        "output": 240772
       },
       "files": [
         ".claude/launch.json",
@@ -356,9 +356,9 @@
         "space_ui/js/views/overview.js",
         "space_ui/css/overview.css"
       ],
-      "duration_ms": 422223063,
+      "duration_ms": 427878196,
       "first_ts": "2026-07-14T18:28:49.664Z",
-      "last_ts": "2026-07-19T15:45:52.727Z",
+      "last_ts": "2026-07-19T17:20:07.860Z",
       "runtime": "claude_code",
       "by_model_tokens": {
         "claude-sonnet-5": {
@@ -366,12 +366,12 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296
+          "input": 609,
+          "output": 229672
         }
       },
       "tools": {
-        "Bash": 94,
+        "Bash": 103,
         "Read": 23,
         "Write": 5,
         "Edit": 93
@@ -459,29 +459,29 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 592,
-        "output": 222296,
-        "cache_read": 98409441,
-        "cache_write": 3290698
+        "input": 609,
+        "output": 229672,
+        "cache_read": 102321490,
+        "cache_write": 3753760
       },
       "messages": {
-        "total": 654,
-        "user": 340,
-        "assistant": 314,
-        "toolCalls": 183,
+        "total": 672,
+        "user": 349,
+        "assistant": 323,
+        "toolCalls": 192,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 592,
-          "output": 222296,
-          "count": 314
+          "input": 609,
+          "output": 229672,
+          "count": 323
         }
       },
       "latency": {
-        "count": 314,
-        "sum_ms": 3056413,
+        "count": 323,
+        "sum_ms": 3210739,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
