@@ -5,6 +5,8 @@
 .env.backup
 main.tf
 
+*.xo/activity.json
+
 .claude/
 
 # Ad-hoc smoke tests, debugging scripts, exploratory work — anything
