@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "updated_at": "2026-07-19T06:24:52Z",
+  "updated_at": "2026-07-19T15:45:56Z",
   "rolling": {
     "7d": {
       "tokens": {
-        "input": 19554,
-        "output": 195133
+        "input": 19664,
+        "output": 233396
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -13,24 +13,24 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033
+          "input": 592,
+          "output": 222296
         }
       },
       "by_tool": {
-        "Bash": 85,
-        "Read": 22,
-        "Write": 2,
-        "Edit": 72
+        "Bash": 94,
+        "Read": 23,
+        "Write": 5,
+        "Edit": 93
       },
-      "files_edited": 12,
+      "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 6475
+      "active_minutes": 7037
     },
     "30d": {
       "tokens": {
-        "input": 19554,
-        "output": 195133
+        "input": 19664,
+        "output": 233396
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -38,26 +38,26 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033
+          "input": 592,
+          "output": 222296
         }
       },
       "by_tool": {
-        "Bash": 85,
-        "Read": 22,
-        "Write": 2,
-        "Edit": 72
+        "Bash": 94,
+        "Read": 23,
+        "Write": 5,
+        "Edit": 93
       },
-      "files_edited": 12,
+      "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 6475
+      "active_minutes": 7037
     }
   },
   "by_session": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19554,
-        "output": 195133
+        "input": 19664,
+        "output": 233396
       },
       "files": [
         ".claude/launch.json",
@@ -71,14 +71,17 @@
         "space_ui/js/app.js",
         "space_ui/js/views/sessions.js",
         "space_ui/js/core/registry.js",
-        "services/cowork_agent/visualizer/space_index.py"
+        "services/cowork_agent/visualizer/space_index.py",
+        "services/cowork_agent/visualizer/xo_overview.py",
+        "space_ui/js/views/overview.js",
+        "space_ui/css/overview.css"
       ],
-      "duration_ms": 388559785,
+      "duration_ms": 422223063,
       "tools": {
-        "Bash": 85,
-        "Read": 22,
-        "Write": 2,
-        "Edit": 72
+        "Bash": 94,
+        "Read": 23,
+        "Write": 5,
+        "Edit": 93
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -86,8 +89,8 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033
+          "input": 592,
+          "output": 222296
         }
       }
     }
@@ -95,8 +98,8 @@
   "by_runtime": {
     "claude_code": {
       "tokens": {
-        "input": 19554,
-        "output": 195133
+        "input": 19664,
+        "output": 233396
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -104,19 +107,19 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033
+          "input": 592,
+          "output": 222296
         }
       },
       "by_tool": {
-        "Bash": 85,
-        "Read": 22,
-        "Write": 2,
-        "Edit": 72
+        "Bash": 94,
+        "Read": 23,
+        "Write": 5,
+        "Edit": 93
       },
-      "files_edited": 12,
+      "files_edited": 15,
       "sessions": 1,
-      "active_minutes": 6475
+      "active_minutes": 7037
     }
   },
   "by_day": {
@@ -200,37 +203,37 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 482,
-        "output": 184033,
-        "cache_read": 72489871,
-        "cache_write": 1948285
+        "input": 592,
+        "output": 222296,
+        "cache_read": 98409441,
+        "cache_write": 3290698
       },
       "messages": {
-        "total": 535,
-        "user": 279,
-        "assistant": 256,
-        "toolCalls": 149,
+        "total": 654,
+        "user": 340,
+        "assistant": 314,
+        "toolCalls": 183,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033,
-          "count": 256
+          "input": 592,
+          "output": 222296,
+          "count": 314
         }
       },
       "latency": {
-        "count": 256,
-        "sum_ms": 2473373,
+        "count": 314,
+        "sum_ms": 3056413,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
-          12830,
+          5024,
           2566,
-          6635,
+          2895,
           4570,
-          35557,
+          11091,
           8603,
           6041,
           34431,
@@ -246,7 +249,7 @@
           3954,
           9825,
           9597,
-          6750,
+          14423,
           4855,
           5118,
           29270,
@@ -256,7 +259,7 @@
           5107,
           5042,
           7381,
-          6541,
+          5915,
           4532,
           4635,
           23713,
@@ -270,7 +273,7 @@
           8109,
           10897,
           3127,
-          6256,
+          4011,
           57149,
           5415,
           4246,
@@ -290,16 +293,16 @@
           2418,
           3031,
           18485,
-          11052,
-          12605,
+          13174,
+          3699,
           2805,
-          13114,
-          85157,
-          5568,
-          5124,
+          29529,
+          5982,
+          2824,
+          4262,
           2494,
           6505,
-          15221,
+          17362,
           3230,
           11517,
           2808,
@@ -308,7 +311,7 @@
           8425,
           42326,
           5016,
-          15512,
+          22668,
           6201,
           6274,
           3383,
@@ -321,10 +324,10 @@
           9278,
           6770,
           7998,
-          3635,
+          5283,
           3720,
-          2580,
-          5266,
+          4738,
+          4718,
           3588
         ]
       }
@@ -333,8 +336,8 @@
   "_session_totals": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 19554,
-        "output": 195133
+        "input": 19664,
+        "output": 233396
       },
       "files": [
         ".claude/launch.json",
@@ -348,11 +351,14 @@
         "space_ui/js/app.js",
         "space_ui/js/views/sessions.js",
         "space_ui/js/core/registry.js",
-        "services/cowork_agent/visualizer/space_index.py"
+        "services/cowork_agent/visualizer/space_index.py",
+        "services/cowork_agent/visualizer/xo_overview.py",
+        "space_ui/js/views/overview.js",
+        "space_ui/css/overview.css"
       ],
-      "duration_ms": 388559785,
+      "duration_ms": 422223063,
       "first_ts": "2026-07-14T18:28:49.664Z",
-      "last_ts": "2026-07-19T06:24:49.449Z",
+      "last_ts": "2026-07-19T15:45:52.727Z",
       "runtime": "claude_code",
       "by_model_tokens": {
         "claude-sonnet-5": {
@@ -360,15 +366,15 @@
           "output": 11100
         },
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033
+          "input": 592,
+          "output": 222296
         }
       },
       "tools": {
-        "Bash": 85,
-        "Read": 22,
-        "Write": 2,
-        "Edit": 72
+        "Bash": 94,
+        "Read": 23,
+        "Write": 5,
+        "Edit": 93
       }
     }
   },
@@ -453,37 +459,37 @@
     },
     "2026-07-19": {
       "tokens": {
-        "input": 482,
-        "output": 184033,
-        "cache_read": 72489871,
-        "cache_write": 1948285
+        "input": 592,
+        "output": 222296,
+        "cache_read": 98409441,
+        "cache_write": 3290698
       },
       "messages": {
-        "total": 535,
-        "user": 279,
-        "assistant": 256,
-        "toolCalls": 149,
+        "total": 654,
+        "user": 340,
+        "assistant": 314,
+        "toolCalls": 183,
         "toolResults": 0,
         "errors": 0
       },
       "by_model": {
         "claude-fable-5": {
-          "input": 482,
-          "output": 184033,
-          "count": 256
+          "input": 592,
+          "output": 222296,
+          "count": 314
         }
       },
       "latency": {
-        "count": 256,
-        "sum_ms": 2473373,
+        "count": 314,
+        "sum_ms": 3056413,
         "min_ms": 1674,
         "max_ms": 85157,
         "p95_sample": [
-          12830,
+          5024,
           2566,
-          6635,
+          2895,
           4570,
-          35557,
+          11091,
           8603,
           6041,
           34431,
@@ -499,7 +505,7 @@
           3954,
           9825,
           9597,
-          6750,
+          14423,
           4855,
           5118,
           29270,
@@ -509,7 +515,7 @@
           5107,
           5042,
           7381,
-          6541,
+          5915,
           4532,
           4635,
           23713,
@@ -523,7 +529,7 @@
           8109,
           10897,
           3127,
-          6256,
+          4011,
           57149,
           5415,
           4246,
@@ -543,16 +549,16 @@
           2418,
           3031,
           18485,
-          11052,
-          12605,
+          13174,
+          3699,
           2805,
-          13114,
-          85157,
-          5568,
-          5124,
+          29529,
+          5982,
+          2824,
+          4262,
           2494,
           6505,
-          15221,
+          17362,
           3230,
           11517,
           2808,
@@ -561,7 +567,7 @@
           8425,
           42326,
           5016,
-          15512,
+          22668,
           6201,
           6274,
           3383,
@@ -574,10 +580,10 @@
           9278,
           6770,
           7998,
-          3635,
+          5283,
           3720,
-          2580,
-          5266,
+          4738,
+          4718,
           3588
         ]
       }

@@ -4,6 +4,7 @@
 import {registerView,startRegistry} from './core/registry.js';
 import {initServerWidget} from './core/server-widget.js';
 import {graphView,timeView,sixView,buildModeToggle,graphMode} from './views/atlas.js';
+import overviewView from './views/overview.js';
 import sessionsView from './views/sessions.js';
 import projectsView from './views/projects.js';
 import chatView from './views/chat.js';
@@ -34,6 +35,7 @@ const dashboardView={
 if(/^#\/(sessions|projects)$/.test(location.hash))history.replaceState(null,'','#/dashboard');
 
 try{
+  registerView(overviewView);   /* order 0 — first tab, before Graph */
   registerView(graphView);
   registerView(timeView);
   registerView(sixView);

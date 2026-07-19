@@ -1,14 +1,5 @@
 {
   "schema": 1,
-  "updated_at": "2026-07-19T06:33:32Z",
-  "open_sessions": [
-    {
-      "session_id": "7246401c-08a0-4ed0-80b0-06c64b4d23bd",
-      "runtime": "claude_code",
-      "agent": "claude-fable-5",
-      "user_id": "local",
-      "opened_at": "2026-07-19T06:20:46Z",
-      "last_activity_at": "2026-07-19T06:33:32Z"
-    }
-  ]
+  "updated_at": "2026-07-19T17:10:30Z",
+  "open_sessions": []
 }

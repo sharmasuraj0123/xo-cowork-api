@@ -22,6 +22,7 @@ from services.cowork_agent.visualizer.session_telemetry import (
     build_session_telemetry,
 )
 from services.cowork_agent.visualizer.sessions_graph import build_sessions_graph
+from services.cowork_agent.visualizer.xo_overview import build_xo_overview
 from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
@@ -221,6 +222,48 @@ async def sessions_graph_data():
         )
 
     _sessions_graph_cache = (now, data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Workspace .xo/ state for the Overview tab. Read-only (the watcher service
+# owns .xo/); same TTL, separate cache slot. Builds are single-flight: a slow
+# tree walk must not fan out one duplicate build per polling client.
+_overview_cache: tuple[float, dict] | None = None
+_overview_lock: asyncio.Lock | None = None
+_overview_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_overview_lock() -> asyncio.Lock:
+    global _overview_lock, _overview_lock_loop
+    loop = asyncio.get_running_loop()
+    if _overview_lock is None or _overview_lock_loop is not loop:
+        _overview_lock = asyncio.Lock()
+        _overview_lock_loop = loop
+    return _overview_lock
+
+
+@router.get("/data/overview.json")
+async def overview_data():
+    """The workspace's .xo/ state (manifest, stats, activity, timeline)."""
+    global _overview_cache
+    now = time.monotonic()
+    if _overview_cache is not None and now - _overview_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_overview_cache[1], headers={"Cache-Control": "no-store"})
+    async with _get_overview_lock():
+        now = time.monotonic()
+        if _overview_cache is not None and now - _overview_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(_overview_cache[1], headers={"Cache-Control": "no-store"})
+        try:
+            data = await asyncio.to_thread(build_xo_overview)
+        except Exception as exc:
+            print(f"⚠️ xo_overview failed ({exc})")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "xo_state_unavailable",
+                        "message": "The workspace's .xo state is not readable."},
+            )
+        # Stamp after the build so a slow walk still gets a full TTL of reuse.
+        _overview_cache = (time.monotonic(), data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
