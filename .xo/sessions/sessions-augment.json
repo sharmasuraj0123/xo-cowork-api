@@ -1,0 +1,28 @@
+{
+  "schema": 2,
+  "updated_at": "2026-07-19T06:24:52Z",
+  "sessions": {
+    "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
+      "messageCount": 630,
+      "messageCountByRole": {
+        "user": 327,
+        "assistant": 303,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "toolCallCount": 181,
+      "taskCount": {
+        "total": 0,
+        "completed": 0,
+        "in_progress": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "blocked": 0
+      },
+      "firstActivity": 1784053729664,
+      "lastActivity": 1784442289449,
+      "ended_at": null,
+      "episode_refs": []
+    }
+  }
+}

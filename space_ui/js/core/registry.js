@@ -38,8 +38,11 @@ export async function switchTo(id){
   current=id;
   for(const w of views){
     document.getElementById('view-'+w.id)?.classList.toggle('is-active',w.id===id);
-    document.getElementById('tab-'+w.id)?.classList.toggle('is-on',w.id===id);
+    /* a tabless view (hideTab) lights up its parentTab so the topbar still
+       says where you are (e.g. Six Degrees lives inside Timeline) */
+    document.getElementById('tab-'+w.id)?.classList.toggle('is-on',w.id===id||v.parentTab===w.id);
   }
+  document.getElementById('tab-'+id)?.scrollIntoView({block:'nearest',inline:'nearest'});
   history.replaceState(null,'','#/'+id);
   if(prev&&prev.hide){
     try{prev.hide();}catch(err){console.error('view "'+prev.id+'" hide failed:',err);}
@@ -69,8 +72,12 @@ export function startRegistry({defaultView}){
       stage.appendChild(s);
     }
   }
+  /* hideTab views stay registered (sections, hash deep-links, switchTo) but
+     get no tab button and no digit hotkey — they are reached from inside
+     another view (e.g. Six Degrees from the Timeline header) */
+  const tabbed=views.filter(v=>!v.hideTab);
   const tabs=document.querySelector('.tabs');
-  if(tabs)tabs.replaceChildren(...views.map(v=>{
+  if(tabs)tabs.replaceChildren(...tabbed.map(v=>{
     const b=document.createElement('button');
     b.id='tab-'+v.id;
     b.innerHTML=v.label;
@@ -81,7 +88,7 @@ export function startRegistry({defaultView}){
     if(/INPUT|TEXTAREA/.test(document.activeElement?.tagName||''))return;
     if(e.key.length!==1||e.key<'1'||e.key>'9')return;
     const i=e.key.charCodeAt(0)-49;
-    if(i<views.length)switchTo(views[i].id);
+    if(i<tabbed.length)switchTo(tabbed[i].id);
   });
   addEventListener('hashchange',()=>{
     const id=location.hash.replace(/^#\//,'');

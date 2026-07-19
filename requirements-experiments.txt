@@ -1,0 +1,3 @@
+# Early-access Agents API SDK used by the local Space Experiment provider.
+# Install from the sibling research checkout after the base requirements.
+-e ../research/agents-api-python-preview

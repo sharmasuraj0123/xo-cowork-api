@@ -34,13 +34,16 @@ log_success() { log "${GREEN}✓ $*${NC}"; }
 log_warn()    { log "${YELLOW}⚠ $*${NC}"; }
 log_error()   { log "${RED}✗ $*${NC}"; }
 
-# Top guard: every installer below is Debian/Ubuntu-specific (apt/dpkg, and
-# rclone's install.sh drops a binary into /usr/bin). On a host without apt-get
-# (Windows/macOS dev, non-Debian Linux) there's nothing we can safely do, so
-# log once and no-op. The deploy target is always Ubuntu, where this passes.
+# Apt guard: the rclone/gh/gnupg installers below are Debian/Ubuntu-specific
+# (apt/dpkg, and rclone's install.sh drops a binary into /usr/bin). On a host
+# without apt-get (Windows/macOS dev, non-Debian Linux) they are skipped. The
+# argus daemon step is venv-based and OS-agnostic, so it still runs: dev
+# machines need session telemetry too. The deploy target is always Ubuntu,
+# where the apt path passes.
+APT_AVAILABLE=1
 if ! command -v apt-get >/dev/null 2>&1; then
-    log_warn "apt-get unavailable — skipping shared dep install (not a Debian/Ubuntu host)"
-    exit 0
+    log_warn "apt-get unavailable: skipping apt-based deps (rclone, gh, gnupg)"
+    APT_AVAILABLE=0
 fi
 
 # Use sudo only if present; many container images run the app as root, where
@@ -125,12 +128,21 @@ install_gnupg() {
 # running, PID …" when up — treated as healthy, keeping this idempotent.
 # Never fatal: without the daemon the Sessions tab shows its error card.
 start_argus_daemon() {
-    if ! command -v argus >/dev/null 2>&1; then
-        log_warn "argus binary not on PATH — run the install step (requirements.txt); session telemetry degraded"
+    # Prefer the venv's argus (installed via requirements.txt): an unrelated
+    # npm package also ships an "argus" bin, so plain PATH resolution can
+    # shadow the real daemon with a CLI that has no `daemon` subcommand.
+    local script_dir argus_bin
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    argus_bin="$script_dir/../venv/bin/argus"
+    if [ ! -x "$argus_bin" ]; then
+        argus_bin="$(command -v argus || true)"
+    fi
+    if [ -z "$argus_bin" ]; then
+        log_warn "argus binary not found (venv or PATH); run the install step (requirements.txt); session telemetry degraded"
         return 0
     fi
     local out
-    if out=$(argus daemon start 2>&1); then
+    if out=$("$argus_bin" daemon start 2>&1); then
         log_success "argus daemon: ${out:-started}"
     elif echo "$out" | grep -qi "already running"; then
         log "argus daemon already running"
@@ -140,9 +152,11 @@ start_argus_daemon() {
 }
 
 log "Ensuring shared system deps (rclone, gh, gnupg) + argus daemon"
-install_rclone
-install_gh
-install_gnupg
+if [ "$APT_AVAILABLE" -eq 1 ]; then
+    install_rclone
+    install_gh
+    install_gnupg
+fi
 start_argus_daemon
 log "Shared dep check complete"
 exit 0

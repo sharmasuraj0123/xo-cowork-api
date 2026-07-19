@@ -44,9 +44,11 @@
     color:#14100a;background:var(--accent);border-radius:999px;padding:9px 18px}
   @media (max-width:960px){ .brand span{display:none} #hint{display:none} }
   @media (max-width:760px){
-    .topbar{grid-template-columns:auto 1fr;grid-template-rows:auto auto;height:auto;padding:8px 14px}
+    .topbar{grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;grid-template-areas:"brand right" "mid mid";height:auto;padding:8px 14px;gap:8px 12px}
+    .brand{grid-area:brand}.tmid{grid-area:mid;width:100%;justify-content:flex-start}.tright{grid-area:right;min-width:0}
+    .tmid .tabs{flex:1;max-width:none}.modesw button{padding:7px 10px}
+    .rootpick{display:none}.tright .searchwrap{width:min(230px,100%)}
     body{grid-template-rows:auto 1fr var(--footer-h)}
-    .searchwrap{grid-column:1/-1;justify-self:stretch;width:100%}
     #panel{width:100%}
     footer .attrib{display:none}
   }

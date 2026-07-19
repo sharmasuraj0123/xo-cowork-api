@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="css/chrome.css">
 <link rel="stylesheet" href="css/projects.css">
 <link rel="stylesheet" href="css/chat.css">
+<link rel="stylesheet" href="css/experiment.css">
 
 <div class="topbar">
   <div class="brand">
@@ -22,7 +23,10 @@
       <polyline stroke="#83d63a" stroke-width="26" fill="none" stroke-miterlimit="10" points="380.51 165.06 461.99 246.53 374.68 333.84"/>
     </svg></span>
     <b>Space</b><span>a workspace knowledge graph</span></div>
-  <div class="tabs"><!-- populated by core/registry.js from the registered views --></div>
+  <div class="tmid">
+    <div class="modesw" id="gmode" title="Switch the space between project artifacts and agent sessions"></div>
+    <div class="tabs"><!-- populated by core/registry.js from the registered views --></div>
+  </div>
   <div class="tright">
     <div class="rootpick">
       <button id="root-btn" title="Re-root the graph on any node">
@@ -75,6 +79,7 @@
       </div>
       <div class="grow"></div>
       <button class="ghost" id="tclear" hidden>Clear trace</button>
+      <button class="ghost" id="tsix" title="The shortest chain of work between any two artifacts">6&deg; Six degrees</button>
       <button id="tplay"><svg width="9" height="10" viewBox="0 0 9 10"><path d="M0 0L9 5L0 10Z" fill="#14100a"/></svg><span>Play</span></button>
       <div id="treadout">Jul 2026</div>
     </div>
@@ -109,9 +114,9 @@
       </div>
     </div>
   </section>
-  <!-- SESSIONS (Argus telemetry dashboard; content rendered by the
-       sessions-tab closure below, independent of boot()) -->
-  <section class="view" id="view-sessions">
+  <!-- DASHBOARD (backed by the sessions telemetry dashboard or the projects
+       view, whichever space the topbar switcher selects; see app.js) -->
+  <section class="view" id="view-dashboard">
     <div class="sesswrap" id="sesswrap"></div>
   </section>
 </main>
@@ -124,7 +129,7 @@
 
 <!-- hover card -->
 <div id="hc"></div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <footer>
   <div class="srv">

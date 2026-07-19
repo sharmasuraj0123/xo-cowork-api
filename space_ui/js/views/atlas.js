@@ -12,13 +12,55 @@ let go=()=>{};   /* ctx.switchTo, captured on first mount */
 const hooks={};  /* boot() assigns lifecycle hooks here once it has run */
 let bootPromise=null;
 
+/* The space maps one of two datasets: the workspace's projects (space.json,
+   the artifact map) or its agent sessions (sessions_graph.json, telemetry
+   projected into the same schema). The switcher lives in the topbar on every
+   page (#gmode, built by app.js at startup). The choice persists in
+   localStorage and switching reloads the page — boot() runs exactly once per
+   load, so a reload is the sanctioned reset (same pattern as renderNoData's
+   Retry), and the registry's hash deep-link restores the active tab. */
+const DATASETS={
+  output:{url:'data/space.json',label:'Projects'},
+  sessions:{url:'data/sessions_graph.json',label:'Sessions'}
+};
+const MODE_KEY='space.graphDataset';
+export function graphMode(){
+  try{const m=localStorage.getItem(MODE_KEY);return DATASETS[m]?m:'output';}
+  catch(_e){return 'output';}
+}
+export function buildModeToggle(){
+  const el=document.getElementById('gmode');
+  if(!el||el.childElementCount)return;
+  el.setAttribute('role','group');
+  el.setAttribute('aria-label','Graph dataset');
+  const mode=graphMode();
+  Object.entries(DATASETS).forEach(([id,d])=>{
+    const b=document.createElement('button');
+    b.textContent=d.label;
+    b.setAttribute('aria-pressed',String(id===mode));
+    if(id===mode)b.classList.add('is-on');
+    b.addEventListener('click',()=>{
+      if(id===graphMode()){
+        if(!['graph','time','six'].includes(location.hash.replace(/^#\//,'')))location.hash='#/graph';
+        return;
+      }
+      try{localStorage.setItem(MODE_KEY,id);}catch(_e){return;}
+      /* keep the current view across the reload: the Dashboard tab and the
+         atlas lenses re-render against the newly selected space */
+      location.reload();
+    });
+    el.appendChild(b);
+  });
+}
+
 /* boot() runs exactly once, no matter which atlas lens mounts first or how
    many mount concurrently — the cached promise is the single-flight guard. */
 function ensureBoot(){
   if(!bootPromise)bootPromise=(async()=>{
-    const res=await apiFetch('data/space.json');
+    const url=DATASETS[graphMode()].url;
+    const res=await apiFetch(url);
     if(!res.ok){
-      console.warn('Space could not load data/space.json:',res.error);
+      console.warn('Space could not load '+url+':',res.error);
       throw new Error(res.error);
     }
     boot(res.data,'local file');
@@ -32,7 +74,7 @@ function renderNoData(el){
   box.className='nodata';
   box.innerHTML='<div class="eyebrow">No data source</div>'+
     '<h1>Space reads its map from a local file.</h1>'+
-    '<p>This page loads <b>data/space.json</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
+    '<p>This page loads <b>'+DATASETS[graphMode()].url+'</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
     '<pre>cd xo-cowork-api && ./cowork-api.sh start</pre>'+
     '<p>then open <b>http://localhost:5002/space/</b></p>'+
     '<button id="nodata-retry">Retry</button>';
@@ -54,7 +96,9 @@ function atlasView(id,label,order,lens){
 }
 export const graphView=atlasView('graph','Graph',1,'graph');
 export const timeView=atlasView('time','Timeline',2,'time');
-export const sixView=atlasView('six','Six&nbsp;Degrees',3,'six');
+/* Six Degrees has no tab of its own: it opens from the Timeline header
+   (#tsix), keeps its #/six deep link, and lights the Timeline tab. */
+export const sixView={...atlasView('six','Six&nbsp;Degrees',3,'six'),hideTab:true,parentTab:'time'};
 
 function boot(DATA,DATA_SOURCE){
 /* ============================== MODEL FROM LOCAL DATA ==============================
@@ -64,11 +108,11 @@ const CAT=DATA.categories;
 const ACCENT='#a8d94f', ACCENT_DEEP='#83d63a';
 const NODES=[];
 NODES.push({id:DATA.root.id,type:'root',label:DATA.root.label,blurb:DATA.root.blurb});
-DATA.hubs.forEach(h=>NODES.push({id:h.id,type:'hub',cat:h.cat,label:h.label,blurb:h.blurb}));
-DATA.groups.forEach(g=>NODES.push({id:g.id,type:'group',cat:g.cat,label:g.label,blurb:g.blurb}));
+DATA.hubs.forEach(h=>NODES.push({id:h.id,type:'hub',cat:h.cat,label:h.label,blurb:h.blurb,ftype:h.ftype,facts:h.facts,shape:h.shape}));
+DATA.groups.forEach(g=>NODES.push({id:g.id,type:'group',cat:g.cat,label:g.label,blurb:g.blurb,ftype:g.ftype,facts:g.facts,shape:g.shape}));
 DATA.leaves.forEach(l=>NODES.push({id:l.id,type:'leaf',group:l.group,shape:l.shape,tag:l.tag,label:l.label,date:l.date,blurb:l.blurb,path:l.path}));
 const EDGES=[];
-DATA.hubs.forEach(h=>EDGES.push({s:DATA.root.id,t:h.id,kind:'root',label:'a department of XO'}));
+DATA.hubs.forEach(h=>EDGES.push({s:DATA.root.id,t:h.id,kind:'root',label:DATA.meta.rootEdgeLabel||'a department of XO'}));
 DATA.groups.forEach(g=>EDGES.push({s:g.cat,t:g.id,kind:'hg',label:'part of'}));
 DATA.leaves.forEach(l=>EDGES.push({s:l.group,t:l.id,kind:'rg',label:'part of'}));
 DATA.ties.forEach(x=>EDGES.push({s:x.s,t:x.t,kind:'x',label:x.label}));
@@ -85,11 +129,31 @@ const LEAVES=NODES.filter(n=>n.type==='leaf');
 const GROUPS=NODES.filter(n=>n.type==='group');
 const HUBS=NODES.filter(n=>n.type==='hub');
 const XCOUNT=EDGES.filter(e=>e.kind==='x').length;
-document.getElementById('q').placeholder=`Search ${LEAVES.length} artifacts…`;
+/* Dataset-provided copy, with the artifact map's wording as the default */
+const NOUN=DATA.meta.noun||'artifacts';
+document.getElementById('q').placeholder=`Search ${LEAVES.length} ${NOUN}…`;
 document.getElementById('fmeta').textContent=
-  `${LEAVES.length} artifacts · ${GROUPS.length} clusters · ${EDGES.length} links · mapped ${DATA.meta.mappedOn} · data: ${DATA_SOURCE}`;
-document.getElementById('intro-p').textContent=
+  `${LEAVES.length} ${NOUN} · ${GROUPS.length} clusters · ${EDGES.length} links · mapped ${DATA.meta.mappedOn} · data: ${DATA_SOURCE}`;
+document.getElementById('intro-p').textContent=DATA.meta.intro||
   `Wander through ${LEAVES.length} artifacts across four departments of XO: the repos, papers, decks, and experiments that bind thirteen months of work together.`;
+if(DATA.meta.introTitle)document.querySelector('#intro h1').textContent=DATA.meta.introTitle;
+if(DATA.meta.introEyebrow)document.querySelector('#intro .eyebrow').textContent=DATA.meta.introEyebrow;
+if(DATA.meta.timelineTitle)document.querySelector('#view-time .thead h2').textContent=DATA.meta.timelineTitle;
+if(DATA.meta.timelineSub)document.getElementById('tsub').textContent=DATA.meta.timelineSub;
+{ /* scrub ticks follow the dataset's own range (year shown when it changes) */
+  const tk=document.querySelector('#view-time .ticks');
+  const t0=+new Date(DATA.timeline.start+'T00:00:00'),t1=+new Date(DATA.timeline.end+'T00:00:00');
+  if(tk&&t1>t0){
+    let py=null;
+    tk.innerHTML=[0,.25,.5,.75,1].map((f,i)=>{
+      const d=new Date(t0+(t1-t0)*f);
+      const mon=d.toLocaleDateString('en-US',{month:'short'}).toUpperCase();
+      const lab=(py===d.getFullYear()&&i<4)?mon:`${mon} ${d.getFullYear()}`;
+      py=d.getFullYear();
+      return `<span>${lab}</span>`;
+    }).join('');
+  }
+}
 
 const colorOf=n=>n.type==='root'?'#e9e4d9':CAT[n.cat].color;
 function radiusOf(n){
@@ -255,6 +319,9 @@ function neighborhood(id,depth){
 function drawShape(c,x,y,r,shape){
   c.beginPath();
   if(shape==='diamond'){const s=r*1.25;c.moveTo(x,y-s);c.lineTo(x+s,y);c.lineTo(x,y+s);c.lineTo(x-s,y);c.closePath();}
+  else if(shape==='slab'){const w=r*1.55,h=r*.95;c.rect(x-w,y-h,w*2,h*2);}         /* slides: wide 16:10 card */
+  else if(shape==='stack'){const s=r*.92,o=r*.38;                                  /* docs: two offset pages */
+    c.rect(x-s-o,y-s+o,s*2,s*2);c.rect(x-s+o,y-s-o,s*2,s*2);}
   else c.arc(x,y,r,0,Math.PI*2);
 }
 function drawGraph(now){
@@ -337,9 +404,9 @@ function drawGraph(now){
       gc.beginPath();gc.arc(n.x,n.y,n.r,0,Math.PI*2);
       gc.fillStyle=hexA(col,.13);gc.fill();
       gc.strokeStyle=hexA(col,.9);gc.lineWidth=1.4/Math.sqrt(k);gc.stroke();
-      gc.beginPath();gc.arc(n.x,n.y,2.6,0,Math.PI*2);gc.fillStyle=col;gc.fill();
+      drawShape(gc,n.x,n.y,2.6,n.shape);gc.fillStyle=col;gc.fill();
     }else if(n.type==='group'){
-      gc.beginPath();gc.arc(n.x,n.y,n.r,0,Math.PI*2);
+      drawShape(gc,n.x,n.y,n.r,n.shape);
       gc.fillStyle=hexA(col,.22);gc.fill();
       gc.strokeStyle=hexA(col,.8);gc.lineWidth=1.1/Math.sqrt(k);gc.stroke();
       if(!expanded.get(n.id)){
@@ -386,7 +453,7 @@ function drawGraph(now){
       gc.font='500 17px '+SERIF;
       halo(n.label,sx,sy-n.r*k-12,`rgba(233,228,217,${.94*a})`);
       gc.font='400 8.5px '+MONO;
-      halo(`${LEAVES.filter(l=>l.cat===n.cat).length} ARTIFACTS`,sx,sy+n.r*k+16,`rgba(125,120,109,${a})`,.14);
+      halo(`${LEAVES.filter(l=>l.cat===n.cat).length} ${NOUN.toUpperCase()}`,sx,sy+n.r*k+16,`rgba(125,120,109,${a})`,.14);
     }else if(n.type==='group'){
       const on=n.id===hoverId||n.id===selId||(focusSet&&focusSet.has(n.id));
       if(!(on||k>.8))continue;
@@ -635,35 +702,45 @@ chipDefs.forEach(d=>{
 /* legend + counts */
 {
   const lg=document.getElementById('legend');
+  const GLYPH={
+    disc:'<svg width="10" height="10"><circle cx="5" cy="5" r="3.6" fill="#b3ada0"/></svg>',
+    ring:'<svg width="10" height="10"><circle cx="5" cy="5" r="3.1" fill="none" stroke="#b3ada0" stroke-width="1.4"/></svg>',
+    diamond:'<svg width="10" height="10"><rect x="5" y="0.9" width="5.8" height="5.8" fill="#b3ada0" transform="rotate(45 5 5)"/></svg>',
+    stack:'<svg width="11" height="10"><rect x="1" y="3" width="6" height="6" fill="none" stroke="#b3ada0" stroke-width="1"/><rect x="4" y="1" width="6" height="6" fill="#b3ada0"/></svg>',
+    slab:'<svg width="12" height="10"><rect x="0.5" y="2.7" width="11" height="4.6" fill="#b3ada0"/></svg>'
+  };
+  const shapeDefs=DATA.meta.shapeLegend||
+    [{shape:'disc',label:'code'},{shape:'ring',label:'document'},{shape:'diamond',label:'experiment'}];
   lg.innerHTML=Object.values(CAT).map(c=>`<span class="li"><span class="sw" style="background:${c.color}"></span>${c.name}</span>`).join('')+
-   `<span class="li" style="margin-left:6px"><svg width="10" height="10"><circle cx="5" cy="5" r="3.6" fill="#b3ada0"/></svg>code</span>
-    <span class="li"><svg width="10" height="10"><circle cx="5" cy="5" r="3.1" fill="none" stroke="#b3ada0" stroke-width="1.4"/></svg>document</span>
-    <span class="li"><svg width="10" height="10"><rect x="5" y="0.9" width="5.8" height="5.8" fill="#b3ada0" transform="rotate(45 5 5)"/></svg>experiment</span>`;
+    shapeDefs.map((d,i)=>`<span class="li"${i===0?' style="margin-left:6px"':''}>${GLYPH[d.shape]||GLYPH.disc}${esc(d.label)}</span>`).join('');
   document.getElementById('counts').textContent=
-    `${LEAVES.length} artifacts · ${GROUPS.length} clusters · ${EDGES.length} links · ${XCOUNT} cross-ties`;
+    `${LEAVES.length} ${NOUN} · ${GROUPS.length} clusters · ${EDGES.length} links · ${XCOUNT} cross-ties`;
 }
 
 /* ============================== HOVER CARD ============================== */
 const hc=document.getElementById('hc');
 function showHC(n,mx,my){
   const col=n.type==='root'?ACCENT_DEEP:CAT[n.cat].color;
-  const kick=n.type==='hub'?'Department':n.type==='group'?'Cluster':n.type==='root'?'The center':`${CAT[n.cat].name} · ${n.tag}`;
+  const KICK=DATA.meta.kickers||{};
+  const kick=n.type==='hub'?`${KICK.hub||'Department'}${n.ftype?' · '+(TYPE_LABEL[n.ftype]||''):''}`
+    :n.type==='group'?(n.ftype?`${TYPE_LABEL[n.ftype]||'Cluster'}`:(KICK.group||'Cluster'))
+    :n.type==='root'?'The center':`${CAT[n.cat].name} · ${n.tag}`;
   const art=`linear-gradient(155deg, ${hexA(col,.24)}, ${hexA(col,.03)} 68%)`;
   let rows='';
   if(n.type==='leaf'){
     rows=`<dl>
-      <dt>Born</dt><dd>${fmtDate(n.date)}</dd>
+      <dt>${esc(DATA.meta.leafDateLabel||'Born')}</dt><dd>${fmtDate(n.date)}</dd>
       <dt>Where</dt><dd class="mono">${esc(n.path)}</dd>
       <dt>Ties</dt><dd>${n.degree-1} connection${n.degree-1===1?'':'s'} · ${esc(byId.get(n.group).label)}</dd>
     </dl>`;
   }else if(n.type==='group'){
     const kids=LEAVES.filter(l=>l.group===n.id);
     const d0=kids.reduce((m,x)=>x.date<m?x.date:m,'9999'),d1=kids.reduce((m,x)=>x.date>m?x.date:m,'0000');
-    rows=`<dl><dt>Holds</dt><dd>${kids.length} artifacts</dd>
+    rows=`<dl><dt>Holds</dt><dd>${kids.length} ${NOUN}</dd>
       <dt>Span</dt><dd>${fmtMY(+new Date(d0))} to ${fmtMY(+new Date(d1))}</dd></dl>`;
   }else{
     const kids=n.type==='hub'?LEAVES.filter(l=>l.cat===n.cat):LEAVES;
-    rows=`<dl><dt>Holds</dt><dd>${kids.length} artifacts</dd></dl>`;
+    rows=`<dl><dt>Holds</dt><dd>${kids.length} ${NOUN}</dd></dl>`;
   }
   hc.innerHTML=`
     <div class="art" style="background:${art}">
@@ -684,37 +761,146 @@ function hideHC(){hc.classList.remove('is-on');hoverId=null;}
 
 /* ============================== DETAIL PANEL ============================== */
 const panel=document.getElementById('panel');
+/* Folder archetypes: every folder is one of five (see space_index.py's
+   _TYPE_SHAPE). The panel renders a type-specific overview instead of a
+   connections list; payloads without ftype (the sessions space) keep the
+   legacy connections panel. */
+const TYPE_LABEL={app:'App',readme:'One-pager',docs:'Docs',slides:'Slides',unknown:'Unknown'};
+const typeOf=n=>n.ftype?n:(n.type==='leaf'&&byId.get(n.group)?.ftype?byId.get(n.group):null);
+const dl=pairs=>{
+  const rows=pairs.filter(([,v])=>v!==null&&v!==undefined&&v!=='').map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v}</dd>`).join('');
+  return rows?`<dl class="pfacts">${rows}</dl>`:'';
+};
+const chips=items=>items&&items.length?`<div class="fchips">${items.map(t=>`<span>${esc(t)}</span>`).join('')}</div>`:'';
+/* ---- search-result card: the panel reads like a SERP entry — breadcrumb,
+   linked title, snippet, one meta line, then "quick links" (sitelinks) to
+   the most relevant nodes inside. ---- */
+function crumbOf(n){
+  if(n.type==='root')return DATA.meta.title||'Space';
+  const proj=CAT[n.cat]?.name||'';
+  if(n.type==='hub')return `${DATA.meta.title||'Space'} › ${proj}`;
+  if(n.type==='group')return [proj,...n.label.split(' · ')].join(' › ');
+  const dirs=(n.blurb||'').split('/');dirs.pop();
+  return [proj,...dirs].join(' › ');
+}
+function titleOf(n,carrier){
+  const f=carrier?.facts||{};
+  if(n.type==='leaf')return n.label;
+  return f.title||f.name||n.label;
+}
+function snippetOf(n,carrier){
+  const f=carrier?.facts||{},t=carrier?.ftype;
+  if(n.type==='leaf')return `${n.tag} file in ${esc(byId.get(n.group)?.label||'')} · ${fmtDate(n.date)}.`;
+  if(t==='readme'&&f.excerpt)return f.excerpt;
+  if(t==='app'&&f.description)return f.description;
+  if(t==='docs')return `Documentation${f.pages?`: ${f.pages} page${f.pages===1?'':'s'}`:''}${f.sections&&f.sections.length?` across ${f.sections.join(', ')}`:''}.`;
+  if(t==='slides'&&f.decks&&f.decks.length)return `Deck${f.decks.length===1?'':'s'}: ${f.decks.map(d=>d.name).join(', ')}.`;
+  return n.blurb||'';
+}
+function metaLineOf(carrier){
+  const f=carrier?.facts||{},t=carrier?.ftype,parts=[];
+  if(t)parts.push(TYPE_LABEL[t]||t);
+  if(t==='app'&&f.language)parts.push(f.language);
+  if(t==='docs'&&f.pages)parts.push(`${f.pages} pages`);
+  if(t==='readme'&&f.words)parts.push(`${f.words.toLocaleString()} words`);
+  if(t==='slides'&&f.decks){const s=f.decks.reduce((a,d)=>a+(d.slides||0),0);parts.push(`${f.decks.length} deck${f.decks.length===1?'':'s'}${s?` · ${s} slides`:''}`);}
+  if(f.files)parts.push(`${f.files} files`);
+  if(t==='app'&&f.tests)parts.push(`${f.tests} tests`);
+  if(f.types)Object.entries(f.types).sort((a,b)=>b[1]-a[1]).slice(0,3)
+    .forEach(([k,v])=>parts.push(`${(TYPE_LABEL[k]||k).toLowerCase()} ×${v}`));
+  return parts.join(' · ');
+}
+const _KEY_NAMES=['readme','index','package.json','pyproject.toml','main','server','app'];
+function _keyScore(l){
+  const base=l.label.toLowerCase();
+  for(let i=0;i<_KEY_NAMES.length;i++)if(base.startsWith(_KEY_NAMES[i]))return 100-i;
+  return Math.min(40,(l.degree||1)*4)+(l.date?+new Date(l.date)/1e13:0);
+}
+function quickLinks(n){
+  let items=[];
+  if(n.type==='group')items=LEAVES.filter(l=>l.group===n.id)
+    .sort((a,b)=>_keyScore(b)-_keyScore(a));
+  else if(n.type==='hub')items=GROUPS.filter(g=>g.cat===n.cat)
+    .sort((a,b)=>((b.facts?.files||0)-(a.facts?.files||0)));
+  else if(n.type==='root')items=[...HUBS].sort((a,b)=>((b.facts?.files||0)-(a.facts?.files||0)));
+  else if(n.type==='leaf'){
+    const parent=byId.get(n.group);
+    items=[...(parent?[parent]:[]),...LEAVES.filter(l=>l.group===n.group&&l.id!==n.id)
+      .sort((a,b)=>_keyScore(b)-_keyScore(a))];
+  }
+  return items.slice(0,6);
+}
+function quickLinksHtml(n){
+  const links=quickLinks(n);
+  if(!links.length)return '';
+  const rows=links.map(o=>{
+    const meta=o.type==='leaf'?`${o.tag}${o.date?' · '+o.date.slice(0,7):''}`
+      :o.type==='group'?`${(TYPE_LABEL[o.ftype]||'folder').toLowerCase()} · ${o.facts?.files||''} files`
+      :`${(TYPE_LABEL[o.ftype]||'project').toLowerCase()}`;
+    return `<button class="qlink" data-id="${o.id}">
+      <span class="qname">${esc(o.type==='leaf'?o.label:o.label)}</span>
+      <span class="qmeta">${esc(meta)}</span>
+    </button>`;
+  }).join('');
+  return `<div class="psec"><h4>Quick links</h4><div class="sitelinks">${rows}</div></div>`;
+}
+function resultCard(n,carrier){
+  const snip=snippetOf(n,carrier);
+  const meta=metaLineOf(carrier);
+  return `<div class="gres">
+    <div class="rcrumb">${esc(crumbOf(n))}</div>
+    <button class="rtitle" data-id="${n.id}" title="Zoom to this node">${esc(titleOf(n,carrier))}</button>
+    ${meta?`<div class="rmeta">${esc(meta)}</div>`:''}
+    ${snip?`<p class="rsnip">${esc(snip)}</p>`:''}
+  </div>`;
+}
 function openPanel(n){
   const col=n.type==='root'?ACCENT_DEEP:CAT[n.cat].color;
-  const kick=n.type==='hub'?`Department · ${LEAVES.filter(l=>l.cat===n.cat).length} artifacts`
-    :n.type==='group'?`${CAT[n.cat].name} · cluster`
+  const carrier=typeOf(n);
+  const tlabel=carrier?TYPE_LABEL[carrier.ftype]||'Unknown':null;
+  const kick=n.type==='hub'?`${(DATA.meta.kickers||{}).hub||'Department'}${tlabel?' · '+tlabel:''} · ${LEAVES.filter(l=>l.cat===n.cat).length} ${NOUN}`
+    :n.type==='group'?`${CAT[n.cat].name} · ${(tlabel||((DATA.meta.kickers||{}).group||'cluster')).toLowerCase()}`
     :n.type==='root'?'The center'
-    :`${CAT[n.cat].name} · ${n.tag}`;
-  const conns=n.adj
-    .filter(({other})=>byId.get(other).type!=='root'||n.type==='hub')
-    .sort((p,q)=>(p.e.kind==='x'?0:1)-(q.e.kind==='x'?0:1))
-    .slice(0,24)
-    .map(({e,other})=>{
-      const o=byId.get(other);
-      let rel;
-      if(e.kind==='x')rel=(e.s===n.id?'':'← ')+e.label;
-      else rel=o.type==='group'||o.type==='hub'||o.type==='root'?'part of':'holds';
-      return `<button class="conn" data-id="${o.id}">
-        <span class="cdot" style="background:${o.type==='root'?ACCENT_DEEP:CAT[o.cat]?.color||'#e9e4d9'}"></span>
-        <span>${esc(o.label)}</span>
-        <span class="rel">${esc(rel)}</span>
-        <span class="yr">${o.date?o.date.slice(0,7):''}</span>
-      </button>`;
-    }).join('');
+    :`${CAT[n.cat].name} · ${n.tag}${tlabel?' · in '+tlabel.toLowerCase()+' folder':''}`;
+  let body;
+  if(n.type==='root'&&GROUPS.some(g=>g.ftype)){
+    /* the center: result card + census + the biggest projects as sitelinks */
+    const counts={};GROUPS.forEach(g=>{counts[g.ftype||'unknown']=(counts[g.ftype||'unknown']||0)+1;});
+    body=`${resultCard(n,null)}
+      <div class="psec"><h4>Folder types</h4>${dl(Object.entries(TYPE_LABEL).map(([t,l])=>[l,counts[t]||null]))}</div>
+      ${quickLinksHtml(n)}`;
+  }else if(carrier){
+    body=`${resultCard(n,carrier)}${quickLinksHtml(n)}`;
+  }else{
+    /* legacy panel (sessions space): blurb + connections */
+    const conns=n.adj
+      .filter(({other})=>byId.get(other).type!=='root'||n.type==='hub')
+      .sort((p,q)=>(p.e.kind==='x'?0:1)-(q.e.kind==='x'?0:1))
+      .slice(0,24)
+      .map(({e,other})=>{
+        const o=byId.get(other);
+        let rel;
+        if(e.kind==='x')rel=(e.s===n.id?'':'← ')+e.label;
+        else rel=o.type==='group'||o.type==='hub'||o.type==='root'?'part of':'holds';
+        return `<button class="conn" data-id="${o.id}">
+          <span class="cdot" style="background:${o.type==='root'?ACCENT_DEEP:CAT[o.cat]?.color||'#e9e4d9'}"></span>
+          <span>${esc(o.label)}</span>
+          <span class="rel">${esc(rel)}</span>
+          <span class="yr">${o.date?o.date.slice(0,7):''}</span>
+        </button>`;
+      }).join('');
+    body=`<div class="psec"><h4>About</h4><p>${esc(n.blurb||'')}</p></div>
+      ${conns?`<div class="psec"><h4>Connections</h4>${conns}</div>`:''}`;
+  }
+  const serp=carrier||(n.type==='root'&&GROUPS.some(g=>g.ftype));
   document.getElementById('panel-scroll').innerHTML=`
-    <div class="poster" style="background:radial-gradient(120% 100% at 20% 0%, ${hexA(col,.20)}, transparent 62%)">
+    <div class="poster${serp?' slim':''}" style="background:radial-gradient(120% 100% at 20% 0%, ${hexA(col,.20)}, transparent 62%)">
       <div class="kicker">${esc(kick)}</div>
-      <h3>${esc(n.label)}</h3>
+      ${serp?'':`<h3>${esc(n.label)}</h3>
       ${n.date?`<div class="sub">${fmtDate(n.date)}</div>`:''}
-      ${n.path?`<div class="path">${esc(n.path)}</div>`:''}
+      ${n.path?`<div class="path">${esc(n.path)}</div>`:''}`}
     </div>
-    <div class="psec"><h4>About</h4><p>${esc(n.blurb||'')}</p></div>
-    ${conns?`<div class="psec"><h4>Connections</h4>${conns}</div>`:''}
+    ${body}
     <div class="pacts">
       ${n.type==='leaf'||n.type==='group'?`<button data-act="timeline">Show on timeline</button>`:''}
       <button data-act="from">Path from here</button>
@@ -726,9 +912,10 @@ function openPanel(n){
 function closePanel(){panel.classList.remove('is-open');}
 document.getElementById('panel-close').addEventListener('click',()=>{clearFocus();clearPath();});
 panel.addEventListener('click',e=>{
-  const c=e.target.closest('.conn');
-  if(c){
+  const c=e.target.closest('.conn,.qlink,.rtitle');
+  if(c&&c.dataset.id){
     const n=byId.get(c.dataset.id);
+    if(!n)return;
     ensureShown(n);
     go('graph');
     select(n.id,1);
@@ -778,13 +965,13 @@ function acRow(n,idx,q){
     ?esc(n.label.slice(0,idx))+'<em>'+esc(n.label.slice(idx,idx+q.length))+'</em>'+esc(n.label.slice(idx+q.length))
     :esc(n.label);
   const meta=n.type==='hub'?'dept':n.type==='group'?'cluster':n.tag;
-  const dia=n.shape==='diamond'?' dia':'';
+  const dia=n.shape==='diamond'?' dia':n.shape==='stack'?' stk':n.shape==='slab'?' slb':'';
   return {col,name,meta,dia};
 }
 function wireAC(input,acEl,onPick){
   let items=[],act=-1;
   const render=q=>{
-    if(!items.length&&q){acEl.innerHTML=`<div class="empty">No match in this workspace<small>${LEAVES.length} artifacts mapped</small></div>`;acEl.classList.add('is-open');return;}
+    if(!items.length&&q){acEl.innerHTML=`<div class="empty">No match in this workspace<small>${LEAVES.length} ${NOUN} mapped</small></div>`;acEl.classList.add('is-open');return;}
     acEl.innerHTML=items.map(([sc,n,idx],i)=>{
       const r=acRow(n,idx,q);
       return `<button class="${i===act?'is-active':''}" data-i="${i}">
@@ -940,6 +1127,18 @@ function buildTimeline(){
       el=document.createElementNS(SVGNS,'circle');
       el.setAttribute('cx',n.tx);el.setAttribute('cy',n.ty);el.setAttribute('r',r-.5);
       el.setAttribute('fill','none');el.setAttribute('stroke',col);el.setAttribute('stroke-width',1.5);
+    }else if(n.shape==='slab'){
+      el=document.createElementNS(SVGNS,'rect');
+      const w=r*2.2,h=r*1.4;
+      el.setAttribute('x',n.tx-w/2);el.setAttribute('y',n.ty-h/2);
+      el.setAttribute('width',w);el.setAttribute('height',h);
+      el.setAttribute('fill',col);
+    }else if(n.shape==='stack'){
+      el=document.createElementNS(SVGNS,'rect');
+      const s=r*1.55;
+      el.setAttribute('x',n.tx-s/2);el.setAttribute('y',n.ty-s/2);
+      el.setAttribute('width',s);el.setAttribute('height',s);
+      el.setAttribute('fill',col);
     }else{
       el=document.createElementNS(SVGNS,'circle');
       el.setAttribute('cx',n.tx);el.setAttribute('cy',n.ty);el.setAttribute('r',r);
@@ -999,7 +1198,7 @@ function traceOnTimeline(n){
     document.getElementById('tclear').hidden=false;
     const m0=fmtMY(+new Date(list[0].date)),m1=fmtMY(+new Date(list[list.length-1].date));
     document.getElementById('tsub').textContent=
-      `${n.label}: ${list.length} artifact${list.length===1?'':'s'}, ${m0===m1?m0:m0+' to '+m1}.`;
+      `${n.label}: ${list.length} ${list.length===1?NOUN.replace(/s$/,''):NOUN}, ${m0===m1?m0:m0+' to '+m1}.`;
     if(!REDUCED){
       tNow=+new Date(list[0].date+'T00:00:00')-86400000*7;
       startPlay();
@@ -1073,6 +1272,7 @@ document.getElementById('tplay').addEventListener('click',()=>{
   if(tNow>=T1-3600000)tNow=T0;
   startPlay();
 });
+document.getElementById('tsix')?.addEventListener('click',()=>go('six'));
 tsvg.addEventListener('pointermove',e=>{
   const t=e.target;
   if(t.dataset&&t.dataset.id){showHC(byId.get(t.dataset.id),e.clientX,e.clientY);}
@@ -1119,15 +1319,15 @@ function shortest(aId,bId){
 function relText(e,fromId){
   if(!e)return'';
   if(e.kind==='x')return e.label;
-  if(e.kind==='root')return'a department of XO';
+  if(e.kind==='root')return DATA.meta.rootEdgeLabel||'a department of XO';
   const child=byId.get(e.t),parent=byId.get(e.s);
   return fromId===child.id?`part of ${parent.label}`:`holds ${child.label}`;
 }
 function runSix(){
   const err=document.getElementById('sixerr');
   err.textContent='';
-  if(!sixA||!sixB){err.textContent='Pick two artifacts first.';return;}
-  if(sixA.id===sixB.id){err.textContent='That is the same artifact. Try two different names.';return;}
+  if(!sixA||!sixB){err.textContent=`Pick two ${NOUN} first.`;return;}
+  if(sixA.id===sixB.id){err.textContent=`That is the same ${NOUN.replace(/s$/,'')}. Try two different names.`;return;}
   sixPath=shortest(sixA.id,sixB.id);
   if(!sixPath){err.textContent=`No route connects ${sixA.label} and ${sixB.label} in this space.`;return;}
   const deg=sixPath.length-1;
@@ -1137,7 +1337,7 @@ function runSix(){
     <div class="chain">${sixPath.map((h,i)=>{
       const n=byId.get(h.id);
       const col=n.cat?CAT[n.cat].color:'#e9e4d9';
-      const meta=n.type==='hub'?'department':n.type==='group'?'cluster':n.tag;
+      const meta=n.type==='hub'?((DATA.meta.kickers||{}).hub||'department').toLowerCase():n.type==='group'?((DATA.meta.kickers||{}).group||'cluster').toLowerCase():n.tag;
       const card=`<div class="ncard" style="animation-delay:${i*130}ms">
         <span class="cdot" style="background:${col}"></span>
         <span class="nm">${esc(n.label)}</span><span class="meta">${esc(meta||'')}</span></div>`;
@@ -1151,7 +1351,7 @@ function runSix(){
 function chainSentence(e){
   const s=byId.get(e.s),t=byId.get(e.t);
   if(e.kind==='x')return`${s.label} ${e.label} ${t.label}`;
-  if(e.kind==='root')return`${t.label} is a department of XO`;
+  if(e.kind==='root')return`${t.label} is ${DATA.meta.rootEdgeLabel||'a department of XO'}`;
   return`${t.label} is part of ${s.label}`;
 }
 function traceSixOnGraph(){

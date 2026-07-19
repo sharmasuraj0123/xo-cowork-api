@@ -26,8 +26,10 @@ There are two deliberately separate execution **planes**. Keep them apart.
 | Instantiated | once as `ai_client` in `server.py` | per request via the capability loader |
 | Status | frozen, backward-compatible | where all new work happens |
 
-Codex is **only** a Plane-A model client (no adapter). Plane A never routes
-through the dispatcher; Plane B never touches `/ask_question`.
+Codex chat is **only** a Plane-A model client (no dispatch adapter). Its
+read-only `session_telemetry` provider intentionally has no `adapter.py`, so it
+does not register as a Plane-B chat backend. Plane A never routes through the
+dispatcher; Plane B never touches `/ask_question`.
 
 ---
 
@@ -118,6 +120,14 @@ Capabilities in use today:
 | `streaming` | SSE shaping | ✓ | ✓ | ✓ |
 | `visualizer_source` | visualizer feed | ✓ | ✓ | ✓ |
 | `routes` | agent-owned `APIRouter` (active-only) | ✓ | — | ✓ |
+
+Most capabilities resolve for the active agent. Host-level observability is the
+exception: `list_capability_providers("session_telemetry")` discovers every
+adapter package that implements that read-only capability, even when it has no
+`adapter.py`. `services/cowork_agent/visualizer/session_telemetry.py` uses this
+to merge Claude Code (Argus) and Codex state/rollout telemetry without naming
+either runtime in core. One failed source degrades independently; only an
+all-source failure makes the Sessions endpoint unavailable.
 
 `claude_code` has no `chat` capability on purpose: `routers/cowork_agent/chat.py`
 falls through to the shared `AgentDispatcher` when `chat`/`handle_prompt` is

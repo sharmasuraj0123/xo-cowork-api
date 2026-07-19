@@ -295,6 +295,7 @@ show_logs() {
 install_deps() {
     local venv_dir="$SCRIPT_DIR/venv"
     local req="$SCRIPT_DIR/requirements.txt"
+    local experiment_req="$SCRIPT_DIR/requirements-experiments.txt"
 
     if [ ! -f "$req" ]; then
         log_error "requirements.txt not found at $req"
@@ -323,18 +324,61 @@ install_deps() {
         log_error "pip install -r requirements.txt failed"
         return 1
     fi
+    if [ -f "$SCRIPT_DIR/../research/agents-api-python-preview/pyproject.toml" ]; then
+        log "Installing local Agents API SDK for Space Experiments..."
+        if ! (cd "$SCRIPT_DIR" && "$venv_dir/bin/python" -m pip install -r "$experiment_req"); then
+            log_error "Agents API SDK install failed"
+            return 1
+        fi
+    else
+        log_warn "Agents API SDK checkout not found; Experiment launches will stay disabled"
+    fi
+    build_experiment_image || return 1
     log_success "Dependencies installed (venv: $venv_dir)"
+}
+
+build_experiment_image() {
+    local base_context="$SCRIPT_DIR/../research/agents-api-python-preview/examples/self_hosted/docker"
+    local experiment_context="$SCRIPT_DIR/docker/experiment"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        log_warn "Docker not found; skipping the Experiment sandbox image"
+        return 0
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        log_warn "Docker daemon unavailable; skipping the Experiment sandbox image"
+        return 0
+    fi
+    if ! docker image inspect agent-api-sandbox:latest >/dev/null 2>&1; then
+        if [ ! -f "$base_context/Dockerfile" ]; then
+            log_error "Agents API Docker example not found at $base_context"
+            return 1
+        fi
+        log "Building the Agents API base sandbox image..."
+        if ! docker build --tag agent-api-sandbox:latest "$base_context"; then
+            log_error "Agents API base sandbox image build failed"
+            return 1
+        fi
+    fi
+
+    log "Building the XO Experiment sandbox image..."
+    if ! docker build --tag xo-experiment-sandbox:latest "$experiment_context"; then
+        log_error "XO Experiment sandbox image build failed"
+        return 1
+    fi
+    log_success "Experiment image ready: xo-experiment-sandbox:latest"
 }
 
 case "${1:-restart}" in
     install) install_deps ;;
+    experiment-image) build_experiment_image ;;
     start)   start_api ;;
     stop)    stop_api ;;
     restart) restart_api ;;
     status)  status_api ;;
     logs)    show_logs ;;
     *)
-        echo "Usage: $0 {install|start|stop|restart|status|logs}"
+        echo "Usage: $0 {install|experiment-image|start|stop|restart|status|logs}"
         exit 1
         ;;
 esac

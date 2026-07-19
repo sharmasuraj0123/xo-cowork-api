@@ -24,7 +24,7 @@
 
   /* ---------------- topbar ---------------- */
   .topbar{
-    display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:20px;
+    display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:20px;
     padding:0 18px;border-bottom:1px solid var(--line);
     background:linear-gradient(180deg,#0d0f13,#0b0c0f);position:relative;z-index:60;
   }
@@ -32,10 +32,23 @@
   .brand .mark{align-self:center;display:flex;filter:drop-shadow(0 0 9px rgba(131,214,58,.35))}
   .brand b{font:600 19px var(--serif);letter-spacing:.06em;color:var(--ink)}
   .brand span{font:400 10px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
-  .tabs{display:flex;gap:2px;background:var(--bg-2);border:1px solid var(--line);border-radius:999px;padding:3px}
+  .tmid{display:flex;align-items:center;justify-content:center;gap:10px;min-width:0;overflow:hidden}
+  /* the Projects/Sessions space switcher: same capsule as .tabs, but its
+     active pill is accent-tinted (not solid) so the view tab stays the
+     stronger "you are here" signal */
+  .modesw{display:flex;gap:2px;flex:none;background:var(--bg-2);border:1px solid var(--line);border-radius:999px;padding:3px}
+  .modesw button{
+    font:400 10.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2);
+    padding:7px 15px;border-radius:999px;flex:none;transition:color .16s var(--ease),background .16s var(--ease);
+  }
+  .modesw button:hover{color:var(--ink)}
+  .modesw button.is-on{background:rgba(168,217,79,.14);color:var(--accent);font-weight:600}
+  .tabs{display:flex;gap:2px;min-width:0;max-width:min(100%,720px);overflow-x:auto;scrollbar-width:none;
+    background:var(--bg-2);border:1px solid var(--line);border-radius:999px;padding:3px}
+  .tabs::-webkit-scrollbar{display:none}
   .tabs button{
     font:400 10.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2);
-    padding:7px 15px;border-radius:999px;transition:color .16s var(--ease),background .16s var(--ease);
+    padding:7px 15px;border-radius:999px;flex:none;transition:color .16s var(--ease),background .16s var(--ease);
   }
   .tabs button:hover{color:var(--ink)}
   .tabs button.is-on{background:var(--accent);color:#14100a;font-weight:600}
@@ -99,8 +112,9 @@
   .ac button:hover,.ac button.is-active{background:var(--bg-3)}
   .ac .tdot{width:8px;height:8px;border-radius:50%;flex:none}
   .ac .tdot.dia{border-radius:2px;rotate:45deg}
+  .ac .tdot.stk{border-radius:1.5px}
+  .ac .tdot.slb{border-radius:1.5px;width:11px;height:6px}
   .ac em{font-style:normal;color:var(--accent)}
   .ac .meta{margin-left:auto;font:400 10px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);white-space:nowrap}
   .ac .empty{padding:12px;color:var(--ink-3);font-size:12.5px}
   .ac .empty small{display:block;color:var(--ink-4);margin-top:2px}
-

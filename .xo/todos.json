@@ -1,0 +1,139 @@
+{
+  "$schema": "./schema/todos.schema.json",
+  "schema": 1,
+  "updated_at": "2026-07-18T22:05:58Z",
+  "sessions": {
+    "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
+      "runtime": "claude_code",
+      "source_file": null,
+      "session_started_at": "2026-07-14T18:28:49.664Z",
+      "todos": []
+    },
+    "codex:launch-desk-20260719": {
+      "runtime": "codex",
+      "source_file": null,
+      "session_started_at": null,
+      "todos": [
+        {
+          "id": "a0670912",
+          "content": "Resolve current OpenAI guidance and live API credential",
+          "status": "completed",
+          "description": "Use official current Agents SDK/model guidance and confirm the server can receive OPENAI_API_KEY without exposing it.",
+          "active_form": "Resolving OpenAI guidance and credential"
+        },
+        {
+          "id": "f75eed89",
+          "content": "Build Launch Desk backend and agent tools",
+          "status": "cancelled",
+          "description": "Create the FastAPI streaming route, Agents SDK setup, tool modules, schemas, and error handling.",
+          "active_form": "Building the Launch Desk backend"
+        },
+        {
+          "id": "0ca7f8e5",
+          "content": "Build the polished Launch Desk frontend",
+          "status": "cancelled",
+          "description": "Create the form, progressive event UI, responsive result workspace, and accessible states.",
+          "active_form": "Building the Launch Desk frontend"
+        },
+        {
+          "id": "25e0e881",
+          "content": "Add tests, README, and validation checklist",
+          "status": "cancelled",
+          "description": "Cover tool behavior and stream serialization, document setup and extension paths, and add the requested checklist.",
+          "active_form": "Adding tests and documentation"
+        },
+        {
+          "id": "28bb8a23",
+          "content": "Validate code and agent modularity",
+          "status": "cancelled",
+          "description": "Run unit/static checks plus the repository modularity and route import gates as applicable.",
+          "active_form": "Validating code and modularity"
+        },
+        {
+          "id": "c150270e",
+          "content": "Verify a real end-to-end streamed launch plan",
+          "status": "cancelled",
+          "description": "Run backend and frontend outside network isolation and confirm one tool event and one model text delta via the local API and UI flow.",
+          "active_form": "Verifying the streamed launch flow"
+        }
+      ]
+    },
+    "codex:commit-telepathy-20260719": {
+      "runtime": "codex",
+      "source_file": null,
+      "session_started_at": null,
+      "todos": [
+        {
+          "id": "928c1de0",
+          "content": "Switch to remote feat/commit-telepathy branch",
+          "status": "completed",
+          "description": "Fetch the requested remote branch, verify it does not track .xo, and create/switch to the local tracking branch without disturbing user work.",
+          "active_form": "Switching to feat/commit-telepathy"
+        },
+        {
+          "id": "d9d3b319",
+          "content": "Build a simple Agent SDK hello-world app",
+          "status": "pending",
+          "description": "Next requested phase after branch and project startup; confirm the exact UI shape before implementation if the target branch does not make it obvious.",
+          "active_form": "Building the Agent SDK hello-world app"
+        },
+        {
+          "id": "e48c126e",
+          "content": "Start and verify the existing project",
+          "status": "completed",
+          "description": "Use the target branch startup instructions and verify the local application responds.",
+          "active_form": "Starting and verifying the project"
+        }
+      ]
+    },
+    "codex:space-audit-20260719": {
+      "runtime": "codex",
+      "source_file": null,
+      "session_started_at": null,
+      "todos": [
+        {
+          "id": "537ba053",
+          "content": "Map the complete /space UI and data flows",
+          "status": "completed",
+          "description": "Inspect the live UI and trace every view, endpoint, calculation, source file, refresh loop, and fallback.",
+          "active_form": "Mapping the /space UI and data flows"
+        },
+        {
+          "id": "19878590",
+          "content": "Write and verify the /space one-page brief",
+          "status": "completed",
+          "description": "Document product utility, architecture, implemented features, conditions, and extension seams with source evidence.",
+          "active_form": "Writing the /space one-page brief"
+        }
+      ]
+    },
+    "codex:space-multisource-20260719": {
+      "runtime": "codex",
+      "source_file": null,
+      "session_started_at": null,
+      "todos": [
+        {
+          "id": "472baf6c",
+          "content": "Test and verify the multi-source Sessions flow",
+          "status": "completed",
+          "description": "Add regression tests, run modularity and import gates, restart the server, and verify combined and isolated source views end to end in the browser.",
+          "active_form": "Verifying multi-source Sessions"
+        },
+        {
+          "id": "b0870251",
+          "content": "Add independent Claude Code and Codex source toggles",
+          "status": "completed",
+          "description": "Render accessible checked-by-default controls and recalculate every Sessions subview from the enabled source set.",
+          "active_form": "Adding session source toggles"
+        },
+        {
+          "id": "24f7e997",
+          "content": "Add Codex session telemetry to the Sessions data pipeline",
+          "status": "completed",
+          "description": "Parse local Codex session metadata, usage, models, and tools; merge it with the existing Claude telemetry while preserving the response contract and modularity rules.",
+          "active_form": "Adding Codex session telemetry"
+        }
+      ]
+    }
+  }
+}

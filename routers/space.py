@@ -18,7 +18,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from services.cowork_agent.visualizer.argus_index import build_argus_stats
+from services.cowork_agent.visualizer.session_telemetry import (
+    build_session_telemetry,
+)
+from services.cowork_agent.visualizer.sessions_graph import build_sessions_graph
 from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
@@ -95,34 +98,129 @@ async def space_data():
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
-# Argus telemetry graph — second Space dataset. Same TTL, separate cache slot.
-ARGUS_DB_DEFAULT = "~/.argus/argus.db"
-
+# Multi-runtime session telemetry — second Space dataset. Same TTL, separate
+# cache slot. Individual read-only providers resolve their own storage paths.
 _argus_cache: tuple[float, dict] | None = None
+_sessions_cache_lock: asyncio.Lock | None = None
+_sessions_cache_lock_loop: asyncio.AbstractEventLoop | None = None
+_sessions_build_task: asyncio.Task[dict] | None = None
+
+
+def _get_sessions_cache_lock() -> asyncio.Lock:
+    """Return the lock owned by the current app/test event loop."""
+    global _sessions_cache_lock, _sessions_cache_lock_loop
+    loop = asyncio.get_running_loop()
+    if _sessions_cache_lock is None or _sessions_cache_lock_loop is not loop:
+        _sessions_cache_lock = asyncio.Lock()
+        _sessions_cache_lock_loop = loop
+    return _sessions_cache_lock
+
+
+async def _build_and_cache_sessions() -> dict:
+    """Build once for every concurrent request wave and cache only success."""
+    global _argus_cache
+    try:
+        # SQLite and rollout parsing are synchronous; keep a cold history scan
+        # off FastAPI's event loop.
+        data = await asyncio.to_thread(build_session_telemetry)
+    except Exception as exc:
+        # Full diagnostics stay server-side; callers receive a stable message.
+        print(f"⚠️ session telemetry failed ({exc})")
+        raise
+    _argus_cache = (time.monotonic(), data)
+    return data
+
+
+def _clear_sessions_build_task(task: asyncio.Task[dict]) -> None:
+    global _sessions_build_task
+    if _sessions_build_task is task:
+        _sessions_build_task = None
+
+
+def _schedule_sessions_build_cleanup(task: asyncio.Task[dict]) -> None:
+    # Retrieve a background failure even if the initiating request was
+    # cancelled. Awaiters still receive the same exception from the task.
+    if not task.cancelled():
+        task.exception()
+    # Defer cleanup one loop turn so requests already in the concurrent wave
+    # can observe and await the same completed success or failure.
+    task.get_loop().call_soon(_clear_sessions_build_task, task)
 
 
 @router.get("/data/sessions.json")
 async def sessions_data():
-    """Argus session-telemetry stats for the Space UI's Sessions tab.
+    """All available session-telemetry stats for the Space Sessions tab.
 
-    DB path from ARGUS_DB (env), default ~/.argus/argus.db, expanded at
-    request time. No static fallback: a truthful 503 (the tab shows its
-    error card) beats stale pretty numbers."""
-    global _argus_cache
+    Providers fail independently: one readable source still yields a useful
+    200 response with source status metadata. No static fallback: a truthful
+    503 when every provider is unavailable beats stale pretty numbers."""
+    global _argus_cache, _sessions_build_task
     now = time.monotonic()
     if _argus_cache is not None and now - _argus_cache[0] < SPACE_CACHE_TTL:
         return JSONResponse(_argus_cache[1], headers={"Cache-Control": "no-store"})
 
-    db_path = Path(os.getenv("ARGUS_DB", ARGUS_DB_DEFAULT)).expanduser()
+    # Atomically reuse or create the one build shared by this concurrent wave.
+    async with _get_sessions_cache_lock():
+        now = time.monotonic()
+        if _argus_cache is not None and now - _argus_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(
+                _argus_cache[1], headers={"Cache-Control": "no-store"}
+            )
+        task = _sessions_build_task
+        if task is not None and task.get_loop() is not asyncio.get_running_loop():
+            # Defensive for test/app loop replacement; production uses one loop.
+            task = None
+            _sessions_build_task = None
+        if task is None:
+            task = asyncio.create_task(_build_and_cache_sessions())
+            _sessions_build_task = task
+            task.add_done_callback(_schedule_sessions_build_cleanup)
+
     try:
-        data = build_argus_stats(db_path)
-    except Exception as exc:
-        print(f"⚠️ argus_index failed ({exc})")
+        # A disconnected caller must not cancel the shared build for its peers.
+        data = await asyncio.shield(task)
+    except Exception:
         raise HTTPException(
             status_code=503,
-            detail={"code": "argus_db_unavailable", "message": str(exc)},
+            detail={
+                "code": "argus_db_unavailable",
+                "message": "Session telemetry is temporarily unavailable.",
+            },
         )
-    _argus_cache = (now, data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Sessions rendered as a Space graph — third dataset, for the Graph tab's
+# Output/Sessions toggle. Same TTL, separate cache slot.
+_sessions_graph_cache: tuple[float, dict] | None = None
+
+
+@router.get("/data/sessions_graph.json")
+async def sessions_graph_data():
+    """Session telemetry projected into the Space graph schema.
+
+    Same shape as /space/data/space.json, so the graph renderer (and its
+    Timeline and Six Degrees lenses) consume it unchanged. No static
+    fallback: a truthful 503 beats a stale map."""
+    global _sessions_graph_cache
+    now = time.monotonic()
+    if _sessions_graph_cache is not None and now - _sessions_graph_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_sessions_graph_cache[1],
+                            headers={"Cache-Control": "no-store"})
+
+    try:
+        # Telemetry providers read SQLite and rollout files synchronously;
+        # keep the scan off the event loop.
+        data = await asyncio.to_thread(build_sessions_graph)
+    except Exception as exc:
+        print(f"⚠️ sessions_graph failed ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "argus_db_unavailable",
+                    "message": "Session telemetry is temporarily unavailable."},
+        )
+
+    _sessions_graph_cache = (now, data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 

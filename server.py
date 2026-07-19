@@ -572,6 +572,15 @@ async def lifespan(app: FastAPI):
 
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
+    try:
+        from services.cowork_agent.experiments.runtime import experiment_manager
+
+        stale_warnings = await experiment_manager.reconcile()
+        if stale_warnings:
+            print(f"⚠️ Experiment startup cleanup had {len(stale_warnings)} warning(s)")
+    except Exception as exc:
+        print(f"⚠️ Experiment startup cleanup skipped: {type(exc).__name__}")
+
     yield
 
     # Cleanup background task
@@ -609,6 +618,15 @@ async def lifespan(app: FastAPI):
             await _relay_task
         except asyncio.CancelledError:
             pass
+
+    # Experiment sandboxes are process-owned local-dev resources. Release
+    # their Docker containers and remote Agents API sessions before exit.
+    try:
+        from services.cowork_agent.experiments.runtime import experiment_manager
+
+        await experiment_manager.close()
+    except Exception as exc:
+        print(f"⚠️ Experiment cleanup failed during shutdown: {type(exc).__name__}")
     print("👋 Shutting down XO Cowork API Server...")
 
 

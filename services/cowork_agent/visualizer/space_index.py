@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -81,6 +82,201 @@ def _shape_for(filename: str) -> str:
     if ext in _DOC_EXT:
         return "ring"
     return "diamond"
+
+
+# ---- folder archetypes ------------------------------------------------------
+# Every folder (group) classifies as exactly one of five archetypes; the type
+# drives the node glyph and the detail panel's overview. Rules are ordered by
+# signal strength; they were tuned against the real workspace tree (vendored
+# slides.tsx files, engineering docs/ folders inside app repos, and container
+# folders are the known traps).
+_TYPE_SHAPE = {"app": "disc", "readme": "ring", "docs": "stack",
+               "slides": "slab", "unknown": "diamond"}
+_TYPE_LABEL = {"app": "App", "readme": "One-pager", "docs": "Docs",
+               "slides": "Slides", "unknown": "Unknown"}
+_SLIDE_FILE_EXT = {".pptx", ".key", ".odp"}
+_SLIDE_NAME_EXT = {".md", ".mdx", ".pdf", ".html"}   # slides*/deck* must be prose, not code
+_APP_MANIFESTS = {"package.json", "pyproject.toml", "requirements.txt", "setup.py"}
+# "JS or Python app" means real program source; markup/config (.html/.css/
+# .json/.yml) must not make a drafts folder look like an app.
+_APP_CODE_EXT = {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
+                 ".go", ".rs", ".java", ".c", ".cpp", ".h"}
+_WRITING_EXT = {".md", ".mdx", ".docx", ".pdf", ".txt", ".rst"}
+_ASSET_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp"}
+_FACT_READ_BYTES = 16384        # max bytes read per fact file
+_FACT_MAX_READS = 4             # max content reads per group
+_FACT_DEADLINE_RESERVE_S = 2.0  # stop content reads this close to the deadline
+
+
+def _is_docs_site_signal(rel: str, name: str) -> bool:
+    """Docs-SITE configs only; a bare docs/ folder of md is not docs."""
+    if name in ("mkdocs.yml", "mkdocs.yaml") or name.startswith("docusaurus.config"):
+        return True
+    if name in ("source.config.ts", "source.config.tsx"):  # fumadocs
+        return True
+    if name == "meta.json":
+        parts = rel.lower().split("/")
+        return "docs" in parts or "content" in parts
+    return False
+
+
+def _classify_folder(rels: list[str]) -> str:
+    """One of app/readme/docs/slides/unknown from project-relative paths."""
+    names = [r.rsplit("/", 1)[-1].lower() for r in rels]
+    exts = [("." + n.rsplit(".", 1)[-1]) if "." in n else "" for n in names]
+
+    for n, e in zip(names, exts):
+        if e in _SLIDE_FILE_EXT:
+            return "slides"
+        if (n.startswith("slides") or n.startswith("deck")) and e in _SLIDE_NAME_EXT:
+            return "slides"
+    if any(_is_docs_site_signal(r, n) for r, n in zip(rels, names)):
+        return "docs"
+    if any(n in _APP_MANIFESTS for n in names):
+        return "app"
+
+    meaningful = [e for e in exts if e not in _ASSET_EXT]
+    md_count = sum(1 for e in meaningful if e in (".md", ".mdx"))
+    if len(meaningful) <= 2 and md_count == 1:
+        return "readme"
+    code = sum(1 for e in exts if e in _APP_CODE_EXT)
+    if len(rels) and code >= 1 and code / len(rels) >= 0.5:
+        return "app"
+    if len(rels) and code >= 3 and code / len(rels) >= 0.35:
+        return "app"
+    writing = sum(1 for e in exts if e in _WRITING_EXT)
+    if writing >= 2 and writing / len(rels) >= 0.5:
+        return "docs"
+    return "unknown"
+
+
+def _md_title_excerpt(path: Path) -> tuple[str | None, str | None, int]:
+    """(first heading, first prose paragraph, approx word count) of a markdown
+    file. Skips HTML/badge preambles by scanning for the first '#' heading."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fp:
+            text = fp.read(_FACT_READ_BYTES)
+    except OSError:
+        return None, None, 0
+    title, excerpt = None, None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("#"):
+            title = s.lstrip("#").strip() or None
+            for cand in lines[i + 1:]:
+                c = cand.strip()
+                if not c or c.startswith(("#", "<", "!", "[!", "|", "```", "---")):
+                    if excerpt:
+                        break
+                    continue
+                excerpt = ((excerpt + " ") if excerpt else "") + c
+                if len(excerpt) > 240:
+                    break
+            break
+    if excerpt:
+        excerpt = re.sub(r"[*_`]", "", excerpt)
+        if len(excerpt) > 280:
+            excerpt = excerpt[:277] + "…"
+    return title, excerpt, len(text.split())
+
+
+def _pptx_slide_count(path: Path) -> int | None:
+    try:
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            return sum(1 for n in z.namelist()
+                       if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
+    except Exception:
+        return None
+
+
+def _folder_facts(ftype: str, files: list[Path], rels: list[str],
+                  deadline: float | None) -> dict:
+    """Type-specific facts for the detail panel. Content reads are bounded
+    (count + bytes) and stop entirely near the build deadline."""
+    facts: dict = {"files": len(rels)}
+    ext_counts: dict[str, int] = {}
+    for r in rels:
+        n = r.rsplit("/", 1)[-1]
+        e = ("." + n.rsplit(".", 1)[-1].lower()) if "." in n else "(none)"
+        ext_counts[e] = ext_counts.get(e, 0) + 1
+    facts["exts"] = sorted(ext_counts.items(), key=lambda kv: -kv[1])[:4]
+
+    can_read = deadline is None or time.monotonic() < deadline - _FACT_DEADLINE_RESERVE_S
+    reads = 0
+
+    if ftype == "readme":
+        for f, r in zip(files, rels):
+            if r.lower().endswith((".md", ".mdx")) and can_read and reads < _FACT_MAX_READS:
+                title, excerpt, words = _md_title_excerpt(f)
+                reads += 1
+                facts.update({"title": title, "excerpt": excerpt, "words": words})
+                break
+    elif ftype == "slides":
+        decks = []
+        for f, r in zip(files, rels):
+            name = r.rsplit("/", 1)[-1]
+            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+            if ext in _SLIDE_FILE_EXT:
+                count = None
+                if ext == ".pptx" and can_read and reads < _FACT_MAX_READS:
+                    count = _pptx_slide_count(f)
+                    reads += 1
+                decks.append({"name": name, "slides": count})
+            elif (name.lower().startswith(("slides", "deck"))
+                  and ext in _SLIDE_NAME_EXT):
+                decks.append({"name": name, "slides": None})
+            if len(decks) >= 4:
+                break
+        facts["decks"] = decks
+    elif ftype == "docs":
+        pages = [r for r in rels if r.lower().endswith((".md", ".mdx"))]
+        facts["pages"] = len(pages)
+        sections: list[str] = []
+        for r in pages:
+            seg = r.split("/")[-2] if "/" in r else "(top)"
+            if seg not in sections:
+                sections.append(seg)
+            if len(sections) >= 6:
+                break
+        facts["sections"] = sections
+    elif ftype == "app":
+        names = {r.rsplit("/", 1)[-1].lower(): f for r, f in zip(rels, files)}
+        code = sum(1 for r in rels
+                   if ("." + r.rsplit(".", 1)[-1].lower()) in _CODE_EXT)
+        facts["code_files"] = code
+        facts["tests"] = sum(1 for r in rels
+                             if "test" in r.rsplit("/", 1)[-1].lower())
+        if "package.json" in names:
+            facts["language"] = "JavaScript"
+            if can_read and reads < _FACT_MAX_READS:
+                try:
+                    import json as _json
+                    with open(names["package.json"], encoding="utf-8",
+                              errors="ignore") as fp:
+                        pkg = _json.loads(fp.read(_FACT_READ_BYTES))
+                    facts["name"] = pkg.get("name")
+                    facts["description"] = pkg.get("description")
+                    facts["scripts"] = list(pkg.get("scripts", {}))[:6]
+                except Exception:
+                    pass
+        elif any(m in names for m in ("pyproject.toml", "requirements.txt", "setup.py")):
+            facts["language"] = "Python"
+            target = names.get("pyproject.toml")
+            if target and can_read and reads < _FACT_MAX_READS:
+                try:
+                    with open(target, encoding="utf-8", errors="ignore") as fp:
+                        text = fp.read(_FACT_READ_BYTES)
+                    m = re.search(r'^name\s*=\s*"([^"]+)"', text, re.M)
+                    d = re.search(r'^description\s*=\s*"([^"]+)"', text, re.M)
+                    facts["name"] = m.group(1) if m else None
+                    facts["description"] = d.group(1) if d else None
+                except OSError:
+                    pass
+        else:
+            facts["language"] = "code"
+    return facts
 
 
 def _mtime_date(path: Path) -> str:
@@ -154,21 +350,24 @@ def _git_facts(pdir: Path) -> tuple[dict[str, str], Optional[str], list[list[str
     return created, first_commit, commits
 
 
-def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], list[dict]]:
+def _walk_project(pid: str, cat: str, created_dates: dict,
+                  deadline: float | None = None) -> tuple[list[dict], list[dict]]:
     """Groups + leaves for one project. Level-1 dirs become groups; files at
     any depth roll up into their level-1 group; root files get a root group.
-    Traversal is pruned and stops at MAX_FILES_SCANNED_PER_PROJECT.
+    Each group classifies as one of five folder archetypes (ftype) with
+    type-specific facts; leaves take their group's type glyph. Traversal is
+    pruned and stops at MAX_FILES_SCANNED_PER_PROJECT.
     Raises OSError if the project directory is unreadable (caller skips)."""
     pdir = project_dir(pid)
     groups: list[dict] = []
     leaves: list[dict] = []
     scanned = 0
 
-    def add_leaf(group_id: str, rel: str, f: Path) -> None:
+    def add_leaf(group_id: str, rel: str, f: Path, shape: str) -> None:
         leaves.append({
             "id": f"{pid}:{rel}",
             "group": group_id,
-            "shape": _shape_for(f.name),
+            "shape": shape,
             "tag": (f.suffix.lstrip(".").upper() or "FILE"),
             "label": f.name,
             "date": created_dates.get(rel) or _mtime_date(f),
@@ -176,20 +375,28 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
             "path": f"{pid}/{rel}",
         })
 
+    def emit_classified(files: list[Path], rels: list[str],
+                        gid: str, label: str, blurb_prefix: str = "") -> None:
+        ftype = _classify_folder(rels)
+        facts = _folder_facts(ftype, files, rels, deadline)
+        shape = _TYPE_SHAPE[ftype]
+        for f, rel in zip(files, rels):
+            add_leaf(gid, rel, f, shape)
+        groups.append({
+            "id": gid, "cat": cat, "label": label,
+            "blurb": blurb_prefix or f"{len(files)} files",
+            "ftype": ftype, "facts": facts, "shape": shape,
+        })
+
     entries = sorted(pdir.iterdir(), key=lambda e: e.name)
     root_files = [e for e in entries if e.is_file() and not _is_hidden(e.name)]
     subdirs = [e for e in entries if e.is_dir() and not _is_hidden(e.name)]
 
     if root_files:
-        groups.append({
-            "id": f"g_{pid}_root", "cat": cat,
-            "label": "(root)", "blurb": "Files at the project root.",
-        })
-        for f in root_files:
-            if scanned >= MAX_FILES_SCANNED_PER_PROJECT:
-                break
-            add_leaf(f"g_{pid}_root", f.name, f)
-            scanned += 1
+        kept = root_files[:MAX_FILES_SCANNED_PER_PROJECT]
+        emit_classified(kept, [f.name for f in kept],
+                        f"g_{pid}_root", "(root)", "Files at the project root.")
+        scanned += len(kept)
 
     for d in subdirs:
         if scanned >= MAX_FILES_SCANNED_PER_PROJECT:
@@ -228,12 +435,8 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
             emit_final(files, gid, label)
 
         def emit_final(files: list[Path], gid: str, label: str) -> None:
-            for f in files:
-                add_leaf(gid, f.relative_to(pdir).as_posix(), f)
-            groups.append({
-                "id": gid, "cat": cat,
-                "label": label, "blurb": f"{len(files)} files",
-            })
+            emit_classified(files, [f.relative_to(pdir).as_posix() for f in files],
+                            gid, label)
 
         emit_group(collected, 1, f"g_{pid}_{d.name}", d.name)
 
@@ -346,7 +549,7 @@ def build_space_data() -> dict:
         created_dates, first_commit, p_commits = _git_facts(project_dir(pid))
 
         try:
-            p_groups, p_leaves = _walk_project(pid, cat, created_dates)
+            p_groups, p_leaves = _walk_project(pid, cat, created_dates, deadline)
         except OSError:
             print(f"space_index: skipping unreadable project {pid}")
             continue
@@ -356,9 +559,32 @@ def build_space_data() -> dict:
             "color": _PALETTE[i % len(_PALETTE)],
         }
         hub_angles[cat] = -math.pi / 2 + i * 2 * math.pi / n
+        # The project takes its root folder's archetype when the root has one
+        # (a manifest or docs-site config at the root is the project's real
+        # identity); otherwise the weightiest non-unknown folder wins — asset
+        # dumps (unknown) must not outvote actual content.
+        type_weight: dict[str, int] = {}
+        for g in p_groups:
+            type_weight[g["ftype"]] = (type_weight.get(g["ftype"], 0)
+                                       + int(g["facts"].get("files") or 0))
+        root_group = next((g for g in p_groups if g["id"] == f"g_{pid}_root"), None)
+        known = {t: w for t, w in type_weight.items() if t != "unknown"}
+        if root_group and root_group["ftype"] != "unknown":
+            ptype = root_group["ftype"]
+        elif known:
+            prio = {"app": 0, "docs": 1, "slides": 2, "readme": 3}
+            ptype = max(known, key=lambda t: (known[t], -prio[t]))
+        else:
+            ptype = "unknown"
+        pfacts: dict = {"files": sum(type_weight.values()), "types": type_weight}
+        if root_group and root_group["ftype"] == ptype:
+            for k in ("name", "description", "language", "title", "excerpt"):
+                if root_group["facts"].get(k):
+                    pfacts[k] = root_group["facts"][k]
         hubs.append({
             "id": cat, "cat": cat, "label": display,
             "blurb": str(meta.get("description") or f"Project {display}."),
+            "ftype": ptype, "facts": pfacts, "shape": _TYPE_SHAPE[ptype],
         })
         groups.extend(p_groups)
         leaves.extend(p_leaves)
@@ -392,6 +618,15 @@ def build_space_data() -> dict:
             "tagline": "an xo-projects knowledge graph",
             "mappedOn": today.strftime("%d %B %Y"),
             "workspace": str(root),
+            # Folder-archetype glyphs (see _TYPE_SHAPE); the client's legend,
+            # canvas, and detail panel are all driven by these names.
+            "shapeLegend": [
+                {"shape": "disc", "label": "app"},
+                {"shape": "ring", "label": "one-pager"},
+                {"shape": "stack", "label": "docs"},
+                {"shape": "slab", "label": "slides"},
+                {"shape": "diamond", "label": "unknown"},
+            ],
         },
         "categories": categories,
         "hubAngles": hub_angles,

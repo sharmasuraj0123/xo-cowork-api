@@ -1,0 +1,586 @@
+{
+  "schema": 2,
+  "updated_at": "2026-07-19T06:24:52Z",
+  "rolling": {
+    "7d": {
+      "tokens": {
+        "input": 19554,
+        "output": 195133
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100
+        },
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033
+        }
+      },
+      "by_tool": {
+        "Bash": 85,
+        "Read": 22,
+        "Write": 2,
+        "Edit": 72
+      },
+      "files_edited": 12,
+      "sessions": 1,
+      "active_minutes": 6475
+    },
+    "30d": {
+      "tokens": {
+        "input": 19554,
+        "output": 195133
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100
+        },
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033
+        }
+      },
+      "by_tool": {
+        "Bash": 85,
+        "Read": 22,
+        "Write": 2,
+        "Edit": 72
+      },
+      "files_edited": 12,
+      "sessions": 1,
+      "active_minutes": 6475
+    }
+  },
+  "by_session": {
+    "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
+      "tokens": {
+        "input": 19554,
+        "output": 195133
+      },
+      "files": [
+        ".claude/launch.json",
+        "scripts/install_shared_deps.sh",
+        "services/cowork_agent/visualizer/sessions_graph.py",
+        "routers/space.py",
+        "space_ui/index.html",
+        "space_ui/css/graph.css",
+        "space_ui/js/views/atlas.js",
+        "space_ui/css/base.css",
+        "space_ui/js/app.js",
+        "space_ui/js/views/sessions.js",
+        "space_ui/js/core/registry.js",
+        "services/cowork_agent/visualizer/space_index.py"
+      ],
+      "duration_ms": 388559785,
+      "tools": {
+        "Bash": 85,
+        "Read": 22,
+        "Write": 2,
+        "Edit": 72
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100
+        },
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033
+        }
+      }
+    }
+  },
+  "by_runtime": {
+    "claude_code": {
+      "tokens": {
+        "input": 19554,
+        "output": 195133
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100
+        },
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033
+        }
+      },
+      "by_tool": {
+        "Bash": 85,
+        "Read": 22,
+        "Write": 2,
+        "Edit": 72
+      },
+      "files_edited": 12,
+      "sessions": 1,
+      "active_minutes": 6475
+    }
+  },
+  "by_day": {
+    "2026-07-14": {
+      "tokens": {
+        "input": 19072,
+        "output": 11100,
+        "cache_read": 4057687,
+        "cache_write": 66108
+      },
+      "messages": {
+        "total": 95,
+        "user": 48,
+        "assistant": 47,
+        "toolCalls": 32,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100,
+          "count": 47
+        }
+      },
+      "latency": {
+        "count": 47,
+        "sum_ms": 148321,
+        "min_ms": 1458,
+        "max_ms": 7617,
+        "p95_sample": [
+          3988,
+          1960,
+          2198,
+          2835,
+          2620,
+          7167,
+          3043,
+          4263,
+          1458,
+          2787,
+          2793,
+          4971,
+          2243,
+          2652,
+          2294,
+          2367,
+          2186,
+          3013,
+          2442,
+          6637,
+          2451,
+          1464,
+          3048,
+          2796,
+          3877,
+          4899,
+          2527,
+          1815,
+          3049,
+          1827,
+          3368,
+          4782,
+          7292,
+          5108,
+          7617,
+          1696,
+          3537,
+          2808,
+          3186,
+          1816,
+          2228,
+          1910,
+          1639,
+          4196,
+          2258,
+          1601,
+          1609
+        ]
+      }
+    },
+    "2026-07-19": {
+      "tokens": {
+        "input": 482,
+        "output": 184033,
+        "cache_read": 72489871,
+        "cache_write": 1948285
+      },
+      "messages": {
+        "total": 535,
+        "user": 279,
+        "assistant": 256,
+        "toolCalls": 149,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "by_model": {
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033,
+          "count": 256
+        }
+      },
+      "latency": {
+        "count": 256,
+        "sum_ms": 2473373,
+        "min_ms": 1674,
+        "max_ms": 85157,
+        "p95_sample": [
+          12830,
+          2566,
+          6635,
+          4570,
+          35557,
+          8603,
+          6041,
+          34431,
+          16634,
+          5515,
+          5793,
+          4323,
+          2755,
+          5680,
+          4576,
+          2933,
+          42418,
+          3954,
+          9825,
+          9597,
+          6750,
+          4855,
+          5118,
+          29270,
+          2542,
+          7443,
+          2025,
+          5107,
+          5042,
+          7381,
+          6541,
+          4532,
+          4635,
+          23713,
+          4500,
+          6713,
+          3049,
+          3034,
+          4388,
+          6196,
+          6341,
+          8109,
+          10897,
+          3127,
+          6256,
+          57149,
+          5415,
+          4246,
+          5895,
+          13401,
+          2563,
+          5020,
+          16569,
+          3524,
+          4776,
+          2579,
+          5336,
+          3949,
+          7539,
+          17560,
+          5717,
+          2418,
+          3031,
+          18485,
+          11052,
+          12605,
+          2805,
+          13114,
+          85157,
+          5568,
+          5124,
+          2494,
+          6505,
+          15221,
+          3230,
+          11517,
+          2808,
+          10155,
+          10268,
+          8425,
+          42326,
+          5016,
+          15512,
+          6201,
+          6274,
+          3383,
+          5398,
+          11074,
+          3249,
+          5392,
+          3837,
+          2446,
+          9278,
+          6770,
+          7998,
+          3635,
+          3720,
+          2580,
+          5266,
+          3588
+        ]
+      }
+    }
+  },
+  "_session_totals": {
+    "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
+      "tokens": {
+        "input": 19554,
+        "output": 195133
+      },
+      "files": [
+        ".claude/launch.json",
+        "scripts/install_shared_deps.sh",
+        "services/cowork_agent/visualizer/sessions_graph.py",
+        "routers/space.py",
+        "space_ui/index.html",
+        "space_ui/css/graph.css",
+        "space_ui/js/views/atlas.js",
+        "space_ui/css/base.css",
+        "space_ui/js/app.js",
+        "space_ui/js/views/sessions.js",
+        "space_ui/js/core/registry.js",
+        "services/cowork_agent/visualizer/space_index.py"
+      ],
+      "duration_ms": 388559785,
+      "first_ts": "2026-07-14T18:28:49.664Z",
+      "last_ts": "2026-07-19T06:24:49.449Z",
+      "runtime": "claude_code",
+      "by_model_tokens": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100
+        },
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033
+        }
+      },
+      "tools": {
+        "Bash": 85,
+        "Read": 22,
+        "Write": 2,
+        "Edit": 72
+      }
+    }
+  },
+  "_by_day_totals": {
+    "2026-07-14": {
+      "tokens": {
+        "input": 19072,
+        "output": 11100,
+        "cache_read": 4057687,
+        "cache_write": 66108
+      },
+      "messages": {
+        "total": 95,
+        "user": 48,
+        "assistant": 47,
+        "toolCalls": 32,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "by_model": {
+        "claude-sonnet-5": {
+          "input": 19072,
+          "output": 11100,
+          "count": 47
+        }
+      },
+      "latency": {
+        "count": 47,
+        "sum_ms": 148321,
+        "min_ms": 1458,
+        "max_ms": 7617,
+        "p95_sample": [
+          3988,
+          1960,
+          2198,
+          2835,
+          2620,
+          7167,
+          3043,
+          4263,
+          1458,
+          2787,
+          2793,
+          4971,
+          2243,
+          2652,
+          2294,
+          2367,
+          2186,
+          3013,
+          2442,
+          6637,
+          2451,
+          1464,
+          3048,
+          2796,
+          3877,
+          4899,
+          2527,
+          1815,
+          3049,
+          1827,
+          3368,
+          4782,
+          7292,
+          5108,
+          7617,
+          1696,
+          3537,
+          2808,
+          3186,
+          1816,
+          2228,
+          1910,
+          1639,
+          4196,
+          2258,
+          1601,
+          1609
+        ]
+      }
+    },
+    "2026-07-19": {
+      "tokens": {
+        "input": 482,
+        "output": 184033,
+        "cache_read": 72489871,
+        "cache_write": 1948285
+      },
+      "messages": {
+        "total": 535,
+        "user": 279,
+        "assistant": 256,
+        "toolCalls": 149,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "by_model": {
+        "claude-fable-5": {
+          "input": 482,
+          "output": 184033,
+          "count": 256
+        }
+      },
+      "latency": {
+        "count": 256,
+        "sum_ms": 2473373,
+        "min_ms": 1674,
+        "max_ms": 85157,
+        "p95_sample": [
+          12830,
+          2566,
+          6635,
+          4570,
+          35557,
+          8603,
+          6041,
+          34431,
+          16634,
+          5515,
+          5793,
+          4323,
+          2755,
+          5680,
+          4576,
+          2933,
+          42418,
+          3954,
+          9825,
+          9597,
+          6750,
+          4855,
+          5118,
+          29270,
+          2542,
+          7443,
+          2025,
+          5107,
+          5042,
+          7381,
+          6541,
+          4532,
+          4635,
+          23713,
+          4500,
+          6713,
+          3049,
+          3034,
+          4388,
+          6196,
+          6341,
+          8109,
+          10897,
+          3127,
+          6256,
+          57149,
+          5415,
+          4246,
+          5895,
+          13401,
+          2563,
+          5020,
+          16569,
+          3524,
+          4776,
+          2579,
+          5336,
+          3949,
+          7539,
+          17560,
+          5717,
+          2418,
+          3031,
+          18485,
+          11052,
+          12605,
+          2805,
+          13114,
+          85157,
+          5568,
+          5124,
+          2494,
+          6505,
+          15221,
+          3230,
+          11517,
+          2808,
+          10155,
+          10268,
+          8425,
+          42326,
+          5016,
+          15512,
+          6201,
+          6274,
+          3383,
+          5398,
+          11074,
+          3249,
+          5392,
+          3837,
+          2446,
+          9278,
+          6770,
+          7998,
+          3635,
+          3720,
+          2580,
+          5266,
+          3588
+        ]
+      }
+    }
+  }
+}
