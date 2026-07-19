@@ -6,23 +6,25 @@
    All graph content comes from ./data/space.json; nothing is embedded here —
    the data lives on disk, next to this page. */
 import {apiFetch} from '../core/api.js';
-import {toast} from '../core/ui.js';
+import {toast,treeHtml} from '../core/ui.js';
 import {openLeafPreview,closePreview,previewWidth} from '../core/leaf-preview.js';
 
 let go=()=>{};   /* ctx.switchTo, captured on first mount */
 const hooks={};  /* boot() assigns lifecycle hooks here once it has run */
 let bootPromise=null;
 
-/* The space maps one of two datasets: the workspace's projects (space.json,
-   the artifact map) or its agent sessions (sessions_graph.json, telemetry
-   projected into the same schema). The switcher lives in the topbar on every
-   page (#gmode, built by app.js at startup). The choice persists in
-   localStorage and switching reloads the page — boot() runs exactly once per
-   load, so a reload is the sanctioned reset (same pattern as renderNoData's
-   Retry), and the registry's hash deep-link restores the active tab. */
+/* The space maps one of three worlds: the workspace's projects (space.json,
+   the artifact map), its agent sessions (sessions_graph.json, telemetry in
+   the same schema), or environments (no dataset yet — its Files/Timeline
+   classifier is designed after the nav refactor; pages show a placeholder).
+   The switcher is the left sidebar (#sidebar, built by app.js at startup).
+   The choice persists in localStorage and switching reloads the page —
+   boot() runs exactly once per load, so a reload is the sanctioned reset,
+   and the registry's hash deep-link restores the active tab. */
 const DATASETS={
   output:{url:'data/space.json',label:'Projects'},
-  sessions:{url:'data/sessions_graph.json',label:'Sessions'}
+  sessions:{url:'data/sessions_graph.json',label:'Sessions'},
+  environments:{url:null,label:'Environments'}
 };
 const MODE_KEY='space.graphDataset';
 export function graphMode(){
@@ -33,7 +35,7 @@ export function buildModeToggle(){
   const el=document.getElementById('gmode');
   if(!el||el.childElementCount)return;
   el.setAttribute('role','group');
-  el.setAttribute('aria-label','Graph dataset');
+  el.setAttribute('aria-label','Space');
   const mode=graphMode();
   Object.entries(DATASETS).forEach(([id,d])=>{
     const b=document.createElement('button');
@@ -41,13 +43,10 @@ export function buildModeToggle(){
     b.setAttribute('aria-pressed',String(id===mode));
     if(id===mode)b.classList.add('is-on');
     b.addEventListener('click',()=>{
-      if(id===graphMode()){
-        if(!['graph','time','six'].includes(location.hash.replace(/^#\//,'')))location.hash='#/graph';
-        return;
-      }
+      if(id===graphMode())return;
       try{localStorage.setItem(MODE_KEY,id);}catch(_e){return;}
-      /* keep the current view across the reload: the Dashboard tab and the
-         atlas lenses re-render against the newly selected space */
+      /* keep the current view across the reload: every page re-renders
+         against the newly selected space */
       location.reload();
     });
     el.appendChild(b);
@@ -58,15 +57,33 @@ export function buildModeToggle(){
    many mount concurrently — the cached promise is the single-flight guard. */
 function ensureBoot(){
   if(!bootPromise)bootPromise=(async()=>{
-    const url=DATASETS[graphMode()].url;
-    const res=await apiFetch(url);
+    const ds=DATASETS[graphMode()];
+    if(!ds.url){renderPlaceholder(ds.label);return;}
+    const res=await apiFetch(ds.url);
     if(!res.ok){
-      console.warn('Space could not load '+url+':',res.error);
+      console.warn('Space could not load '+ds.url+':',res.error);
       throw new Error(res.error);
     }
     boot(res.data,'local file');
   })();
   return bootPromise;
+}
+
+/* Spaces without a dataset yet (environments): Files/Timeline show an honest
+   placeholder instead of booting the sim with someone else's data. */
+function renderPlaceholder(label){
+  for(const id of ['view-graph','view-time','view-six']){
+    const s=document.getElementById(id);
+    if(!s||s.querySelector('.nodata'))continue;
+    const box=document.createElement('div');
+    box.className='nodata';
+    box.innerHTML='<div class="eyebrow">'+label+'</div>'+
+      '<h1>This space has no map yet.</h1>'+
+      '<p>The '+label.toLowerCase()+' classifier is designed after the nav refactor — '+
+      'Files and Timeline light up once it lands. The Dashboard already works.</p>';
+    s.appendChild(box);
+  }
+  document.getElementById('view-graph')?.classList.remove('intro-dim');
 }
 
 function renderNoData(el){
@@ -95,8 +112,8 @@ function atlasView(id,label,order,lens){
     hide(){if(hooks.setActiveView)hooks.setActiveView(null);}
   };
 }
-export const graphView=atlasView('graph','Graph',1,'graph');
-export const timeView=atlasView('time','Timeline',2,'time');
+export const graphView=atlasView('graph','Files',2,'graph');
+export const timeView=atlasView('time','Timeline',3,'time');
 /* Six Degrees has no tab of its own: it opens from the Timeline header
    (#tsix), keeps its #/six deep link, and lights the Timeline tab. */
 export const sixView={...atlasView('six','Six&nbsp;Degrees',3,'six'),hideTab:true,parentTab:'time'};
@@ -1038,6 +1055,57 @@ hooks.setActiveView=v=>{
   if(v==='graph'&&GW<50)resize(); /* booted while hidden (deep link): size the canvas now */
   if(v==='time'){requestAnimationFrame(()=>{buildTimeline();if(tTrace)drawTrace();});}
 };
+
+/* ---- Files: Graph | List toggle. List renders the Overview's tree content
+   (workspace tree in the projects space, per-runtime session stores in the
+   sessions space) fetched from the overview endpoints; Graph is the sim. ---- */
+{
+  const FM_KEY='space.filesMode';
+  const fmode=()=>{try{return localStorage.getItem(FM_KEY)==='list'?'list':'graph';}catch(_e){return 'graph';}};
+  const fEl=document.getElementById('fmode');
+  const listEl=document.getElementById('flist');
+  let listLoaded=false;
+  async function loadList(){
+    if(listLoaded||!listEl)return;
+    listLoaded=true;
+    listEl.innerHTML='<div class="ovload">reading contents…</div>';
+    const sessionsSpace=graphMode()==='sessions';
+    const res=await apiFetch(sessionsSpace?'data/overview_sessions.json':'data/overview.json');
+    if(!res.ok){listEl.innerHTML='<div class="ovload">Contents unavailable · '+esc(res.error||'')+'</div>';listLoaded=false;return;}
+    if(sessionsSpace){
+      const sources=res.data.sources||[];
+      listEl.innerHTML=sources.map(s=>(s.roots||[]).map(r=>`
+        <div class="ovcard wide treecard"><h4>${esc(s.label)} · ${esc(r.label)}</h4>
+          <div class="ovsub mono">${esc(r.path)}</div>
+          <div class="ovtree">${(r.tree.children||[]).map(c=>treeHtml(c,0)).join('')||'<div class="xempty">Empty.</div>'}</div>
+        </div>`).join('')).join('')||'<div class="ovload">No session data stores found.</div>';
+    }else{
+      const t=res.data.tree;
+      listEl.innerHTML=`<div class="ovcard wide treecard"><h4>${esc((res.data.root||'').split('/').pop()||'workspace')} — contents</h4>
+        <div class="ovtree">${t?((t.children||[]).map(c=>treeHtml(c,0)).join('')||'<div class="xempty">Empty.</div>'):'<div class="xempty">No tree.</div>'}</div></div>`;
+    }
+  }
+  function applyFmode(m){
+    const g=document.getElementById('view-graph');
+    if(!g)return;
+    g.classList.toggle('is-list',m==='list');
+    if(m==='list')loadList();
+    if(fEl)[...fEl.children].forEach(b=>b.classList.toggle('is-on',b.dataset.fm===m));
+  }
+  if(fEl&&!fEl.childElementCount){
+    [['graph','Graph'],['list','List']].forEach(([id,label])=>{
+      const b=document.createElement('button');
+      b.textContent=label;b.dataset.fm=id;
+      b.addEventListener('click',()=>{
+        if(fmode()===id)return;
+        try{localStorage.setItem(FM_KEY,id);}catch(_e){}
+        applyFmode(id);
+      });
+      fEl.appendChild(b);
+    });
+    applyFmode(fmode());
+  }
+}
 addEventListener('keydown',e=>{
   const typing=/INPUT|TEXTAREA/.test(document.activeElement?.tagName||'');
   if(e.key==='/'&&!typing){e.preventDefault();document.getElementById('q').focus();return;}

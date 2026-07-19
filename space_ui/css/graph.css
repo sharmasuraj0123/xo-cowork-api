@@ -1,7 +1,21 @@
   /* graph overlays */
   .ov{position:absolute;z-index:10;pointer-events:none}
   .ov>*{pointer-events:auto}
-  #chips{top:16px;left:18px;display:flex;gap:6px;flex-wrap:wrap}
+  /* Files: Graph | List toggle + the list panel (tree styles: overview.css) */
+  #fmode{top:16px;left:18px;display:flex;gap:6px}
+  #fmode button{
+    font:400 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);
+    background:rgba(16,19,24,.86);backdrop-filter:blur(8px);border:1px solid var(--line);
+    border-radius:999px;padding:5px 12px;transition:all .16s var(--ease);
+  }
+  #fmode button:hover{color:var(--ink);border-color:#39404d}
+  #fmode button.is-on{background:rgba(168,217,79,.12);border-color:var(--accent);color:var(--ink)}
+  #flist{position:absolute;inset:0;padding:64px 26px 26px;overflow-y:auto;display:none}
+  #view-graph.is-list #flist{display:block}
+  #view-graph.is-list canvas,#view-graph.is-list #chips,#view-graph.is-list #hint,
+  #view-graph.is-list #legend,#view-graph.is-list #counts,#view-graph.is-list #intro,
+  #view-graph.is-list #simstat{display:none}
+  #chips{top:48px;left:18px;display:flex;gap:6px;flex-wrap:wrap}
   #chips button{
     font:400 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);
     background:rgba(16,19,24,.86);backdrop-filter:blur(8px);border:1px solid var(--line);
@@ -9,7 +23,7 @@
   }
   #chips button:hover{color:var(--ink);border-color:#39404d}
   #chips button.is-on{background:rgba(168,217,79,.12);border-color:var(--accent);color:var(--ink)}
-  #hint{top:52px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3);transition:opacity .5s var(--ease)}
+  #hint{top:84px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3);transition:opacity .5s var(--ease)}
   #hint b{color:var(--ink-2);font-weight:500}
   /* the intro overlay covers the same corner and already carries the guidance —
      keep the hint hidden until the intro is dismissed (intro-dim tracks that) */

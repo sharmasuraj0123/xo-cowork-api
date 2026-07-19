@@ -4,6 +4,7 @@
    rolling stats, and the recent event timeline. Read-only view over what
    the watcher service maintains; independent of the atlas boot. */
 import {apiFetch} from '../core/api.js';
+import {kb,treeHtml} from '../core/ui.js';
 
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const tok=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':String(Math.round(n));};
@@ -16,18 +17,7 @@ const rel=iso=>{
   return Math.round(s/86400)+'d ago';
 };
 const pill=(label,on)=>`<span class="xpill ${on?'is-on':'is-off'}">${esc(label)}</span>`;
-const kb=n=>{n=Number(n)||0;return n>=1e6?(n/1e6).toFixed(1)+' MB':n>=1e3?(n/1e3).toFixed(1)+' KB':n+' B';};
-function treeHtml(node,depth){
-  if(node.type==='file')
-    return `<div class="tf"><span class="tfn">${esc(node.name)}</span><span class="tfs">${node.size!=null?kb(node.size):''}</span></div>`;
-  const kids=(node.children||[]).map(c=>treeHtml(c,depth+1)).join('');
-  const more=node.more?`<div class="tf tmore">… ${node.more} more item${node.more===1?'':'s'}</div>`:'';
-  const count=(node.children||[]).length+(node.more||0);
-  return `<details class="td"${depth<1?' open':''}>
-    <summary><span class="tdn">${esc(node.name)}</span><span class="tfs">${count} item${count===1?'':'s'}</span></summary>
-    <div class="tkids">${kids}${more}</div>
-  </details>`;
-}
+
 const bars=(pairs,fmt)=>{
   /* values are coerced to numbers before hitting innerHTML: stats.json is
      watcher-written data, not trusted markup */

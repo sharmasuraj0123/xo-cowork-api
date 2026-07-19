@@ -53,6 +53,15 @@
   .tabs button:hover{color:var(--ink)}
   .tabs button.is-on{background:var(--accent);color:#14100a;font-weight:600}
   .tright{justify-self:end;display:flex;align-items:center;gap:8px}
+  /* Chat: a standalone topbar action beside Root (not a pill tab). Uses the
+     registry's #tab-<id> convention so switchTo lights it up. */
+  .chatbtn{
+    font:400 10.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2);
+    background:var(--bg-2);border:1px solid var(--line);border-radius:999px;
+    padding:9px 15px;transition:all .16s var(--ease);
+  }
+  .chatbtn:hover{color:var(--ink);border-color:#39404d}
+  .chatbtn.is-on{background:var(--accent);color:#14100a;font-weight:600;border-color:var(--accent)}
   .rootpick{position:relative}
   #root-btn{
     display:flex;align-items:center;gap:7px;white-space:nowrap;

@@ -161,6 +161,7 @@ def build_xo_overview() -> dict:
         "workspace": _read_json(xo_dir / "workspace.json"),
         "stats": _read_json(xo_dir / "stats.json"),
         "activity": _read_json(xo_dir / "activity.json"),
+        "todos": _read_json(xo_dir / "todos.json"),
         "timeline": _timeline_tail(xo_dir / "timeline.jsonl"),
         "known_sessions": len(sessions_list) if isinstance(sessions_list, dict) else None,
         "tree": tree,

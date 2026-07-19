@@ -26,10 +26,11 @@
     </svg></span>
     <b>Space</b><span>a workspace knowledge graph</span></div>
   <div class="tmid">
-    <div class="modesw" id="gmode" title="Switch the space between project artifacts and agent sessions"></div>
+    <div class="modesw" id="gmode" title="Switch the space: projects, sessions, or environments"></div>
     <div class="tabs"><!-- populated by core/registry.js from the registered views --></div>
   </div>
   <div class="tright">
+    <button id="tab-chat" class="chatbtn" title="Chat with the workspace">Chat</button>
     <div class="rootpick">
       <button id="root-btn" title="Re-root the graph on any node">
         <span class="rlab">Root</span><b id="root-name">XO</b><span class="caret">&#9662;</span>
@@ -51,10 +52,12 @@
 </div>
 
 <main id="stage">
-  <!-- GRAPH -->
+  <!-- FILES (graph + list) -->
   <section class="view is-active intro-dim" id="view-graph">
     <canvas id="gcanvas"></canvas>
+    <div class="ov" id="fmode" title="How to show the space's contents"></div>
     <div class="ov" id="chips"></div>
+    <div id="flist"></div>
     <p class="ov" id="hint"><b>Click</b> a node to focus its neighbourhood &middot; <b>Double-click</b> a cluster to open or close it &middot; <b>Drag</b> to reposition &middot; <b>Scroll</b> to zoom</p>
     <div class="ov" id="intro">
       <div class="eyebrow">An interconnected workspace history</div>
