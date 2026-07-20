@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "updated_at": "2026-07-20T04:23:50Z",
+  "updated_at": "2026-07-20T05:18:02Z",
   "rolling": {
     "7d": {
       "tokens": {
-        "input": 41546,
-        "output": 1322311
+        "input": 41582,
+        "output": 1338118
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -17,24 +17,28 @@
           "output": 846177
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924
+          "input": 182,
+          "output": 58731
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0
         }
       },
       "by_tool": {
-        "Bash": 661,
-        "Read": 163,
-        "Write": 43,
-        "Edit": 584
+        "Bash": 670,
+        "Read": 166,
+        "Write": 44,
+        "Edit": 587
       },
-      "files_edited": 46,
+      "files_edited": 47,
       "sessions": 3,
-      "active_minutes": 8243
+      "active_minutes": 8298
     },
     "30d": {
       "tokens": {
-        "input": 41546,
-        "output": 1322311
+        "input": 41582,
+        "output": 1338118
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -46,26 +50,30 @@
           "output": 846177
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924
+          "input": 182,
+          "output": 58731
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0
         }
       },
       "by_tool": {
-        "Bash": 661,
-        "Read": 163,
-        "Write": 43,
-        "Edit": 584
+        "Bash": 670,
+        "Read": 166,
+        "Write": 44,
+        "Edit": 587
       },
-      "files_edited": 46,
+      "files_edited": 47,
       "sessions": 3,
-      "active_minutes": 8243
+      "active_minutes": 8298
     }
   },
   "by_session": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 40582,
-        "output": 923074
+        "input": 40618,
+        "output": 938881
       },
       "files": [
         ".claude/launch.json",
@@ -93,14 +101,15 @@
         "services/cowork_agent/visualizer/workspace/workspace_json.py",
         "services/cowork_agent/visualizer/schema/project.schema.json",
         "services/cowork_agent/visualizer/schema/workspace.schema.json",
-        "tests/test_classification_sink.py"
+        "tests/test_classification_sink.py",
+        "services/cowork_agent/visualizer/project_detail_graph.py"
       ],
-      "duration_ms": 467657111,
+      "duration_ms": 470952699,
       "tools": {
-        "Bash": 551,
-        "Read": 123,
-        "Write": 31,
-        "Edit": 491
+        "Bash": 560,
+        "Read": 126,
+        "Write": 32,
+        "Edit": 494
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -112,8 +121,12 @@
           "output": 681599
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924
+          "input": 182,
+          "output": 58731
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0
         }
       }
     },
@@ -187,8 +200,8 @@
   "by_runtime": {
     "claude_code": {
       "tokens": {
-        "input": 41546,
-        "output": 1322311
+        "input": 41582,
+        "output": 1338118
       },
       "by_model": {
         "claude-sonnet-5": {
@@ -200,19 +213,23 @@
           "output": 846177
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924
+          "input": 182,
+          "output": 58731
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0
         }
       },
       "by_tool": {
-        "Bash": 661,
-        "Read": 163,
-        "Write": 43,
-        "Edit": 584
+        "Bash": 670,
+        "Read": 166,
+        "Write": 44,
+        "Edit": 587
       },
-      "files_edited": 46,
+      "files_edited": 47,
       "sessions": 3,
-      "active_minutes": 8243
+      "active_minutes": 8298
     }
   },
   "by_day": {
@@ -479,16 +496,16 @@
     },
     "2026-07-20": {
       "tokens": {
-        "input": 1454,
-        "output": 546024,
-        "cache_read": 526585532,
-        "cache_write": 12648296
+        "input": 1490,
+        "output": 561831,
+        "cache_read": 539915958,
+        "cache_write": 13413416
       },
       "messages": {
-        "total": 1521,
-        "user": 782,
-        "assistant": 739,
-        "toolCalls": 415,
+        "total": 1558,
+        "user": 800,
+        "assistant": 758,
+        "toolCalls": 431,
         "toolResults": 0,
         "errors": 0
       },
@@ -504,14 +521,19 @@
           "count": 372
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924,
-          "count": 73
+          "input": 182,
+          "output": 58731,
+          "count": 91
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0,
+          "count": 1
         }
       },
       "latency": {
-        "count": 734,
-        "sum_ms": 7779439,
+        "count": 752,
+        "sum_ms": 8050743,
         "min_ms": 2023,
         "max_ms": 123415,
         "p95_sample": [
@@ -551,7 +573,7 @@
           6528,
           12242,
           6991,
-          4520,
+          6569,
           3808,
           6223,
           12452,
@@ -580,7 +602,7 @@
           3873,
           6548,
           6173,
-          8998,
+          20526,
           8061,
           17519,
           10481,
@@ -622,8 +644,8 @@
   "_session_totals": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "tokens": {
-        "input": 40582,
-        "output": 923074
+        "input": 40618,
+        "output": 938881
       },
       "files": [
         ".claude/launch.json",
@@ -651,11 +673,12 @@
         "services/cowork_agent/visualizer/workspace/workspace_json.py",
         "services/cowork_agent/visualizer/schema/project.schema.json",
         "services/cowork_agent/visualizer/schema/workspace.schema.json",
-        "tests/test_classification_sink.py"
+        "tests/test_classification_sink.py",
+        "services/cowork_agent/visualizer/project_detail_graph.py"
       ],
-      "duration_ms": 467657111,
+      "duration_ms": 470952699,
       "first_ts": "2026-07-14T18:28:49.664Z",
-      "last_ts": "2026-07-20T04:23:06.775Z",
+      "last_ts": "2026-07-20T05:18:02.363Z",
       "runtime": "claude_code",
       "by_model_tokens": {
         "claude-sonnet-5": {
@@ -667,15 +690,19 @@
           "output": 681599
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924
+          "input": 182,
+          "output": 58731
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0
         }
       },
       "tools": {
-        "Bash": 551,
-        "Read": 123,
-        "Write": 31,
-        "Edit": 491
+        "Bash": 560,
+        "Read": 126,
+        "Write": 32,
+        "Edit": 494
       }
     },
     "251d0be2-9531-40b1-8a77-4fa0e0643df8": {
@@ -1015,16 +1042,16 @@
     },
     "2026-07-20": {
       "tokens": {
-        "input": 1454,
-        "output": 546024,
-        "cache_read": 526585532,
-        "cache_write": 12648296
+        "input": 1490,
+        "output": 561831,
+        "cache_read": 539915958,
+        "cache_write": 13413416
       },
       "messages": {
-        "total": 1521,
-        "user": 782,
-        "assistant": 739,
-        "toolCalls": 415,
+        "total": 1558,
+        "user": 800,
+        "assistant": 758,
+        "toolCalls": 431,
         "toolResults": 0,
         "errors": 0
       },
@@ -1040,14 +1067,19 @@
           "count": 372
         },
         "claude-opus-4-8": {
-          "input": 146,
-          "output": 42924,
-          "count": 73
+          "input": 182,
+          "output": 58731,
+          "count": 91
+        },
+        "<synthetic>": {
+          "input": 0,
+          "output": 0,
+          "count": 1
         }
       },
       "latency": {
-        "count": 734,
-        "sum_ms": 7779439,
+        "count": 752,
+        "sum_ms": 8050743,
         "min_ms": 2023,
         "max_ms": 123415,
         "p95_sample": [
@@ -1087,7 +1119,7 @@
           6528,
           12242,
           6991,
-          4520,
+          6569,
           3808,
           6223,
           12452,
@@ -1116,7 +1148,7 @@
           3873,
           6548,
           6173,
-          8998,
+          20526,
           8061,
           17519,
           10481,

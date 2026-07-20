@@ -421,6 +421,9 @@ def build_environments_graph() -> dict:
             # instead of hugging the primary.
             "enclose": True,
             "tieSpring": {"d": 80, "k": 0.07},
+            # Each leaf is a whole project; the client lets you expand one
+            # into its files + sessions (data/project_graph.json?pid=<leaf id>).
+            "drillable": True,
             "introEyebrow": "Five clusters",
             "introTitle": "Every project has a purpose.",
             "intro": f"{total_projects} projects, one node each, sorted into App, Ops, "

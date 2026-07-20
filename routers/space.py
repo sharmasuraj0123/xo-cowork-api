@@ -269,6 +269,49 @@ async def environments_graph_data():
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
+# Per-project drill-down — one project's file/folder tree + its sessions,
+# reached by expanding a node in the Environments space. Keyed by pid; a small
+# LRU of recent projects avoids rebuilding on every re-open. Same TTL.
+_project_graph_cache: dict[str, tuple[float, dict]] = {}
+_PROJECT_CACHE_MAX = 8
+
+
+@router.get("/data/project_graph.json")
+async def project_graph_data(pid: str):
+    """One project expanded: files (like the Projects space) + its sessions.
+
+    Same shape as /space/data/space.json. 404 for an unknown project, 503 if
+    the build fails."""
+    from services.cowork_agent.visualizer.project_detail_graph import (
+        ProjectNotFound,
+        build_project_detail_graph,
+    )
+    now = time.monotonic()
+    hit = _project_graph_cache.get(pid)
+    if hit is not None and now - hit[0] < SPACE_CACHE_TTL:
+        return JSONResponse(hit[1], headers={"Cache-Control": "no-store"})
+
+    try:
+        data = await asyncio.to_thread(build_project_detail_graph, pid)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404,
+                            detail={"code": "project_not_found",
+                                    "message": f"No project named {pid!r}."})
+    except Exception as exc:
+        print(f"⚠️ project_graph failed for {pid!r} ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "project_graph_unavailable",
+                    "message": "Could not build the project graph."},
+        )
+
+    if len(_project_graph_cache) >= _PROJECT_CACHE_MAX:
+        oldest = min(_project_graph_cache, key=lambda k: _project_graph_cache[k][0])
+        _project_graph_cache.pop(oldest, None)
+    _project_graph_cache[pid] = (now, data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
 # Workspace .xo/ state for the Overview tab. Read-only (the watcher service
 # owns .xo/); same TTL, separate cache slot. Builds are single-flight: a slow
 # tree walk must not fan out one duplicate build per polling client.

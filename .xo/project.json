@@ -5,17 +5,17 @@
   "owner_user_id": "local",
   "created_at": "2026-07-14T18:37:31Z",
   "classification": {
-    "computed_at": "2026-07-20T04:23:09Z",
+    "computed_at": "2026-07-20T13:44:05Z",
     "category": "engineering",
     "categories": [
       "engineering"
     ],
     "ptype": "app",
     "label": "xo-cowork-api",
-    "files": 302,
+    "files": 303,
     "xotype_counts": {
       "inbox": 9,
-      "output": 288,
+      "output": 289,
       "system": 5
     },
     "signals": {

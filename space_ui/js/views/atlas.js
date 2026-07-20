@@ -35,6 +35,23 @@ export function graphMode(){
   try{const m=localStorage.getItem(MODE_KEY);return DATASETS[m]?m:'output';}
   catch(_e){return 'output';}
 }
+/* Drill-down: expanding a project in the Environments space loads a
+   project-scoped graph (files + sessions). The target pid rides sessionStorage
+   (transient — a drill is a within-session navigation, not a persisted space);
+   ensureBoot honours it only while the Environments space is active. */
+const DRILL_KEY='space.drillPid';
+function drillPid(){
+  if(graphMode()!=='environments')return null;
+  try{return sessionStorage.getItem(DRILL_KEY)||null;}catch(_e){return null;}
+}
+export function openDrill(pid){
+  try{sessionStorage.setItem(DRILL_KEY,pid);}catch(_e){return;}
+  location.reload();
+}
+function closeDrill(){
+  try{sessionStorage.removeItem(DRILL_KEY);}catch(_e){}
+  location.reload();
+}
 export function buildModeToggle(){
   const el=document.getElementById('gmode');
   if(!el||el.childElementCount)return;
@@ -48,9 +65,8 @@ export function buildModeToggle(){
     if(id===mode)b.classList.add('is-on');
     b.addEventListener('click',()=>{
       if(id===graphMode())return;
-      try{localStorage.setItem(MODE_KEY,id);}catch(_e){return;}
-      /* keep the current view across the reload: every page re-renders
-         against the newly selected space */
+      try{localStorage.setItem(MODE_KEY,id);sessionStorage.removeItem(DRILL_KEY);}catch(_e){return;}
+      /* leaving the space clears any active drill so it can't re-open later */
       location.reload();
     });
     el.appendChild(b);
@@ -61,11 +77,16 @@ export function buildModeToggle(){
    many mount concurrently — the cached promise is the single-flight guard. */
 function ensureBoot(){
   if(!bootPromise)bootPromise=(async()=>{
-    const ds=DATASETS[graphMode()];
-    if(!ds.url){renderPlaceholder(ds.label);return;}
-    const res=await apiFetch(ds.url);
+    const pid=drillPid();
+    const url=pid?('data/project_graph.json?pid='+encodeURIComponent(pid))
+      :DATASETS[graphMode()].url;
+    if(!url){renderPlaceholder(DATASETS[graphMode()].label);return;}
+    const res=await apiFetch(url);
     if(!res.ok){
-      console.warn('Space could not load '+ds.url+':',res.error);
+      /* a stale/invalid drill target must not brick the space — drop it and
+         fall back to the environments graph */
+      if(pid){try{sessionStorage.removeItem(DRILL_KEY);}catch(_e){}location.reload();return;}
+      console.warn('Space could not load '+url+':',res.error);
       throw new Error(res.error);
     }
     boot(res.data,'local file');
