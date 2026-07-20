@@ -1,10 +1,10 @@
-"""One-click XO project experiments backed by a replaceable sandbox provider.
+"""One-click XO project experiments backed by a replaceable compute provider.
 
-The first provider is intentionally local-development only: it creates an
-Agents API self-hosted session, safely snapshots one XO project plus the current
-xo-cowork-api checkout into a Docker container, starts sandbox Space and
-``codex exec-server``, and keeps the boot-verified session available for
-follow-up turns. A Coder provider can replace it without changing the Space UI.
+The local provider creates an OpenAI Agents API self-hosted session, snapshots
+one XO project plus xo-cowork-api, and provisions a small VPS-like supervisor.
+Docker is only the local provisioner for that server; the Agents API contract
+remains ``environment.type = self_hosted`` plus ``codex exec-server``. A remote
+VPS or XO-native provider can replace Docker without changing the Space UI.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import tempfile
@@ -50,45 +51,13 @@ DEFAULT_API_BASE = "https://api.openai.com/v1/agents"
 DEFAULT_MAX_ACTIVE = 2
 DEFAULT_PERMISSION_PROFILE = "unrestricted"
 PERMISSION_PROFILES = {"unrestricted", "hardened"}
-SANDBOX_EXEC_TOOL_NAME = "sandbox_exec"
+VPS_EXEC_TOOL_NAME = "vps_exec"
 SPACE_PORT = 5002
 APP_PORT = 3000
+VPS_CONTROL_PORT = 8787
 SANDBOX_PROJECTS_ROOT = "/workspace/xo-projects"
 SANDBOX_API_ROOT = "/workspace/xo-cowork-api"
 SANDBOX_RUNTIME_ROLE = "sandbox"
-
-BOOTSTRAP_SCRIPT = r"""
-set -eu
-project_dir="$XO_PROJECTS_ROOT/$XO_PROJECT_ID"
-rm -rf "$XO_PROJECTS_ROOT" "$XO_COWORK_API_ROOT"
-mkdir -p "$project_dir" "$XO_COWORK_API_ROOT"
-(cd /xo-sources/project && tar -cf - .) | (cd "$project_dir" && tar --no-same-owner -xf -)
-(cd /xo-sources/xo-cowork-api && tar -cf - .) | (cd "$XO_COWORK_API_ROOT" && tar --no-same-owner -xf -)
-
-cd "$XO_COWORK_API_ROOT"
-python -m uvicorn server:app \
-  --host 0.0.0.0 \
-  --port "$SPACE_PORT" \
-  --lifespan off &
-
-cd "$project_dir"
-if [ "$EXPERIMENT_PERMISSION_PROFILE" = "unrestricted" ]; then
-  set -- \
-    -c 'sandbox_mode="danger-full-access"' \
-    -c 'approval_policy="never"'
-else
-  set -- \
-    -c 'sandbox_mode="workspace-write"' \
-    -c 'approval_policy="never"'
-fi
-exec codex exec-server \
-  --strict-config \
-  "$@" \
-  --enable shell_tool \
-  --enable unified_exec \
-  --remote "$AGENTS_API_REMOTE" \
-  --environment-id "$AGENT_ENVIRONMENT_ID"
-""".strip()
 
 
 class ExperimentError(RuntimeError):
@@ -139,7 +108,7 @@ class ExperimentMessage:
 class ExperimentRecord:
     id: str
     project_id: str
-    provider: str = "local_docker"
+    provider: str = "self_hosted_vps"
     model: str = DEFAULT_MODEL
     permission_profile: str = DEFAULT_PERMISSION_PROFILE
     status: ExperimentStatus = "starting"
@@ -149,6 +118,7 @@ class ExperimentRecord:
     session_id: str | None = None
     environment_id: str | None = None
     sandbox_id: str | None = None
+    vps_url: str | None = None
     failed_stage: str | None = None
     space_url: str | None = None
     app_url: str | None = None
@@ -163,6 +133,8 @@ class ExperimentRecord:
     turn_task: asyncio.Task[None] | None = field(default=None, repr=False)
     expiry_task: asyncio.Task[None] | None = field(default=None, repr=False)
     snapshot_dir: Path | None = field(default=None, repr=False)
+    vps_port: int | None = field(default=None, repr=False)
+    vps_token: str | None = field(default=None, repr=False)
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def touch(self) -> None:
@@ -182,6 +154,7 @@ class ExperimentRecord:
             "error": self.error,
             "agent_session_id": self.session_id,
             "sandbox_id": self.sandbox_id,
+            "vps_url": self.vps_url,
             "space_url": self.space_url,
             "app_url": self.app_url,
             "workspace_directory": self.workspace_directory,
@@ -213,10 +186,10 @@ class ExperimentProvider(Protocol):
     async def stop(self, record: ExperimentRecord) -> list[str]: ...
 
 
-class LocalDockerExperimentProvider:
-    """Developer provider using the verified Agents API Docker executor flow."""
+class SelfHostedVPSExperimentProvider:
+    """Agents API self-hosted sessions on a Docker-provisioned local mini-VPS."""
 
-    name = "local_docker"
+    name = "self_hosted_vps"
 
     async def reconcile(self) -> list[str]:
         """Remove resources left by an unclean previous local server exit."""
@@ -314,7 +287,7 @@ class LocalDockerExperimentProvider:
                 issues.append("Agents API access check failed")
         return {
             "name": self.name,
-            "label": f"Local Docker · {permission_profile} agent",
+            "label": f"OpenAI self-hosted · Docker VPS · {permission_profile}",
             "ready": not issues,
             "issues": issues,
             "production": False,
@@ -347,7 +320,8 @@ class LocalDockerExperimentProvider:
             await _validate_source_bundle(staged_sources)
             container_name = _container_name(record.id)
             record.sandbox_id = container_name
-            host_port, app_host_port = await _start_docker_executor(
+            record.vps_token = secrets.token_urlsafe(32)
+            vps_port, space_host_port, app_host_port = await _start_docker_vps(
                 source_root=staged_sources,
                 api_key=api_key,
                 environment_id=record.environment_id or "",
@@ -357,12 +331,18 @@ class LocalDockerExperimentProvider:
                 container_name=container_name,
                 project_id=record.project_id,
                 parent_space_url=_parent_space_url(),
+                vps_token=record.vps_token,
             )
+            record.vps_port = vps_port
+            record.vps_url = _vps_url(vps_port)
             record.app_url = _sandbox_app_url(app_host_port)
+            record.stage = "starting_vps"
+            record.touch()
+            await _wait_for_vps(record, container_name)
             record.stage = "starting_space"
             record.touch()
             await _wait_for_sandbox_space(
-                host_port,
+                space_host_port,
                 record.project_id,
                 container_name,
             )
@@ -382,7 +362,7 @@ class LocalDockerExperimentProvider:
             raise ExperimentError("Sandbox stopped before the agent became ready")
 
         await _remove_source_snapshot(record)
-        record.space_url = _sandbox_space_url(host_port)
+        record.space_url = _sandbox_space_url(space_host_port)
         record.status = "ready"
         record.stage = "ready"
         record.touch()
@@ -407,17 +387,15 @@ class LocalDockerExperimentProvider:
             if session.status != "idle":
                 raise ExperimentTurnBusy(f"Agent session is {session.status}")
             saw_delta = False
-            handled_call_ids: set[str] = set()
             try:
                 async with asyncio.timeout(float(os.getenv("EXPERIMENT_TURN_TIMEOUT", "600"))):
-                    async with aclosing(session.stream(input=prompt)) as events:
+                    async with aclosing(
+                        session.stream(
+                            input=prompt,
+                            tool_handlers=_vps_tool_handlers(record),
+                        )
+                    ) as events:
                         async for event in events:
-                            await _handle_sandbox_tool_call(
-                                session,
-                                event,
-                                record,
-                                handled_call_ids,
-                            )
                             event_type = getattr(event, "type", "")
                             delta = getattr(event, "output_text_delta", None)
                             text = getattr(event, "output_text", None)
@@ -452,6 +430,7 @@ class LocalDockerExperimentProvider:
             warnings: list[str] = []
             record.space_url = None
             record.app_url = None
+            record.vps_url = None
             if record.sandbox_id:
                 warning = await _remove_owned_container(record)
                 if warning:
@@ -470,13 +449,19 @@ class LocalDockerExperimentProvider:
                 else:
                     record.session_id = None
                     record.environment_id = None
+            record.vps_port = None
+            record.vps_token = None
             record.touch()
             return warnings
 
 
+# Compatibility for integrations that imported the original local provider.
+LocalDockerExperimentProvider = SelfHostedVPSExperimentProvider
+
+
 class ExperimentManager:
     def __init__(self, provider: ExperimentProvider | None = None) -> None:
-        self.provider = provider or LocalDockerExperimentProvider()
+        self.provider = provider or SelfHostedVPSExperimentProvider()
         self._records: dict[str, ExperimentRecord] = {}
         self._lock = asyncio.Lock()
 
@@ -790,17 +775,16 @@ async def _create_agent_session(client: Any, record: ExperimentRecord) -> Any:
                     "model": record.model,
                     "code_mode": True,
                     "instructions": (
-                        "You are the autonomous agent for an isolated XO Experiment container. "
+                        "You are the autonomous agent for an isolated XO Experiment VPS. "
                         "You may read and modify files, execute commands, install packages, start "
-                        "servers, and use outbound network access inside the container without asking "
-                        f"for approval. Begin work in {record.workspace_directory}. Use the built-in "
-                        f"command tool when it is available; {SANDBOX_EXEC_TOOL_NAME} is an always-on "
-                        "shell fallback and also provides filesystem access. Never claim command or "
-                        "filesystem access is unavailable before calling that fallback. Bind project "
+                        "servers, and use outbound network access inside the VPS without asking "
+                        f"for approval. Begin work in {record.workspace_directory}. Use the "
+                        f"{VPS_EXEC_TOOL_NAME} function for all command and filesystem work; it is "
+                        "the authenticated bridge to this session's VPS. Bind project "
                         f"web servers to 0.0.0.0:{APP_PORT}; Experiment publishes that port to a "
                         "loopback URL for the user."
                     ),
-                    "tools": [_sandbox_exec_tool()],
+                    "tools": [_vps_exec_tool()],
                 },
                 environment={
                     "type": "self_hosted",
@@ -823,38 +807,45 @@ async def _create_agent_session(client: Any, record: ExperimentRecord) -> Any:
     return session
 
 
-def _sandbox_exec_tool() -> dict[str, Any]:
-    """Explicit shell fallback for preview sessions that omit the built-in tool."""
+def _vps_exec_tool() -> dict[str, Any]:
     return {
         "type": "function",
-        "name": SANDBOX_EXEC_TOOL_NAME,
+        "name": VPS_EXEC_TOOL_NAME,
         "description": (
-            "Run a shell command inside the current XO Experiment container. This tool has "
-            "filesystem, package-install, process, and network access inside that container. "
-            "Use it whenever built-in command execution is absent."
+            "Run a shell command with unrestricted access inside this disposable Experiment VPS. "
+            "Use it to read and edit files, install packages, run tests, and start processes."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute with sh -lc.",
+                    "description": "Shell command executed with sh -lc inside the VPS.",
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Absolute working directory inside the container.",
+                    "description": "Absolute VPS working directory.",
                 },
                 "timeout_seconds": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 600,
-                    "description": "Command timeout; defaults to 300 seconds.",
                 },
             },
             "required": ["command"],
             "additionalProperties": False,
         },
     }
+
+
+def _vps_tool_handlers(record: ExperimentRecord, on_success: Any = None) -> dict[str, Any]:
+    async def execute(arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await _run_vps_command(record, arguments)
+        if result["exit_code"] == 0 and on_success is not None:
+            on_success()
+        return result
+
+    return {VPS_EXEC_TOOL_NAME: execute}
 
 
 def _remember_agent_session(record: ExperimentRecord, session: Any) -> None:
@@ -1174,7 +1165,7 @@ async def _remove_owned_container(record: ExperimentRecord) -> str | None:
     return None
 
 
-async def _start_docker_executor(
+async def _start_docker_vps(
     *,
     source_root: Path,
     api_key: str,
@@ -1185,7 +1176,8 @@ async def _start_docker_executor(
     container_name: str,
     project_id: str,
     parent_space_url: str,
-) -> tuple[int, int]:
+    vps_token: str,
+) -> tuple[int, int, int]:
     permission_profile = _permission_profile()
     command = [
         "docker",
@@ -1254,6 +1246,8 @@ async def _start_docker_executor(
         "--tmpfs",
         f"/tmp:{temp_mount}",
         "--publish",
+        f"127.0.0.1::{VPS_CONTROL_PORT}",
+        "--publish",
         f"127.0.0.1::{SPACE_PORT}",
         "--publish",
         f"127.0.0.1::{APP_PORT}",
@@ -1287,10 +1281,11 @@ async def _start_docker_executor(
         "EXPERIMENT_PARENT_SPACE_URL",
         "-e",
         "EXPERIMENT_PERMISSION_PROFILE",
+        "-e",
+        "EXPERIMENT_CONTROL_TOKEN",
+        "-e",
+        "EXPERIMENT_CONTROL_PORT",
         _docker_image(),
-        "sh",
-        "-lc",
-        BOOTSTRAP_SCRIPT,
         ]
     )
     env = os.environ.copy()
@@ -1308,14 +1303,17 @@ async def _start_docker_executor(
     env["EXPERIMENT_RUNTIME_ROLE"] = SANDBOX_RUNTIME_ROLE
     env["EXPERIMENT_PARENT_SPACE_URL"] = parent_space_url
     env["EXPERIMENT_PERMISSION_PROFILE"] = permission_profile
+    env["EXPERIMENT_CONTROL_TOKEN"] = vps_token
+    env["EXPERIMENT_CONTROL_PORT"] = str(VPS_CONTROL_PORT)
     result = await _run_process(command, env=env, timeout=60)
     if result.returncode != 0:
         detail = _redact(result.output[-500:], api_key).strip()
-        raise ExperimentError(f"Docker sandbox failed to start{': ' + detail if detail else ''}")
+        raise ExperimentError(f"Experiment VPS failed to start{': ' + detail if detail else ''}")
 
+    vps_host_port = await _published_port(container_name, VPS_CONTROL_PORT, "VPS")
     space_host_port = await _published_port(container_name, SPACE_PORT, "Space")
     app_host_port = await _published_port(container_name, APP_PORT, "app")
-    return space_host_port, app_host_port
+    return vps_host_port, space_host_port, app_host_port
 
 
 async def _published_port(container_name: str, container_port: int, label: str) -> int:
@@ -1427,127 +1425,124 @@ async def _ensure_container_running(container_name: str) -> None:
         timeout=10,
     )
     if running.returncode != 0 or running.stdout.strip() != "true":
-        raise ExperimentNotReady("Sandbox is no longer running")
+        raise ExperimentNotReady("Experiment VPS is no longer running")
 
 
-async def _handle_sandbox_tool_call(
-    session: Any,
-    event: Any,
-    record: ExperimentRecord,
-    handled_call_ids: set[str],
-    on_success: Any = None,
-) -> bool:
-    if getattr(event, "type", "") != "session.turn.item.added":
-        return False
-    call = getattr(event, "function_call", None)
-    if not isinstance(call, dict) or call.get("name") != SANDBOX_EXEC_TOOL_NAME:
-        return False
-    call_id = call.get("call_id")
-    turn_id = getattr(event, "turn_id", None)
-    if not isinstance(call_id, str) or not isinstance(turn_id, str):
-        return False
-    if call_id in handled_call_ids:
-        return True
-    handled_call_ids.add(call_id)
-
-    raw_arguments = call.get("arguments", {})
-    if isinstance(raw_arguments, str):
-        try:
-            arguments = json.loads(raw_arguments)
-        except json.JSONDecodeError:
-            arguments = None
-    else:
-        arguments = raw_arguments
-    if not isinstance(arguments, dict):
-        await session.tool_result(
-            turn_id=turn_id,
-            call_id=call_id,
-            success=False,
-            output=None,
-            error="sandbox_exec arguments must be a JSON object",
-        )
-        return True
-
-    try:
-        result = await _run_sandbox_command(record, arguments)
-    except Exception as error:
-        await session.tool_result(
-            turn_id=turn_id,
-            call_id=call_id,
-            success=False,
-            output=None,
-            error=_public_error(error),
-        )
-    else:
-        await session.tool_result(
-            turn_id=turn_id,
-            call_id=call_id,
-            success=True,
-            output=result,
-            error=None,
-        )
-        if result["exit_code"] == 0 and on_success is not None:
-            on_success()
-    return True
+async def _wait_for_vps(record: ExperimentRecord, container_name: str) -> None:
+    if not record.vps_port:
+        raise ExperimentError("Experiment VPS control port is unavailable")
+    base_url = f"http://127.0.0.1:{record.vps_port}"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(os.getenv("EXPERIMENT_VPS_TIMEOUT", "90"))
+    last_error = "VPS did not respond"
+    async with httpx.AsyncClient(timeout=3) as client:
+        while loop.time() < deadline:
+            try:
+                response = await client.get(f"{base_url}/readyz")
+                if response.is_success:
+                    probe = await _run_vps_command(
+                        record,
+                        {
+                            "command": "pwd; id; test -w .; command -v sh git python node npm",
+                            "cwd": record.workspace_directory,
+                            "timeout_seconds": 30,
+                        },
+                    )
+                    if probe["exit_code"] == 0:
+                        return
+                    last_error = "VPS command preflight failed"
+                else:
+                    last_error = f"HTTP {response.status_code}"
+            except (httpx.HTTPError, ValueError) as error:
+                last_error = type(error).__name__
+            container_failure = await _sandbox_container_diagnostic(container_name)
+            if container_failure:
+                raise ExperimentError(container_failure)
+            await asyncio.sleep(0.5)
+    diagnostic = await _sandbox_container_diagnostic(
+        container_name,
+        include_running_logs=True,
+    )
+    if diagnostic:
+        raise ExperimentError(diagnostic)
+    raise ExperimentError(f"Experiment VPS failed its readiness check ({last_error})")
 
 
-async def _run_sandbox_command(
+async def _run_vps_command(
     record: ExperimentRecord,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     container_name = record.sandbox_id
     if not container_name or container_name != _container_name(record.id):
-        raise ExperimentNotReady("Experiment sandbox is unavailable")
+        raise ExperimentNotReady("Experiment VPS is unavailable")
     await _ensure_container_running(container_name)
+    if not record.vps_port or not record.vps_token:
+        raise ExperimentNotReady("Experiment VPS control channel is unavailable")
 
     command = arguments.get("command")
     if not isinstance(command, str) or not command.strip():
-        raise ExperimentError("sandbox_exec requires a non-empty command")
+        raise ExperimentError("VPS command must be non-empty")
     if len(command) > MAX_COMMAND_CHARS:
-        raise ExperimentError(f"sandbox_exec command exceeds {MAX_COMMAND_CHARS} characters")
+        raise ExperimentError(f"VPS command exceeds {MAX_COMMAND_CHARS} characters")
 
     cwd = arguments.get("cwd") or record.workspace_directory or "/workspace"
     if not isinstance(cwd, str) or not cwd.startswith("/") or "\x00" in cwd:
-        raise ExperimentError("sandbox_exec cwd must be an absolute container path")
+        raise ExperimentError("VPS command cwd must be an absolute path")
 
     timeout_value = arguments.get("timeout_seconds", 300)
     if isinstance(timeout_value, bool) or not isinstance(timeout_value, int):
-        raise ExperimentError("sandbox_exec timeout_seconds must be an integer")
+        raise ExperimentError("VPS command timeout_seconds must be an integer")
     timeout_seconds = max(1, min(600, timeout_value))
-    result = await _run_process(
-        [
-            "docker",
-            "exec",
-            "--workdir",
-            cwd,
-            container_name,
-            "timeout",
-            "--signal=KILL",
-            str(timeout_seconds),
-            "sh",
-            "-lc",
-            command,
-        ],
-        timeout=timeout_seconds + 10,
-    )
-    output = _redact(result.output, _api_key())
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds + 5) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{record.vps_port}/v1/exec",
+                headers={"Authorization": f"Bearer {record.vps_token}"},
+                json={
+                    "command": command,
+                    "cwd": cwd,
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+    except httpx.TimeoutException as error:
+        raise ExperimentError("Experiment VPS command timed out") from error
+    except httpx.HTTPError as error:
+        raise ExperimentError("Experiment VPS command request failed") from error
+    if not response.is_success:
+        raise ExperimentError(f"Experiment VPS rejected command (HTTP {response.status_code})")
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError) as error:
+        raise ExperimentError("Experiment VPS returned an invalid command response") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("exit_code"), int):
+        raise ExperimentError("Experiment VPS returned an invalid command response")
+    raw_output = payload.get("output", "")
+    if not isinstance(raw_output, str):
+        raise ExperimentError("Experiment VPS returned an invalid command response")
+    output = _redact(raw_output, _api_key())
     truncated = len(output) > MAX_COMMAND_OUTPUT_CHARS
     if truncated:
         output = output[-MAX_COMMAND_OUTPUT_CHARS:]
     return {
-        "exit_code": result.returncode,
+        "exit_code": payload["exit_code"],
         "output": output,
-        "cwd": cwd,
-        "truncated": truncated,
+        "cwd": payload.get("cwd") if isinstance(payload.get("cwd"), str) else cwd,
+        "truncated": bool(payload.get("truncated")) or truncated,
     }
 
 
 async def _run_boot_turn(session: Any, record: ExperimentRecord) -> None:
+    proof_nonce = secrets.token_hex(16)
+    proof_path = f"/tmp/xo-agent-proof-{record.id.removeprefix('exp_')[:24]}"
+    await _run_vps_command(
+        record,
+        {"command": f"rm -f {proof_path}", "cwd": "/", "timeout_seconds": 15},
+    )
     prompt = (
-        f"Call {SANDBOX_EXEC_TOOL_NAME} now to prove command and filesystem access. Run "
-        "`pwd; id; test -w .; probe=.xo-experiment-access-probe; printf ready > \"$probe\"; "
-        "test -s \"$probe\"; rm -f \"$probe\"; command -v sh git python node npm` in "
-        f"{record.workspace_directory}. If it succeeds, read AGENTS.md when present, list the "
+        f"Call {VPS_EXEC_TOOL_NAME} now. First run this exact "
+        f"command: `printf %s {proof_nonce} > {proof_path}`. Then run `pwd; id; "
+        "command -v sh git python node npm` in "
+        f"{record.workspace_directory}. Read AGENTS.md when present, list the "
         f"workspace root, and reply with a one-sentence READY summary for {record.project_id}. "
         f"For later web-app tasks, bind the server to 0.0.0.0:{APP_PORT} and report the public "
         f"URL {record.app_url}."
@@ -1560,38 +1555,50 @@ async def _run_boot_turn(session: Any, record: ExperimentRecord) -> None:
         nonlocal command_succeeded
         command_succeeded = True
 
-    async with asyncio.timeout(float(os.getenv("EXPERIMENT_BOOT_TIMEOUT", "300"))):
-        handled_call_ids: set[str] = set()
-        async with aclosing(session.stream(input=prompt)) as events:
-            async for event in events:
-                await _handle_sandbox_tool_call(
-                    session,
-                    event,
-                    record,
-                    handled_call_ids,
-                    on_success=remember_success,
+    try:
+        async with asyncio.timeout(float(os.getenv("EXPERIMENT_BOOT_TIMEOUT", "300"))):
+            async with aclosing(
+                session.stream(
+                    input=prompt,
+                    tool_handlers=_vps_tool_handlers(record, remember_success),
                 )
-                event_type = getattr(event, "type", "")
-                if event_type == "session.environment.connected":
-                    record.stage = "booting_agent"
-                    record.touch()
-                delta = getattr(event, "output_text_delta", None)
-                text = getattr(event, "output_text", None)
-                if isinstance(delta, str):
-                    _append_output(record, delta)
-                elif isinstance(text, str) and not record.output:
-                    _append_output(record, text)
-                if event_type in {
-                    "session.environment.failed",
-                    "session.failed",
-                    "session.turn.cancelled",
-                    "session.turn.failed",
-                }:
-                    raise ExperimentError(_event_failure(event))
-    if not command_succeeded:
-        raise ExperimentError(
-            "Agent boot check did not execute a sandbox command; command tools are unavailable"
+            ) as events:
+                async for event in events:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "session.environment.connected":
+                        record.stage = "booting_agent"
+                        record.touch()
+                    delta = getattr(event, "output_text_delta", None)
+                    text = getattr(event, "output_text", None)
+                    if isinstance(delta, str):
+                        _append_output(record, delta)
+                    elif isinstance(text, str) and not record.output:
+                        _append_output(record, text)
+                    if event_type in {
+                        "session.environment.failed",
+                        "session.failed",
+                        "session.turn.cancelled",
+                        "session.turn.failed",
+                    }:
+                        raise ExperimentError(_event_failure(event))
+        proof = await _run_vps_command(
+            record,
+            {
+                "command": f"test \"$(cat {proof_path})\" = {proof_nonce}",
+                "cwd": "/",
+                "timeout_seconds": 15,
+            },
         )
+        if not command_succeeded or proof["exit_code"] != 0:
+            raise ExperimentError(
+                "Agents API session did not prove VPS command and filesystem access"
+            )
+    finally:
+        with suppress(Exception):
+            await _run_vps_command(
+                record,
+                {"command": f"rm -f {proof_path}", "cwd": "/", "timeout_seconds": 15},
+            )
 
 
 async def _retrieve_terminal_session(session: Any) -> Any:
@@ -1699,6 +1706,14 @@ def _sandbox_app_url(host_port: int) -> str:
     return _templated_port_url(
         host_port,
         env_name="EXPERIMENT_APP_URL_TEMPLATE",
+        default="http://127.0.0.1:{port}/",
+    )
+
+
+def _vps_url(host_port: int) -> str:
+    return _templated_port_url(
+        host_port,
+        env_name="EXPERIMENT_VPS_URL_TEMPLATE",
         default="http://127.0.0.1:{port}/",
     )
 

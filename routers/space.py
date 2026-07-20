@@ -22,6 +22,12 @@ from services.cowork_agent.visualizer.session_telemetry import (
     build_session_telemetry,
 )
 from services.cowork_agent.visualizer.sessions_graph import build_sessions_graph
+from services.cowork_agent.visualizer.environments_graph import build_environments_graph
+from services.cowork_agent.visualizer.commit_timeline import (
+    build_project_commit_timeline,
+    build_environment_commit_timeline,
+)
+from services.cowork_agent.visualizer.session_diffs import build_session_diffs
 from services.cowork_agent.visualizer.xo_overview import (
     build_sessions_overview,
     build_xo_overview,
@@ -228,6 +234,41 @@ async def sessions_graph_data():
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
+# Environments — fourth dataset, for the space switcher's third entry. The
+# workspace's projects clustered into 5 fixed business-purpose hubs (app/
+# ops/wiki/marketing/customer) instead of one hub per project. Same TTL,
+# separate cache slot.
+_environments_graph_cache: tuple[float, dict] | None = None
+
+
+@router.get("/data/environments_graph.json")
+async def environments_graph_data():
+    """The workspace's projects classified into 5 business-purpose clusters.
+
+    Same shape as /space/data/space.json, so the graph renderer (and its
+    Timeline and Six Degrees lenses) consume it unchanged. No static
+    fallback: a truthful 503 beats a stale map."""
+    global _environments_graph_cache
+    now = time.monotonic()
+    if _environments_graph_cache is not None and now - _environments_graph_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_environments_graph_cache[1],
+                            headers={"Cache-Control": "no-store"})
+
+    try:
+        # Filesystem walk + git log per project; keep it off the event loop.
+        data = await asyncio.to_thread(build_environments_graph)
+    except Exception as exc:
+        print(f"⚠️ environments_graph failed ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "projects_root_unavailable",
+                    "message": "Could not build the environments graph."},
+        )
+
+    _environments_graph_cache = (now, data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
 # Workspace .xo/ state for the Overview tab. Read-only (the watcher service
 # owns .xo/); same TTL, separate cache slot. Builds are single-flight: a slow
 # tree walk must not fan out one duplicate build per polling client.
@@ -308,6 +349,131 @@ async def overview_sessions_data():
                         "message": "No runtime session data is readable."},
             )
         _sess_overview_cache = (time.monotonic(), data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Commit timeline — one entry per commit, across every project and its
+# in-repo worktrees. Powers the Projects-space Timeline's light-cone view.
+_commits_cache: tuple[float, dict] | None = None
+_commits_lock: asyncio.Lock | None = None
+_commits_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_commits_lock() -> asyncio.Lock:
+    global _commits_lock, _commits_lock_loop
+    loop = asyncio.get_running_loop()
+    if _commits_lock is None or _commits_lock_loop is not loop:
+        _commits_lock = asyncio.Lock()
+        _commits_lock_loop = loop
+    return _commits_lock
+
+
+@router.get("/data/commits.json")
+async def commits_data():
+    """Git commit history (projects + worktrees) as timeline events."""
+    global _commits_cache
+    now = time.monotonic()
+    if _commits_cache is not None and now - _commits_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_commits_cache[1], headers={"Cache-Control": "no-store"})
+    async with _get_commits_lock():
+        now = time.monotonic()
+        if _commits_cache is not None and now - _commits_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(_commits_cache[1], headers={"Cache-Control": "no-store"})
+        try:
+            # Many `git log` subprocess calls; keep them off the event loop.
+            data = await asyncio.to_thread(build_project_commit_timeline)
+        except Exception as exc:
+            print(f"⚠️ commit_timeline failed ({exc})")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "projects_root_unavailable",
+                        "message": "Could not build the commit timeline."},
+            )
+        _commits_cache = (time.monotonic(), data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Environment commit timeline — commits.json's events tagged with which of
+# the 5 Environments clusters each project belongs to. Powers the Growth
+# Trunk view: one trunk per cluster, not per project.
+_env_commits_cache: tuple[float, dict] | None = None
+_env_commits_lock: asyncio.Lock | None = None
+_env_commits_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_env_commits_lock() -> asyncio.Lock:
+    global _env_commits_lock, _env_commits_lock_loop
+    loop = asyncio.get_running_loop()
+    if _env_commits_lock is None or _env_commits_lock_loop is not loop:
+        _env_commits_lock = asyncio.Lock()
+        _env_commits_lock_loop = loop
+    return _env_commits_lock
+
+
+@router.get("/data/environment_commits.json")
+async def environment_commits_data():
+    """Commit history tagged by Environments cluster (app/ops/wiki/docs/customer)."""
+    global _env_commits_cache
+    now = time.monotonic()
+    if _env_commits_cache is not None and now - _env_commits_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_env_commits_cache[1], headers={"Cache-Control": "no-store"})
+    async with _get_env_commits_lock():
+        now = time.monotonic()
+        if _env_commits_cache is not None and now - _env_commits_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(_env_commits_cache[1], headers={"Cache-Control": "no-store"})
+        try:
+            # git log subprocess calls + a full per-project classification
+            # walk; keep off the event loop.
+            data = await asyncio.to_thread(build_environment_commit_timeline)
+        except Exception as exc:
+            print(f"⚠️ environment_commit_timeline failed ({exc})")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "projects_root_unavailable",
+                        "message": "Could not build the environment commit timeline."},
+            )
+        _env_commits_cache = (time.monotonic(), data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+# Session diffs — the Sessions-space Timeline's equivalent of commits.json,
+# derived from agent Edit/Write tool calls in each runtime's transcripts.
+_session_diffs_cache: tuple[float, dict] | None = None
+_session_diffs_lock: asyncio.Lock | None = None
+_session_diffs_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_session_diffs_lock() -> asyncio.Lock:
+    global _session_diffs_lock, _session_diffs_lock_loop
+    loop = asyncio.get_running_loop()
+    if _session_diffs_lock is None or _session_diffs_lock_loop is not loop:
+        _session_diffs_lock = asyncio.Lock()
+        _session_diffs_lock_loop = loop
+    return _session_diffs_lock
+
+
+@router.get("/data/session_diffs.json")
+async def session_diffs_data():
+    """Agent-derived code diffs (Edit/Write tool calls) as timeline events."""
+    global _session_diffs_cache
+    now = time.monotonic()
+    if _session_diffs_cache is not None and now - _session_diffs_cache[0] < SPACE_CACHE_TTL:
+        return JSONResponse(_session_diffs_cache[1], headers={"Cache-Control": "no-store"})
+    async with _get_session_diffs_lock():
+        now = time.monotonic()
+        if _session_diffs_cache is not None and now - _session_diffs_cache[0] < SPACE_CACHE_TTL:
+            return JSONResponse(_session_diffs_cache[1], headers={"Cache-Control": "no-store"})
+        try:
+            # Transcript scans are synchronous file I/O; keep off the event loop.
+            data = await asyncio.to_thread(build_session_diffs)
+        except Exception as exc:
+            print(f"⚠️ session_diffs failed ({exc})")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "commit_diffs_unavailable",
+                        "message": "No runtime commit-diff data is readable."},
+            )
+        _session_diffs_cache = (time.monotonic(), data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 

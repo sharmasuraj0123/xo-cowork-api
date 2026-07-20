@@ -101,14 +101,16 @@ credential. The UI then uses `POST /api/experiments`, polls
 `POST /api/experiments/{id}/turns`, opens the returned loopback-only sandbox
 `space_url`, and stops through `POST /api/experiments/{id}/stop`. A project web
 server bound to `0.0.0.0:3000` is published on a second dynamic loopback
-`app_url`, shown as **Open app** in the live workbench.
+`app_url`, shown as **Open app** in the live workbench. The Docker-provisioned
+VPS supervisor also returns a read-only `vps_url`; its command API is private
+and protected by a host-generated per-experiment bearer credential.
 The Experiments rail inside that returned sandbox Space is inspection-only: it
 links back to the parent Chat workspace and never reports the child container's
 intentionally absent API key, SDK, or Docker CLI as host setup failures. Set
 `EXPERIMENT_PARENT_SPACE_URL` when the parent is exposed through a Coder/XO
 proxy instead of local loopback.
 
-The host project is never mounted into the agent container. A temporary staging
+The host project is never mounted read/write into the experiment VPS. A temporary staging
 copy recursively omits dotenv files, common credential stores, dependency
 trees, caches, build output, symlinks, and special files; Git projects retain a
 local Git checkout with remotes removed and receive sanitized modified/untracked
@@ -116,10 +118,18 @@ work. Staging is mounted read-only and deleted after boot.
 
 `EXPERIMENT_PERMISSION_PROFILE=unrestricted` is the default trusted-user mode.
 It explicitly requests Agents API `code_mode`, supplies a container-scoped
-`sandbox_exec` fallback, starts Codex with `danger-full-access` and approvals
-set to `never`, and gives the agent root, a writable container filesystem, and
+`vps_exec` handler through the preview SDK, starts Codex with `danger-full-access`
+and approvals set to `never`, and gives the agent root, a writable VPS filesystem, and
 outbound networking. Set the profile to `hardened` to opt into the former
 non-root, read-only-root, capability-dropped, `no-new-privileges` posture.
+
+The OpenAI Agents API session is always `environment.type=self_hosted`. Docker
+is only the local provisioner for XO's small VPS supervisor; the supervisor
+bootstraps the workspace, manages Space and `codex exec-server`, and exposes
+authenticated readiness/preflight control. Agent turns remain
+`session.stream(input=..., tool_handlers={"vps_exec": ...})`; the preview SDK
+is the sole owner of each pending tool result, so XO never manually submits a
+duplicate result.
 
 Both profiles retain the outer Docker boundary: no host Docker socket, no
 unrelated host mounts, read-only filtered staging, loopback-only published

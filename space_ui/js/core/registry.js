@@ -36,6 +36,7 @@ export async function switchTo(id){
   if(!v)return;
   const prev=current&&current!==id?byId.get(current):null;
   current=id;
+  document.body.dataset.view=id;
   for(const w of views){
     document.getElementById('view-'+w.id)?.classList.toggle('is-active',w.id===id);
     /* a tabless view (hideTab) lights up its parentTab so the topbar still

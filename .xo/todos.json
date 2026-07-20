@@ -1,13 +1,55 @@
 {
-  "$schema": "./schema/todos.schema.json",
   "schema": 1,
-  "updated_at": "2026-07-18T22:05:58Z",
+  "updated_at": "2026-07-20T03:34:06Z",
   "sessions": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
       "runtime": "claude_code",
       "source_file": null,
       "session_started_at": "2026-07-14T18:28:49.664Z",
-      "todos": []
+      "todos": [
+        {
+          "id": "1",
+          "content": "Add xotype classifier + stamping in space_index.py",
+          "status": "completed",
+          "description": "Pattern tables (_XOTYPE_*), _xotype_for(name, rel), xotype tally in _folder_facts (zero new I/O), stamp xotype on leaves/groups/hubs, meta.typeLegend.",
+          "active_form": "Adding xotype classifier to space_index"
+        },
+        {
+          "id": "2",
+          "content": "Extract classify_one_project + persistence read path",
+          "status": "completed",
+          "description": "environments_graph.py: classify_one_project(pid, deadline) returning the classification block; build_environments_graph fast path reading persisted blocks via reader.read_json with live fallback + source log; xotype on sessions_graph (session) and environments leaves (output).",
+          "active_form": "Extracting single-project classifier + read path"
+        },
+        {
+          "id": "3",
+          "content": "Classification sink + watcher hook + workspace roll-up + schemas",
+          "status": "completed",
+          "description": "sinks/classification.py (read-modify-write project.json, throttle 10min/2min-dirty, 1 project/tick round-robin); hook in watcher.py every-project pass; workspace_json.py roll-up; schema updates for project/workspace with optional classification subschema.",
+          "active_form": "Building classification sink + watcher hook"
+        },
+        {
+          "id": "4",
+          "content": "UI overlay: type chips, dimming, tags, Open as root",
+          "status": "completed",
+          "description": "atlas.js: xotype on nodes, TYPE_WEIGHT dimming (system/session .45 alpha, .85 radius), #typechips filter row combining with deptFilter, tag in hover/panel/search, legend entries, \"Open as root\" panel action (setRoot). index.html #typechips div + offset shuffle; graph.css styles.",
+          "active_form": "Building the type-tag UI overlay"
+        },
+        {
+          "id": "5",
+          "content": "Test + full verification sweep",
+          "status": "completed",
+          "description": "tests/test_classification_sink.py; import gate; restart server, watcher back-fill check, endpoint timing + fallback check, browser verification of all three spaces per plan.",
+          "active_form": "Verifying end to end"
+        },
+        {
+          "id": "6",
+          "content": "Enclosed multi-membership environment clusters",
+          "status": "completed",
+          "description": "Membership-based classification (done), shared-project ties + midpoint springs, hull enclosure rendering, schema + verification.",
+          "active_form": "Building enclosed multi-membership clusters"
+        }
+      ]
     },
     "codex:launch-desk-20260719": {
       "runtime": "codex",
@@ -134,6 +176,18 @@
           "active_form": "Adding Codex session telemetry"
         }
       ]
+    },
+    "251d0be2-9531-40b1-8a77-4fa0e0643df8": {
+      "runtime": "claude_code",
+      "source_file": null,
+      "session_started_at": "2026-07-20T00:12:48.438Z",
+      "todos": []
+    },
+    "6bee2eb9-7dac-4404-988c-20110c2d3fde": {
+      "runtime": "claude_code",
+      "source_file": null,
+      "session_started_at": "2026-07-20T00:21:57.059Z",
+      "todos": []
     }
   }
 }

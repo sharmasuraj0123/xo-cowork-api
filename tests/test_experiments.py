@@ -219,7 +219,7 @@ class ExperimentManagerTests(unittest.IsolatedAsyncioTestCase):
 
 class ExperimentAvailabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_managed_sandbox_reports_context_instead_of_host_prerequisites(self) -> None:
-        provider = runtime.LocalDockerExperimentProvider()
+        provider = runtime.SelfHostedVPSExperimentProvider()
         process = AsyncMock(side_effect=AssertionError("sandbox preflight ran a host command"))
         with patch.dict(
             os.environ,
@@ -243,7 +243,7 @@ class ExperimentAvailabilityTests(unittest.IsolatedAsyncioTestCase):
         process.assert_not_awaited()
 
     async def test_legacy_sandbox_environment_is_detected(self) -> None:
-        provider = runtime.LocalDockerExperimentProvider()
+        provider = runtime.SelfHostedVPSExperimentProvider()
         with patch.dict(
             os.environ,
             {
@@ -374,7 +374,7 @@ class ExperimentSnapshotTests(unittest.IsolatedAsyncioTestCase):
                     await runtime._validate_source_bundle(root)
 
 
-class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
+class ExperimentSelfHostedVPSTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_session_uses_selected_sandbox_project_directory(self) -> None:
         class Environment:
             environment_id = "env_selected"
@@ -397,8 +397,9 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
         agent = client.sessions.create.await_args.kwargs["agent"]
         environment = client.sessions.create.await_args.kwargs["environment"]
         self.assertTrue(agent["code_mode"])
-        self.assertEqual(agent["tools"][0]["name"], runtime.SANDBOX_EXEC_TOOL_NAME)
-        self.assertIn("always-on shell fallback", agent["instructions"])
+        self.assertEqual(agent["tools"][0]["name"], runtime.VPS_EXEC_TOOL_NAME)
+        self.assertIn(runtime.VPS_EXEC_TOOL_NAME, agent["instructions"])
+        self.assertEqual(environment["type"], "self_hosted")
         self.assertEqual(
             environment["workspace_directory"],
             "/workspace/xo-projects/demo root",
@@ -439,11 +440,12 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 runtime.ProcessResult(0, "container-id\n"),
                 runtime.ProcessResult(0, "127.0.0.1:49173\n"),
                 runtime.ProcessResult(0, "127.0.0.1:49174\n"),
+                runtime.ProcessResult(0, "127.0.0.1:49175\n"),
             ]
         )
         staged = Path("/tmp/staged project")
         with patch.object(runtime, "_run_process", process):
-            ports = await runtime._start_docker_executor(
+            ports = await runtime._start_docker_vps(
                 source_root=staged,
                 api_key=secret,
                 environment_id="env_123",
@@ -453,17 +455,20 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 container_name="xo-experiment-123",
                 project_id="demo",
                 parent_space_url="http://127.0.0.1:5002/space/#/chat",
+                vps_token="vps-secret",
             )
 
         command = process.await_args_list[0].args[0]
         env = process.await_args_list[0].kwargs["env"]
-        self.assertEqual(ports, (49173, 49174))
+        self.assertEqual(ports, (49173, 49174, 49175))
         self.assertNotIn(secret, " ".join(command))
         self.assertEqual(env["CODEX_API_KEY"], secret)
         self.assertEqual(env["XO_PROJECTS_ROOT"], "/workspace/xo-projects")
         self.assertEqual(env["AI_WORKSPACE_ROOT"], "/workspace/xo-projects/demo")
         self.assertEqual(env["EXPERIMENT_RUNTIME_ROLE"], "sandbox")
         self.assertEqual(env["EXPERIMENT_PERMISSION_PROFILE"], "unrestricted")
+        self.assertEqual(env["EXPERIMENT_CONTROL_TOKEN"], "vps-secret")
+        self.assertEqual(env["EXPERIMENT_CONTROL_PORT"], "8787")
         self.assertEqual(
             env["EXPERIMENT_PARENT_SPACE_URL"],
             "http://127.0.0.1:5002/space/#/chat",
@@ -473,10 +478,10 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("no-new-privileges", command)
         self.assertNotIn("--read-only", command)
         self.assertNotIn("--cap-drop", command)
+        self.assertIn("127.0.0.1::8787", command)
         self.assertIn("127.0.0.1::5002", command)
         self.assertIn("127.0.0.1::3000", command)
-        self.assertIn('sandbox_mode="danger-full-access"', command[-1])
-        self.assertIn('approval_policy="never"', command[-1])
+        self.assertEqual(command[-1], runtime._docker_image())
 
     async def test_hardened_profile_retains_outer_container_restrictions(self) -> None:
         process = AsyncMock(
@@ -484,6 +489,7 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 runtime.ProcessResult(0, "container-id\n"),
                 runtime.ProcessResult(0, "127.0.0.1:49173\n"),
                 runtime.ProcessResult(0, "127.0.0.1:49174\n"),
+                runtime.ProcessResult(0, "127.0.0.1:49175\n"),
             ]
         )
         with patch.dict(os.environ, {"EXPERIMENT_PERMISSION_PROFILE": "hardened"}), patch.object(
@@ -491,7 +497,7 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
             "_run_process",
             process,
         ):
-            await runtime._start_docker_executor(
+            await runtime._start_docker_vps(
                 source_root=Path("/tmp/staged"),
                 api_key="sk-test",
                 environment_id="env_123",
@@ -501,6 +507,7 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 container_name="xo-experiment-123",
                 project_id="demo",
                 parent_space_url="http://127.0.0.1:5002/space/#/chat",
+                vps_token="vps-secret",
             )
 
         command = process.await_args_list[0].args[0]
@@ -511,61 +518,70 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--cap-drop", command)
         self.assertIn("10001:10001", command)
 
-    async def test_sandbox_exec_routes_to_owned_container_and_redacts_output(self) -> None:
+    async def test_vps_exec_uses_authenticated_control_server_and_redacts_output(self) -> None:
         secret = "sk-sandbox-command-secret"
-        process = AsyncMock(
-            side_effect=[
-                runtime.ProcessResult(0, "true\n"),
-                runtime.ProcessResult(0, f"uid=0(root) {secret}\n"),
-            ]
-        )
+        process = AsyncMock(return_value=runtime.ProcessResult(0, "true\n"))
         record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
         record.sandbox_id = "xo-experiment-123"
         record.workspace_directory = "/workspace/xo-projects/demo"
+        record.vps_port = 49173
+        record.vps_token = "control-secret"
+
+        class Response:
+            is_success = True
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "exit_code": 0,
+                    "output": f"uid=0(root) {secret}\n",
+                    "cwd": record.workspace_directory,
+                    "truncated": False,
+                }
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, **kwargs):
+                self.url = url
+                self.kwargs = kwargs
+                return Response()
+
+        client = Client()
         with patch.dict(os.environ, {"OPENAI_API_KEY": secret}), patch.object(
             runtime,
             "_run_process",
             process,
-        ):
-            result = await runtime._run_sandbox_command(
+        ), patch.object(runtime.httpx, "AsyncClient", return_value=client):
+            result = await runtime._run_vps_command(
                 record,
                 {"command": "id", "timeout_seconds": 12},
             )
 
-        command = process.await_args_list[1].args[0]
         self.assertEqual(result["exit_code"], 0)
         self.assertIn("uid=0(root)", result["output"])
         self.assertNotIn(secret, result["output"])
-        self.assertEqual(command[:4], ["docker", "exec", "--workdir", record.workspace_directory])
-        self.assertEqual(command[-3:], ["sh", "-lc", "id"])
-        self.assertIn("12", command)
+        self.assertEqual(client.url, "http://127.0.0.1:49173/v1/exec")
+        self.assertEqual(client.kwargs["headers"]["Authorization"], "Bearer control-secret")
+        self.assertEqual(client.kwargs["json"]["command"], "id")
 
-    async def test_boot_turn_requires_successful_command_tool_call(self) -> None:
+    async def test_boot_turn_uses_sdk_owned_vps_handler_and_proof(self) -> None:
         record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
         record.sandbox_id = "xo-experiment-123"
         record.workspace_directory = "/workspace/xo-projects/demo"
 
         class Session:
-            def __init__(self) -> None:
-                self.tool_results = []
-
-            async def tool_result(self, **result):
-                self.tool_results.append(result)
-
-            def stream(self, *, input):
+            def stream(self, *, input, tool_handlers):
                 async def events():
-                    call = {
-                        "name": runtime.SANDBOX_EXEC_TOOL_NAME,
-                        "call_id": "call_boot",
-                        "arguments": {"command": "pwd", "cwd": record.workspace_directory},
-                    }
-                    event = SimpleNamespace(
-                        type="session.turn.item.added",
-                        turn_id="turn_boot",
-                        function_call=call,
+                    self.handlers = tool_handlers
+                    await tool_handlers[runtime.VPS_EXEC_TOOL_NAME](
+                        {"command": "pwd", "cwd": record.workspace_directory}
                     )
-                    yield event
-                    yield event
                     yield SimpleNamespace(type="session.turn.output_text.done", output_text="READY")
 
                 self.input = input
@@ -573,16 +589,22 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             runtime,
-            "_run_sandbox_command",
-            AsyncMock(return_value={"exit_code": 0, "output": "ok", "cwd": record.workspace_directory}),
+            "_run_vps_command",
+            AsyncMock(
+                return_value={
+                    "exit_code": 0,
+                    "output": "ok",
+                    "cwd": record.workspace_directory,
+                    "truncated": False,
+                }
+            ),
         ):
             session = Session()
             await runtime._run_boot_turn(session, record)
 
-        self.assertIn(runtime.SANDBOX_EXEC_TOOL_NAME, session.input)
+        self.assertIn(runtime.VPS_EXEC_TOOL_NAME, session.input)
+        self.assertEqual(list(session.handlers), [runtime.VPS_EXEC_TOOL_NAME])
         self.assertIn("READY", record.output)
-        self.assertEqual(len(session.tool_results), 1)
-        self.assertTrue(session.tool_results[0]["success"])
 
     async def test_boot_turn_rejects_text_only_readiness(self) -> None:
         record = runtime.ExperimentRecord(id="exp_123", project_id="demo")
@@ -590,14 +612,27 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
         record.workspace_directory = "/workspace/xo-projects/demo"
 
         class Session:
-            def stream(self, *, input):
+            def stream(self, *, input, tool_handlers):
                 async def events():
+                    self.handlers = tool_handlers
                     yield SimpleNamespace(type="session.turn.output_text.done", output_text="READY")
 
                 return events()
 
-        with self.assertRaisesRegex(runtime.ExperimentError, "command tools are unavailable"):
-            await runtime._run_boot_turn(Session(), record)
+        with patch.object(
+            runtime,
+            "_run_vps_command",
+            AsyncMock(
+                return_value={
+                    "exit_code": 0,
+                    "output": "ok",
+                    "cwd": record.workspace_directory,
+                    "truncated": False,
+                }
+            ),
+        ):
+            with self.assertRaisesRegex(runtime.ExperimentError, "did not prove VPS command"):
+                await runtime._run_boot_turn(Session(), record)
 
     def test_permission_profile_defaults_to_unrestricted_and_rejects_unknown(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
@@ -675,6 +710,11 @@ class ExperimentDockerTests(unittest.IsolatedAsyncioTestCase):
                 runtime._sandbox_app_url(49174),
                 "https://sandbox.example.test:49174/",
             )
+
+    def test_vps_url_uses_its_dynamic_published_port(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EXPERIMENT_VPS_URL_TEMPLATE", None)
+            self.assertEqual(runtime._vps_url(49173), "http://127.0.0.1:49173/")
 
     def test_output_is_bounded_and_key_redacted(self) -> None:
         record = runtime.ExperimentRecord(id="exp_output", project_id="demo")

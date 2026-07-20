@@ -24,6 +24,7 @@ from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import UsageObserved
 from services.cowork_agent.visualizer.sinks import (
     activity,
+    classification,
     project_json,
     sessions_augment,
     stats,
@@ -88,6 +89,9 @@ class Watcher:
             )
             self.sources = [source]
         self.model_by_session: dict[str, str] = {}
+        # Round-robin cursor for the classification sink: at most one
+        # project's (expensive) classification walk runs per tick.
+        self._classify_cursor = 0
 
     # ── One tick ────────────────────────────────────────────────────────
 
@@ -169,6 +173,24 @@ class Watcher:
                 )
             except Exception:
                 logger.exception("activity sink failed for %s", pid)
+
+        # 5b. Classification refresh — the walk is expensive vs the 1s
+        # cadence, so at most ONE project is classified per tick and at
+        # most a handful of cheap staleness checks run (round-robin
+        # cursor). Cold workspaces back-fill in ~one tick per project.
+        pids = list_project_ids()
+        if pids:
+            n = len(pids)
+            for _ in range(min(4, n)):
+                pid2 = pids[self._classify_cursor % n]
+                self._classify_cursor = (self._classify_cursor + 1) % n
+                try:
+                    if classification.apply(xo_dir(pid2), pid2,
+                                            dirty=pid2 in events_by_project):
+                        break
+                except Exception:
+                    logger.exception("classification sink failed for %s", pid2)
+                    break
 
         # 6. Workspace tier — re-aggregate every tick (cheap; small
         # JSON files). Timeline is append-only and handled in step 4.

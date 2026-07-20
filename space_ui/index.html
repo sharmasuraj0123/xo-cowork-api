@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="css/projects.css">
 <link rel="stylesheet" href="css/chat.css">
 <link rel="stylesheet" href="css/experiment.css">
+<link rel="stylesheet" href="css/envboard.css">
 <link rel="stylesheet" href="css/overview.css">
 
 <div class="topbar">
@@ -57,6 +58,7 @@
     <canvas id="gcanvas"></canvas>
     <div class="ov" id="fmode" title="How to show the space's contents"></div>
     <div class="ov" id="chips"></div>
+    <div class="ov" id="typechips" title="Spotlight one XO data type"></div>
     <div id="flist"></div>
     <p class="ov" id="hint"><b>Click</b> a node to focus its neighbourhood &middot; <b>Double-click</b> a cluster to open or close it &middot; <b>Drag</b> to reposition &middot; <b>Scroll</b> to zoom</p>
     <div class="ov" id="intro">
@@ -92,6 +94,17 @@
       <input id="tscrub" type="range" min="0" max="1000" value="1000">
       <div class="ticks"><span>JUN 2025</span><span>SEP</span><span>DEC</span><span>MAR 2026</span><span>JUL 2026</span></div>
     </div>
+    <!-- Commit timeline controls (Projects/Sessions spaces only; see
+         commit_timeline.js). Hidden by default; shown in place of the
+         scrub/play controls above, which stay for the Environments space's
+         artifact beeswarm. -->
+    <div class="cthead" id="cthead" hidden>
+      <div class="sess-win" id="cwin"></div>
+      <div class="clegend"><span class="cl-ins">&#9650; insertions</span><span class="cl-del">&#9660; deletions</span></div>
+      <div class="grow"></div>
+      <div id="cstats" class="cstats"></div>
+    </div>
+    <div class="cchips" id="cchips" hidden></div>
     <div id="tmilestone"></div>
     <div id="tplot"></div>
   </section>

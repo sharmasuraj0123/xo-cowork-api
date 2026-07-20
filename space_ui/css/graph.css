@@ -14,7 +14,7 @@
   #view-graph.is-list #flist{display:block}
   #view-graph.is-list canvas,#view-graph.is-list #chips,#view-graph.is-list #hint,
   #view-graph.is-list #legend,#view-graph.is-list #counts,#view-graph.is-list #intro,
-  #view-graph.is-list #simstat{display:none}
+  #view-graph.is-list #typechips,#view-graph.is-list #simstat{display:none}
   #chips{top:48px;left:18px;display:flex;gap:6px;flex-wrap:wrap}
   #chips button{
     font:400 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);
@@ -23,7 +23,17 @@
   }
   #chips button:hover{color:var(--ink);border-color:#39404d}
   #chips button.is-on{background:rgba(168,217,79,.12);border-color:var(--accent);color:var(--ink)}
-  #hint{top:84px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3);transition:opacity .5s var(--ease)}
+  #typechips{top:80px;left:18px;display:flex;gap:6px;flex-wrap:wrap}
+  #typechips button{
+    font:400 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+    background:rgba(16,19,24,.86);backdrop-filter:blur(8px);border:1px solid var(--line-soft);
+    border-radius:999px;padding:4px 11px;transition:all .16s var(--ease);
+  }
+  #typechips button:hover{color:var(--ink);border-color:#39404d}
+  #typechips button.is-on{background:rgba(168,217,79,.12);border-color:var(--accent);color:var(--ink)}
+  #legend .li-dim{opacity:.55}
+  #legend .sw-ring{border:1.4px solid #b3ada0;background:none!important}
+  #hint{top:112px;left:18px;max-width:430px;font-size:11.5px;line-height:1.65;color:var(--ink-3);transition:opacity .5s var(--ease)}
   #hint b{color:var(--ink-2);font-weight:500}
   /* the intro overlay covers the same corner and already carries the guidance —
      keep the hint hidden until the intro is dismissed (intro-dim tracks that) */
@@ -148,4 +158,19 @@
     border:1px solid var(--line);border-radius:999px;padding:7px 13px;transition:all .16s var(--ease);
   }
   .pacts button:hover{color:var(--ink);border-color:#39404d;background:var(--bg-3)}
+
+  /* panel mini-timeline: just below Show on timeline (see atlas.js's
+     mountMiniTimeline) — the same growth-trunk renderer the Timeline tab
+     uses, at a small fixed size, pre-filtered to this one node */
+  .mtl{padding:0 22px 20px}
+  .mtl-state{font-size:11.5px;color:var(--ink-3);padding:14px 0}
+  .mtl-chart{position:relative;height:112px;border:1px solid var(--line-soft);border-radius:10px;
+    background:var(--bg-2);overflow:hidden}
+  .mtl-svg{width:100%;height:100%;display:block}
+  .mtl-open{
+    display:block;width:100%;margin-top:8px;text-align:right;
+    font:400 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
+    transition:color .16s var(--ease);
+  }
+  .mtl-open:hover{color:var(--accent)}
 

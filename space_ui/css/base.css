@@ -3,7 +3,7 @@
     --line:#242832; --line-soft:#1b1f27;
     --ink:#e9e4d9; --ink-2:#b3ada0; --ink-3:#7d786d; --ink-4:#56534b;
     --eng:#a2b56b; --res:#6f93ad; --ops:#cfc9bb; --mkt:#c8674c;
-    --accent:#a8d94f; --accent-deep:#83d63a; --err:#c8674c;
+    --accent:#a8d94f; --accent-deep:#83d63a; --err:#c8674c; --ok:#7fd08a;
     --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
     --sans:system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;

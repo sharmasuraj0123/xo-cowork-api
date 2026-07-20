@@ -6,8 +6,11 @@
    All graph content comes from ./data/space.json; nothing is embedded here —
    the data lives on disk, next to this page. */
 import {apiFetch} from '../core/api.js';
-import {toast,treeHtml} from '../core/ui.js';
+import {toast} from '../core/ui.js';
+import {renderFilesList} from '../core/fileslist.js';
 import {openLeafPreview,closePreview,previewWidth} from '../core/leaf-preview.js';
+import {mountCommitTimeline,resizeCommitTimeline,selectTimelineGroup,getGroupHistory,showPopoverIn,movePopoverIn,hidePopoverSoon,dtfmt as commitDtfmt} from './commit_timeline.js';
+import {renderSplitTrunk} from './timeline_split_trunk.js';
 
 let go=()=>{};   /* ctx.switchTo, captured on first mount */
 const hooks={};  /* boot() assigns lifecycle hooks here once it has run */
@@ -15,16 +18,17 @@ let bootPromise=null;
 
 /* The space maps one of three worlds: the workspace's projects (space.json,
    the artifact map), its agent sessions (sessions_graph.json, telemetry in
-   the same schema), or environments (no dataset yet — its Files/Timeline
-   classifier is designed after the nav refactor; pages show a placeholder).
-   The switcher is the left sidebar (#sidebar, built by app.js at startup).
-   The choice persists in localStorage and switching reloads the page —
-   boot() runs exactly once per load, so a reload is the sanctioned reset,
-   and the registry's hash deep-link restores the active tab. */
+   the same schema), or environments (environments_graph.json — the same
+   projects clustered into 5 fixed business-purpose hubs: app/ops/wiki/
+   marketing/customer, instead of one hub per project). The switcher is the
+   topbar's space pill (#gmode, built by app.js at startup). The choice
+   persists in localStorage and switching reloads the page — boot() runs
+   exactly once per load, so a reload is the sanctioned reset, and the
+   registry's hash deep-link restores the active tab. */
 const DATASETS={
   output:{url:'data/space.json',label:'Projects'},
   sessions:{url:'data/sessions_graph.json',label:'Sessions'},
-  environments:{url:null,label:'Environments'}
+  environments:{url:'data/environments_graph.json',label:'Environments'}
 };
 const MODE_KEY='space.graphDataset';
 export function graphMode(){
@@ -126,9 +130,9 @@ const CAT=DATA.categories;
 const ACCENT='#a8d94f', ACCENT_DEEP='#83d63a';
 const NODES=[];
 NODES.push({id:DATA.root.id,type:'root',label:DATA.root.label,blurb:DATA.root.blurb});
-DATA.hubs.forEach(h=>NODES.push({id:h.id,type:'hub',cat:h.cat,label:h.label,blurb:h.blurb,ftype:h.ftype,facts:h.facts,shape:h.shape}));
-DATA.groups.forEach(g=>NODES.push({id:g.id,type:'group',cat:g.cat,label:g.label,blurb:g.blurb,ftype:g.ftype,facts:g.facts,shape:g.shape}));
-DATA.leaves.forEach(l=>NODES.push({id:l.id,type:'leaf',group:l.group,shape:l.shape,tag:l.tag,label:l.label,date:l.date,blurb:l.blurb,path:l.path}));
+DATA.hubs.forEach(h=>NODES.push({id:h.id,type:'hub',cat:h.cat,label:h.label,blurb:h.blurb,ftype:h.ftype,facts:h.facts,shape:h.shape,xotype:h.xotype}));
+DATA.groups.forEach(g=>NODES.push({id:g.id,type:'group',cat:g.cat,label:g.label,blurb:g.blurb,ftype:g.ftype,facts:g.facts,shape:g.shape,xotype:g.xotype}));
+DATA.leaves.forEach(l=>NODES.push({id:l.id,type:'leaf',group:l.group,shape:l.shape,tag:l.tag,label:l.label,date:l.date,blurb:l.blurb,path:l.path,ftype:l.ftype,facts:l.facts,xotype:l.xotype,clusters:l.clusters}));
 const EDGES=[];
 DATA.hubs.forEach(h=>EDGES.push({s:DATA.root.id,t:h.id,kind:'root',label:DATA.meta.rootEdgeLabel||'a department of XO'}));
 DATA.groups.forEach(g=>EDGES.push({s:g.cat,t:g.id,kind:'hg',label:'part of'}));
@@ -199,6 +203,25 @@ const isShown=n=>{
   return true;
 };
 const dimByFilter=n=>deptFilter&&n.cat&&n.cat!==deptFilter;
+
+/* XO data-type overlay: every node carries one of four tags (output/inbox/
+   session/system, from DATA.meta.typeLegend). Lightweight ('dim') types
+   render faded + smaller until their chip is selected; selecting any chip
+   spotlights that type and fades the rest. Filtering dims, never hides —
+   the graph's structure stays put. */
+const TYPE_DEFS=DATA.meta.typeLegend||[];
+const TYPE_BY_ID=Object.fromEntries(TYPE_DEFS.map(t=>[t.id,t]));
+/* Weight-dimming only makes sense in a MIXED graph: a space whose every
+   node is one type (Sessions: all 'session') must not render uniformly
+   faded. */
+const TYPE_MIXED=new Set(NODES.map(n=>n.xotype).filter(Boolean)).size>1;
+let typeFilter=null;
+function typeAlpha(n){
+  if(!n.xotype||!TYPE_DEFS.length||!TYPE_MIXED)return 1;
+  if(typeFilter)return n.xotype===typeFilter?1:.22;
+  return TYPE_BY_ID[n.xotype]?.weight==='dim'?.45:1;
+}
+const typeShrunk=n=>TYPE_MIXED&&!typeFilter&&n.xotype&&TYPE_BY_ID[n.xotype]?.weight==='dim';
 const shownNodes=()=>NODES.filter(isShown);
 const shownEdges=()=>EDGES.filter(e=>isShown(byId.get(e.s))&&isShown(byId.get(e.t)));
 
@@ -234,7 +257,12 @@ LEAVES.forEach((l,i)=>{
 /* ============================== SIMULATION ============================== */
 let simAlpha=1;
 let rootId=DATA.root.id,rootDepths=null;
-const SPR={root:{d:HUB_R,k:.02},hg:{d:175,k:.05},rg:{d:62,k:.08},x:{d:210,k:.005}};
+/* Tie springs are weak by default (cross-references must not distort the
+   tree layout); a dataset can strengthen them via meta.tieSpring — the
+   Environments space does, so a project tied to several clusters settles
+   at their midpoint. */
+const SPR={root:{d:HUB_R,k:.02},hg:{d:175,k:.05},rg:{d:62,k:.08},
+  x:DATA.meta.tieSpring||{d:210,k:.005}};
 const CHG={root:-3400,hub:-2600,group:-1000,leaf:-235};
 function simTick(){
   const vs=shownNodes(),es=shownEdges();
@@ -342,6 +370,74 @@ function drawShape(c,x,y,r,shape){
     c.rect(x-s-o,y-s+o,s*2,s*2);c.rect(x-s+o,y-s-o,s*2,s*2);}
   else c.arc(x,y,r,0,Math.PI*2);
 }
+/* ---- enclosed clusters (meta.enclose): a soft convex hull drawn around
+   each cluster's members — its group node plus every leaf whose primary
+   group OR secondary membership (leaf.clusters) is this cluster. Shared
+   projects therefore sit inside every hull they belong to, at the
+   midpoint the tie springs pull them to. ---- */
+function _convexHull(pts){
+  if(pts.length<3)return pts.slice();
+  const p=pts.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lo=[],hi=[];
+  for(const pt of p){
+    while(lo.length>1&&cross(lo[lo.length-2],lo[lo.length-1],pt)<=0)lo.pop();
+    lo.push(pt);
+  }
+  for(let i=p.length-1;i>=0;i--){
+    const pt=p[i];
+    while(hi.length>1&&cross(hi[hi.length-2],hi[hi.length-1],pt)<=0)hi.pop();
+    hi.push(pt);
+  }
+  lo.pop();hi.pop();
+  return lo.concat(hi);
+}
+let _encloseCaps=[];  /* per-hull caption anchors, drawn in the screen pass */
+const _hubByCat={};HUBS.forEach(h=>{_hubByCat[h.cat]=h;});
+function drawEnclosures(k){
+  const PAD=42;
+  _encloseCaps=[];
+  for(const g of GROUPS){
+    const pts=[[g.x,g.y]];
+    for(const l of LEAVES){
+      if(!isShown(l))continue;
+      if(l.group===g.id||(l.clusters&&l.clusters.length>1&&l.clusters.includes(g.cat)))
+        pts.push([l.x,l.y]);
+    }
+    if(pts.length<2)continue;
+    const col=CAT[g.cat]?.color||'#888';
+    let cx=0,cy=0;
+    for(const [x,y] of pts){cx+=x;cy+=y;}
+    cx/=pts.length;cy/=pts.length;
+    let minY=Infinity;
+    gc.beginPath();
+    if(pts.length===2){
+      /* two points: a padded capsule reads better than a degenerate hull */
+      const r=Math.hypot(pts[0][0]-pts[1][0],pts[0][1]-pts[1][1])/2+PAD;
+      gc.arc(cx,cy,r,0,Math.PI*2);
+      minY=cy-r;
+    }else{
+      const hull=_convexHull(pts).map(([x,y])=>{
+        const dx=x-cx,dy=y-cy,d=Math.hypot(dx,dy)||1;
+        return [x+dx/d*PAD,y+dy/d*PAD];
+      });
+      const mid=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2];
+      let m=mid(hull[hull.length-1],hull[0]);
+      gc.moveTo(m[0],m[1]);
+      for(let i=0;i<hull.length;i++){
+        const nm=mid(hull[i],hull[(i+1)%hull.length]);
+        gc.quadraticCurveTo(hull[i][0],hull[i][1],nm[0],nm[1]);
+        if(hull[i][1]<minY)minY=hull[i][1];
+      }
+      gc.closePath();
+    }
+    gc.fillStyle=hexA(col,.055);gc.fill();
+    gc.strokeStyle=hexA(col,.32);gc.lineWidth=1.2/Math.sqrt(k);
+    gc.setLineDash([5/k,4/k]);gc.stroke();gc.setLineDash([]);
+    if(g.desc)_encloseCaps.push({label:g.label,desc:g.desc,col,cx,topY:minY});
+  }
+}
+
 function drawGraph(now){
   gc.setTransform(dpr,0,0,dpr,0,0);
   gc.clearRect(0,0,GW,GH);
@@ -357,6 +453,7 @@ function drawGraph(now){
   const k=cam.k;
   gc.setTransform(dpr*k,0,0,dpr*k,dpr*(GW/2-cam.x*k),dpr*(GH/2-cam.y*k));
   const es=shownEdges(),vs=shownNodes();
+  if(DATA.meta.enclose)drawEnclosures(k);
   const inFocus=id=>!focusSet||focusSet.has(id);
   /* path reveal progress */
   let revealSeg=1e9;
@@ -366,6 +463,9 @@ function drawGraph(now){
   }
   /* ---- edges ---- */
   for(const e of es){
+    /* enclose mode: the root→hub→group scaffolding is invisible (the hull
+       IS the cluster); those edges would just dangle to hidden anchors */
+    if(DATA.meta.enclose&&(e.kind==='root'||e.kind==='hg'))continue;
     const a=byId.get(e.s),b=byId.get(e.t);
     let alpha,width,color;
     if(pathIds){
@@ -394,11 +494,15 @@ function drawGraph(now){
   /* ---- nodes ---- */
   const drawOrder=pathIds?[...vs].sort((a,b)=>(pathIds.includes(a.id)?1:0)-(pathIds.includes(b.id)?1:0)):vs;
   for(const n of drawOrder){
+    /* enclose mode: hubs and root are invisible sim anchors — the hull and
+       its caption carry the cluster's identity */
+    if(DATA.meta.enclose&&(n.type==='hub'||n.type==='root'))continue;
     const col=colorOf(n);
     let a=1;
     if(pathIds)a=pathIds.includes(n.id)?1:.10;
     else if(focusSet)a=focusSet.has(n.id)?1:.14;
     else if(dimByFilter(n))a=.18;
+    else if(n.type!=='root'&&n.type!=='hub')a=typeAlpha(n);  /* XO data-type weight */
     gc.globalAlpha=a;
     if(n.type==='root'){
       /* the actual XO mark: white X chevrons, lime O chevrons */
@@ -435,7 +539,7 @@ function drawGraph(now){
       }
     }else{
       const hl=n.id===hoverId||n.id===selId||(pathIds&&pathIds.includes(n.id));
-      const r=n.r*(hl?1.5:1);
+      const r=n.r*(hl?1.5:typeShrunk(n)?.85:1);
       drawShape(gc,n.x,n.y,r,n.shape);
       if(n.shape==='ring'){
         gc.strokeStyle=col;gc.lineWidth=1.5/Math.sqrt(k);gc.stroke();
@@ -459,6 +563,18 @@ function drawGraph(now){
   /* ---- labels (screen space) ---- */
   gc.setTransform(dpr,0,0,dpr,0,0);
   gc.textAlign='center';
+  /* enclosure captions: the cluster's name + one-line explanation, above
+     each hull. Screen-space so they stay legible at any zoom. */
+  if(DATA.meta.enclose&&!pathIds&&!focusSet){
+    for(const c of _encloseCaps){
+      const sx=(c.cx-cam.x)*k+GW/2,sy=(c.topY-cam.y)*k+GH/2;
+      if(sx<-260||sx>GW+260||sy<-40||sy>GH+90)continue;
+      gc.font='600 15px '+SERIF;
+      halo(c.label,sx,sy-26,hexA(c.col,.98));
+      gc.font='400 10.5px '+SANS;
+      halo(c.desc,sx,sy-11,'rgba(201,195,181,.78)');
+    }
+  }
   for(const n of vs){
     let a=1;
     if(pathIds)a=pathIds.includes(n.id)?1:0;
@@ -468,6 +584,9 @@ function drawGraph(now){
     const sx=(n.x-cam.x)*k+GW/2,sy=(n.y-cam.y)*k+GH/2;
     if(sx<-100||sx>GW+100||sy<-50||sy>GH+50)continue;
     if(n.type==='hub'){
+      /* enclose mode: the hull caption is the cluster's identity — skip the
+         hub's own name to avoid a duplicate label */
+      if(DATA.meta.enclose)continue;
       gc.font='500 17px '+SERIF;
       halo(n.label,sx,sy-n.r*k-12,`rgba(233,228,217,${.94*a})`);
       gc.font='400 8.5px '+MONO;
@@ -722,6 +841,29 @@ chipDefs.forEach(d=>{
   });
   chipsEl.appendChild(b);
 });
+
+/* XO data-type chips — spotlight one of the four types (dims, never hides) */
+{
+  const tEl=document.getElementById('typechips');
+  if(tEl&&TYPE_DEFS.length&&TYPE_MIXED){
+    const counts={};
+    LEAVES.forEach(l=>{if(l.xotype)counts[l.xotype]=(counts[l.xotype]||0)+1;});
+    const defs=[{id:null,label:'All'},...TYPE_DEFS.filter(t=>counts[t.id])
+      .map(t=>({id:t.id,label:`${t.label} ${counts[t.id]}`}))];
+    defs.forEach(d=>{
+      const b=document.createElement('button');
+      b.textContent=d.label;
+      if(d.id===null)b.classList.add('is-on');
+      b.addEventListener('click',()=>{
+        typeFilter=d.id;
+        [...tEl.children].forEach(x=>x.classList.remove('is-on'));
+        b.classList.add('is-on');
+        reheat(.25);
+      });
+      tEl.appendChild(b);
+    });
+  }
+}
 /* legend + counts */
 {
   const lg=document.getElementById('legend');
@@ -735,7 +877,8 @@ chipDefs.forEach(d=>{
   const shapeDefs=DATA.meta.shapeLegend||
     [{shape:'disc',label:'code'},{shape:'ring',label:'document'},{shape:'diamond',label:'experiment'}];
   lg.innerHTML=Object.values(CAT).map(c=>`<span class="li"><span class="sw" style="background:${c.color}"></span>${c.name}</span>`).join('')+
-    shapeDefs.map((d,i)=>`<span class="li"${i===0?' style="margin-left:6px"':''}>${GLYPH[d.shape]||GLYPH.disc}${esc(d.label)}</span>`).join('');
+    shapeDefs.map((d,i)=>`<span class="li"${i===0?' style="margin-left:6px"':''}>${GLYPH[d.shape]||GLYPH.disc}${esc(d.label)}</span>`).join('')+
+    TYPE_DEFS.map((t,i)=>`<span class="li${t.weight==='dim'?' li-dim':''}"${i===0?' style="margin-left:6px"':''}><span class="sw sw-ring"></span>${esc(t.label.toLowerCase())}</span>`).join('');
   document.getElementById('counts').textContent=
     `${LEAVES.length} ${NOUN} · ${GROUPS.length} clusters · ${EDGES.length} links · ${XCOUNT} cross-ties`;
 }
@@ -745,9 +888,10 @@ const hc=document.getElementById('hc');
 function showHC(n,mx,my){
   const col=n.type==='root'?ACCENT_DEEP:CAT[n.cat].color;
   const KICK=DATA.meta.kickers||{};
-  const kick=n.type==='hub'?`${KICK.hub||'Department'}${n.ftype?' · '+(TYPE_LABEL[n.ftype]||''):''}`
+  let kick=n.type==='hub'?`${KICK.hub||'Department'}${n.ftype?' · '+(TYPE_LABEL[n.ftype]||''):''}`
     :n.type==='group'?(n.ftype?`${TYPE_LABEL[n.ftype]||'Cluster'}`:(KICK.group||'Cluster'))
     :n.type==='root'?'The center':`${CAT[n.cat].name} · ${n.tag}`;
+  if(n.type==='leaf'&&n.xotype&&TYPE_BY_ID[n.xotype])kick+=` · ${TYPE_BY_ID[n.xotype].label}`;
   const art=`linear-gradient(155deg, ${hexA(col,.24)}, ${hexA(col,.03)} 68%)`;
   let rows='';
   if(n.type==='leaf'){
@@ -813,7 +957,11 @@ function titleOf(n,carrier){
 }
 function snippetOf(n,carrier){
   const f=carrier?.facts||{},t=carrier?.ftype;
-  if(n.type==='leaf')return `${n.tag} file in ${esc(byId.get(n.group)?.label||'')} · ${fmtDate(n.date)}.`;
+  /* a leaf is normally a plain FILE whose type comes from its parent
+     folder (carrier is the group); in the Environments space each leaf is
+     a whole classified project and carries its own ftype (carrier===n) —
+     fall through to the same title/description rendering a folder gets. */
+  if(n.type==='leaf'&&carrier!==n)return `${n.tag} file in ${esc(byId.get(n.group)?.label||'')} · ${fmtDate(n.date)}.`;
   if(t==='readme'&&f.excerpt)return f.excerpt;
   if(t==='app'&&f.description)return f.description;
   if(t==='docs')return `Documentation${f.pages?`: ${f.pages} page${f.pages===1?'':'s'}`:''}${f.sections&&f.sections.length?` across ${f.sections.join(', ')}`:''}.`;
@@ -869,7 +1017,9 @@ function quickLinksHtml(n){
 }
 function resultCard(n,carrier){
   const snip=snippetOf(n,carrier);
-  const meta=metaLineOf(carrier);
+  let meta=metaLineOf(carrier);
+  const xt=n.xotype&&TYPE_BY_ID[n.xotype];
+  if(xt)meta=meta?`${meta} · ${xt.label}`:xt.label;
   return `<div class="gres">
     <div class="rcrumb">${esc(crumbOf(n))}</div>
     <button class="rtitle" data-id="${n.id}" title="Zoom to this node">${esc(titleOf(n,carrier))}</button>
@@ -884,6 +1034,7 @@ function openPanel(n){
   const kick=n.type==='hub'?`${(DATA.meta.kickers||{}).hub||'Department'}${tlabel?' · '+tlabel:''} · ${LEAVES.filter(l=>l.cat===n.cat).length} ${NOUN}`
     :n.type==='group'?`${CAT[n.cat].name} · ${(tlabel||((DATA.meta.kickers||{}).group||'cluster')).toLowerCase()}`
     :n.type==='root'?'The center'
+    :carrier===n?`${CAT[n.cat].name} · ${tlabel}`  /* leaf is itself the classified thing (Environments) */
     :`${CAT[n.cat].name} · ${n.tag}${tlabel?' · in '+tlabel.toLowerCase()+' folder':''}`;
   let body;
   if(n.type==='root'&&GROUPS.some(g=>g.ftype)){
@@ -925,15 +1076,18 @@ function openPanel(n){
     </div>
     ${body}
     <div class="pacts">
-      ${n.type==='leaf'||n.type==='group'?`<button data-act="timeline">Show on timeline</button>`:''}
+      ${n.type!=='root'?`<button data-act="timeline">Show on timeline</button>`:''}
+      ${n.type==='group'||n.type==='hub'?`<button data-act="root">Open as root</button>`:''}
       <button data-act="from">Path from here</button>
       <button data-act="to">Path to here</button>
-    </div>`;
+    </div>
+    <div class="psec mtl" id="panel-mini-tl" hidden></div>`;
   panel.classList.add('is-open');
   panel.dataset.id=n.id;
   /* Projects leaves get a content preview; sessions leaves have no file path. */
   if(n.type==='leaf')openLeafPreview(n,{workspace:DATA.meta?.workspace});
   else closePreview();
+  mountMiniTimeline(n);
 }
 function closePanel(){
   panel.classList.remove('is-open');
@@ -955,6 +1109,7 @@ panel.addEventListener('click',e=>{
   if(!a)return;
   const n=byId.get(panel.dataset.id);
   if(a.dataset.act==='timeline'){traceOnTimeline(n);}
+  else if(a.dataset.act==='root'){setRoot(n.id);}
   else if(a.dataset.act==='from'){document.getElementById('six-a').value=n.label;sixA=n;go('six');}
   else if(a.dataset.act==='to'){document.getElementById('six-b').value=n.label;sixB=n;go('six');}
 });
@@ -993,7 +1148,8 @@ function acRow(n,idx,q){
   const name=idx>=0
     ?esc(n.label.slice(0,idx))+'<em>'+esc(n.label.slice(idx,idx+q.length))+'</em>'+esc(n.label.slice(idx+q.length))
     :esc(n.label);
-  const meta=n.type==='hub'?'dept':n.type==='group'?'cluster':n.tag;
+  let meta=n.type==='hub'?'dept':n.type==='group'?'cluster':n.tag;
+  if(n.type==='leaf'&&n.xotype&&TYPE_BY_ID[n.xotype])meta+=` · ${TYPE_BY_ID[n.xotype].label.toLowerCase()}`;
   const dia=n.shape==='diamond'?' dia':n.shape==='stack'?' stk':n.shape==='slab'?' slb':'';
   return {col,name,meta,dia};
 }
@@ -1049,11 +1205,21 @@ document.getElementById('root-q').addEventListener('keydown',e=>{
    its internal notion of which of its lenses is active — it gates the sim
    loop and timeline rebuilds — plus the search-focus and clear keys. */
 let view='graph';
+/* Timeline is always the vertical branching-growth renderer now, in every
+   space (commit_timeline.js dispatches to a per-space renderer — growth
+   trunk / commit graph / braided streams). It owns #tplot itself once
+   .is-commits is set on #view-time — see timeline.css for what that class
+   hides (the old artifact-beeswarm's scrub/play controls, now unused by
+   any space but left in place rather than torn out). */
+const commitTimelineMode=()=>true;
 hooks.setActiveView=v=>{
   view=v;
   hideHC();
   if(v==='graph'&&GW<50)resize(); /* booted while hidden (deep link): size the canvas now */
-  if(v==='time'){requestAnimationFrame(()=>{buildTimeline();if(tTrace)drawTrace();});}
+  if(v==='time'){
+    document.getElementById('view-time')?.classList.add('is-commits');
+    mountCommitTimeline(graphMode());
+  }
 };
 
 /* ---- Files: Graph | List toggle. List renders the Overview's tree content
@@ -1068,22 +1234,9 @@ hooks.setActiveView=v=>{
   async function loadList(){
     if(listLoaded||!listEl)return;
     listLoaded=true;
-    listEl.innerHTML='<div class="ovload">reading contents…</div>';
-    const sessionsSpace=graphMode()==='sessions';
-    const res=await apiFetch(sessionsSpace?'data/overview_sessions.json':'data/overview.json');
-    if(!res.ok){listEl.innerHTML='<div class="ovload">Contents unavailable · '+esc(res.error||'')+'</div>';listLoaded=false;return;}
-    if(sessionsSpace){
-      const sources=res.data.sources||[];
-      listEl.innerHTML=sources.map(s=>(s.roots||[]).map(r=>`
-        <div class="ovcard wide treecard"><h4>${esc(s.label)} · ${esc(r.label)}</h4>
-          <div class="ovsub mono">${esc(r.path)}</div>
-          <div class="ovtree">${(r.tree.children||[]).map(c=>treeHtml(c,0)).join('')||'<div class="xempty">Empty.</div>'}</div>
-        </div>`).join('')).join('')||'<div class="ovload">No session data stores found.</div>';
-    }else{
-      const t=res.data.tree;
-      listEl.innerHTML=`<div class="ovcard wide treecard"><h4>${esc((res.data.root||'').split('/').pop()||'workspace')} — contents</h4>
-        <div class="ovtree">${t?((t.children||[]).map(c=>treeHtml(c,0)).join('')||'<div class="xempty">Empty.</div>'):'<div class="xempty">No tree.</div>'}</div></div>`;
-    }
+    /* shared with the whiteboard's Files card — see core/fileslist.js */
+    const ok=await renderFilesList(listEl,{sessions:graphMode()==='sessions'});
+    if(!ok)listLoaded=false;  /* failed loads may retry on next toggle */
   }
   function applyFmode(m){
     const g=document.getElementById('view-graph');
@@ -1226,6 +1379,10 @@ function buildTimeline(){
     }
     el.dataset.id=n.id;
     el.style.cursor='pointer';
+    /* XO data-type weight: fill/stroke-opacity multiplies with the scrub's
+       style.opacity, so dim types stay dim through timeline playback */
+    const ta=typeAlpha(n);
+    if(ta<1){el.setAttribute('fill-opacity',ta);el.setAttribute('stroke-opacity',ta);}
     dotsG.appendChild(el);
     n.tEl=el;
   });
@@ -1267,23 +1424,113 @@ function renderTimelineState(){
   mEl.style.opacity=m?1:0;
   document.getElementById('tscrub').value=Math.round((tNow-T0)/(T1-T0)*1000);
 }
+/* Maps a clicked graph node to its commit/edit history, wherever one exists:
+     Projects space     — leaf/group/hub all share one project (n.cat, p_<id>
+                           prefix stripped); filter commits.json by project.
+     Environments space  — a leaf IS a single project (one-leaf-per-project
+                           schema: n.id is the raw project id) → filter
+                           environment_commits.json by project; a hub/group
+                           is a whole cluster (n.cat) → filter by category.
+     Sessions space       — groups by runtime, not project, so there is no
+                           per-node id shared with session_diffs.json's
+                           events; a hub (runtime) matches by author (the
+                           runtime's display label, same string both sides);
+                           a leaf/group resolves via its group's label (the
+                           display project name — session_telemetry and
+                           commit_diffs both derive it from the same cwd
+                           basename, so the strings line up in practice).
+   Returns {url,field,value,label} or null when nothing is resolvable (root,
+   or a case with no shared id). */
+/* `value`/`field` is always the MOST SPECIFIC filter available — what the
+   mini preview uses via getGroupHistory, which filters raw events directly
+   and doesn't care what axis the full Timeline's chips are built on.
+   `chipValue` is what "Open full timeline" hands to selectTimelineGroup —
+   it MUST match that space's cfg.groupField (see commit_timeline.js's
+   SPACE_CONFIG): 'project' for Projects/Sessions, but 'category' for
+   Environments, whose chips are clusters, not individual projects. A leaf
+   click in Environments is the one case those two diverge (project-level
+   preview, cluster-level chip) — chipValue falls back to the leaf's own
+   cluster there. Sessions groups by runtime for hubs, which the full
+   Timeline's project-chip axis has no equivalent for at all; chipValue is
+   null there, so "Open full timeline" just opens unfiltered. */
+function resolveTimelineTarget(n){
+  const mode=graphMode();
+  if(n.type==='root')return null;
+  if(mode==='output'){
+    const pid=(n.cat||'').replace(/^p_/,'');
+    return pid?{url:'data/commits.json',field:'project',value:pid,chipValue:pid,label:CAT[n.cat]?.name||pid}:null;
+  }
+  if(mode==='environments'){
+    if(n.type==='leaf')return {url:'data/environment_commits.json',field:'project',value:n.id,chipValue:n.cat,label:n.label};
+    return n.cat?{url:'data/environment_commits.json',field:'category',value:n.cat,chipValue:n.cat,label:CAT[n.cat]?.name||n.cat}:null;
+  }
+  if(mode==='sessions'){
+    if(n.type==='hub')return {url:'data/session_diffs.json',field:'author',value:n.label,chipValue:null,label:n.label};
+    const g=n.type==='group'?n:byId.get(n.group);
+    return g?{url:'data/session_diffs.json',field:'project',value:g.label,chipValue:g.label,label:g.label}:null;
+  }
+  return null;
+}
 function traceOnTimeline(n){
-  const ids=n.type==='group'?LEAVES.filter(l=>l.group===n.id):
-            n.type==='hub'?LEAVES.filter(l=>l.cat===n.cat):[n];
-  const list=ids.slice().sort((a,b)=>a.date<b.date?-1:1);
-  tTrace={ids:new Set(list.map(x=>x.id)),list,label:n.label};
+  /* selectTimelineGroup before go('time'): the registry's switchTo() is
+     async and conditionally awaits a mount step on Timeline's first visit,
+     so there is no reliable "call go(), then call this after" ordering —
+     setting the pending selection first means mountCommitTimeline picks it
+     up atomically whenever it actually runs (see commit_timeline.js). */
+  const target=resolveTimelineTarget(n);
+  if(target&&target.chipValue)selectTimelineGroup(target.chipValue);
   go('time');
-  requestAnimationFrame(()=>{
-    drawTrace();
-    document.getElementById('tclear').hidden=false;
-    const m0=fmtMY(+new Date(list[0].date)),m1=fmtMY(+new Date(list[list.length-1].date));
-    document.getElementById('tsub').textContent=
-      `${n.label}: ${list.length} ${list.length===1?NOUN.replace(/s$/,''):NOUN}, ${m0===m1?m0:m0+' to '+m1}.`;
-    if(!REDUCED){
-      tNow=+new Date(list[0].date+'T00:00:00')-86400000*7;
-      startPlay();
-    }else renderTimelineState();
-  });
+}
+
+/* Inline mini split-trunk under "Show on timeline" in the panel — the same
+   split-silhouette representation as the Environments Timeline, in its
+   horizontal orientation (time left-to-right suits the wide, short panel),
+   pre-filtered to just this one node. Guards against the panel having moved
+   on to a different node by the time the async fetch resolves
+   (panel.dataset.id is the source of truth, set synchronously by openPanel). */
+async function mountMiniTimeline(n){
+  const host=document.getElementById('panel-mini-tl');
+  if(!host)return;
+  const target=resolveTimelineTarget(n);
+  if(!target){host.hidden=true;return;}
+  host.hidden=false;
+  host.innerHTML='<div class="mtl-state">Loading history…</div>';
+  const nodeId=n.id;
+  let hist;
+  try{hist=await getGroupHistory(target.url,target.field,target.value,target.label);}
+  catch(err){console.error('mini timeline fetch failed:',err);hist={error:'unavailable'};}
+  if(panel.dataset.id!==nodeId)return;  // panel moved to a different node meanwhile
+  if(hist.error){host.innerHTML=`<div class="mtl-state">History unavailable · ${esc(hist.error)}</div>`;return;}
+  if(hist.empty){host.innerHTML='<div class="mtl-state">No history yet.</div>';return;}
+  host.innerHTML='<div class="mtl-chart"></div>';
+  const chart=host.firstElementChild;
+  const W=Math.max(160,chart.clientWidth||304),H=112;
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  svg.setAttribute('class','mtl-svg');
+  chart.appendChild(svg);
+  const opts={
+    onHover:(e,x,y)=>showPopoverIn(chart,e,x,y),
+    onMove:(x,y)=>movePopoverIn(chart,x,y),
+    onLeave:()=>hidePopoverSoon(),
+    hexA,esc,
+    colorIns:'#7fd08a',colorDel:'#c8674c',colorAccent:ACCENT,
+    colorInk:'#e9e4d9',colorInk3:'#7d786d',colorLine:'rgba(233,228,217,.10)',
+    fmtDate:commitDtfmt,
+    orient:'h',
+  };
+  try{
+    renderSplitTrunk(svg,W,H,{groups:[hist.group],t0:hist.t0,t1:hist.t1},opts);
+  }catch(err){
+    console.error('mini timeline render failed:',err);
+    host.innerHTML='<div class="mtl-state">Could not render history.</div>';
+    return;
+  }
+  const openBtn=document.createElement('button');
+  openBtn.className='mtl-open';
+  openBtn.textContent='Open full timeline →';
+  openBtn.addEventListener('click',()=>traceOnTimeline(n));
+  host.appendChild(openBtn);
 }
 function drawTrace(){
   const g=tsvg.querySelector('#ttrace');
@@ -1473,7 +1720,10 @@ function resize(){
   GW=r.width;GH=r.height;
   gcv.width=GW*dpr;gcv.height=GH*dpr;
   gcv.style.width=GW+'px';gcv.style.height=GH+'px';
-  if(view==='time')buildTimeline();
+  if(view==='time'){
+    if(commitTimelineMode())resizeCommitTimeline();
+    else buildTimeline();
+  }
 }
 addEventListener('resize',resize);
 resize();

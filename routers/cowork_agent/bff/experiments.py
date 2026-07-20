@@ -53,6 +53,7 @@ class ExperimentResponse(BaseModel):
     error: str | None
     agent_session_id: str | None
     sandbox_id: str | None
+    vps_url: str | None
     space_url: str | None
     app_url: str | None
     workspace_directory: str | None

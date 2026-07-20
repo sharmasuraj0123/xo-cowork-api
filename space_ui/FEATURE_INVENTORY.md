@@ -768,38 +768,41 @@ reconnects end cleanly rather than show a spurious missing-stream error.
 - `/api/sessions/{id}/todos` and `/files` are currently empty stubs and are not
   used by this Chat view.
 
-## 11. Experiment sandbox lifecycle
+## 11. Experiment self-hosted VPS lifecycle
 
 Chat's right Experiments rail lists the existing `/api/xo-projects` inventory and sends only a
 selected project ID. The backend resolves the immediate child under
 `XO_PROJECTS_ROOT`; traversal, hidden/control-character IDs, files, and symlink
 aliases are rejected.
 
-The first provider is `local_docker`, explicitly marked local-development only:
+The first provider is `self_hosted_vps`, explicitly marked local-development only. Docker
+provisions the local server but is not the Agents API environment contract:
 
 1. preflight the SDK, Docker daemon/image, and a one-item Agents API list call;
 2. create a self-hosted Agents API session for
    `/workspace/xo-projects/<selected-project>` with explicit `code_mode=true`
-   and a container-scoped `sandbox_exec` function-tool fallback;
+   and a `vps_exec` function whose sole result owner is the preview SDK's
+   `tool_handlers` path;
 3. independently clone/snapshot the selected project and current
    `xo-cowork-api` worktree into temporary staging;
 4. recursively omit dotenv files, credential stores, dependencies, caches,
    build output, symlinks, and special files, and remove every Git remote;
-5. mount only staging read-only, copy both trees into writable sandbox paths,
-   and start sandbox Space plus `codex exec-server`; the default
+5. mount only staging read-only and start the XO VPS supervisor, which copies
+   both trees into writable paths and supervises Space plus `codex exec-server`; the default
    `unrestricted` profile uses root, a writable container root, outbound
    networking, Codex `danger-full-access`, and approval policy `never`;
-6. bind Space to a dynamic loopback host port and verify `/health`, `/space/`,
-   and an inventory containing exactly the selected project;
-7. run a boot probe that must produce evidence of an actual command-tool
-   invocation in the selected workspace, require terminal session status
+6. bind the VPS control service, Space, and app port to separate dynamic
+   loopback ports; require the VPS `/readyz`, authenticated command preflight,
+   Space `/health`, `/space/`, and an inventory containing exactly the selected project;
+7. run a boot probe that must invoke `vps_exec` through that SDK handler and
+   write a random nonce marker verified through the private VPS control API, require terminal session status
    `idle`, verify the container is running, and only then publish `ready` plus
    `space_url`; a textual success/refusal without command evidence fails launch;
-8. publish container port 3000 on a second dynamic loopback `app_url`, allowing
+8. publish container port 3000 on its dynamic loopback `app_url`, allowing
    the workbench to open a web server started by the sandbox agent;
 9. accept serialized follow-up turns on the same Agents API session and expose
    a bounded, redacted transcript in the outer Space workbench;
-10. delete staging, then release the container, Space/app URLs and session on Stop,
+10. delete staging, then release the VPS, VPS/Space/app URLs and session on Stop,
    one-hour default TTL, or normal API shutdown.
 
 `EXPERIMENT_PERMISSION_PROFILE=unrestricted` is the default trusted-user mode.
@@ -965,8 +968,9 @@ source:
 ### Tests
 
 - Backend regression tests cover Experiment lifecycle/snapshot/command safety,
-  permission-profile selection, explicit code mode, the owned-container
-  `sandbox_exec` fallback, and command-proven boot readiness plus source
+  permission-profile selection, explicit code mode, SDK-owned `vps_exec`
+  results with no manual duplicate submission, authenticated VPS control,
+  supervisor process cleanup, and command/nonce-proven boot readiness plus source
   discovery/degradation, malformed-provider isolation, mixed-agent Argus
   filtering and all-time project counts, loader import failures, successful and
   failed single-flight route waves, Codex cumulative-token/state reconciliation,

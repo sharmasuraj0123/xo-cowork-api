@@ -15,6 +15,28 @@
       "type": "array",
       "description": "Sorted list of project ids the watcher has discovered. One entry per `<project_id>` directory under `projects_root` that contains a `.xo/` directory (scaffolded or not).",
       "items": { "type": "string", "minLength": 1 }
+    },
+    "classification": {
+      "type": "object",
+      "description": "Watcher-maintained roll-up of every project's persisted classification block (see project.schema.json). Manual per-project category overrides are already applied.",
+      "additionalProperties": false,
+      "required": ["computed_at", "by_project", "clusters"],
+      "properties": {
+        "computed_at": { "type": "string", "format": "date-time" },
+        "by_project": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category"],
+            "properties": {
+              "category": { "type": "string" },
+              "ptype":    { "type": ["string", "null"] }
+            }
+          }
+        },
+        "clusters": { "type": "object", "additionalProperties": { "type": "integer" } }
+      }
     }
   }
 }

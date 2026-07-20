@@ -1,0 +1,93 @@
+  /* Whiteboard — composable card canvas (see js/views/environments.js) */
+  .envhost{overflow:hidden}
+  .btoolbar{
+    position:absolute;top:14px;left:18px;right:18px;z-index:12;
+    display:flex;align-items:center;gap:8px;pointer-events:none;
+  }
+  .btoolbar>*{pointer-events:auto}
+  .btoolbar .beye{font:400 9.5px var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);margin-right:6px}
+  .btoolbar button{
+    font:400 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);
+    background:rgba(16,19,24,.86);backdrop-filter:blur(8px);border:1px solid var(--line);
+    border-radius:999px;padding:5px 12px;transition:all .16s var(--ease);
+  }
+  .btoolbar button:hover{color:var(--ink);border-color:#39404d}
+  .bhidden{font:400 10px var(--mono);color:var(--ink-4);display:flex;gap:6px;align-items:center}
+  .bhidden button{color:var(--accent);border-style:dashed}
+
+  .board{position:absolute;inset:0;cursor:grab;touch-action:none;
+    background-image:radial-gradient(circle, #1b1f27 1px, transparent 1px);
+    background-size:26px 26px;}
+  .board.is-pan{cursor:grabbing}
+  .bsurface{position:absolute;top:0;left:0;width:0;height:0;transform-origin:0 0}
+
+  .bcard{
+    position:absolute;top:0;left:0;
+    background:rgba(16,19,24,.94);backdrop-filter:blur(10px);
+    border:1px solid var(--line);border-radius:12px;
+    box-shadow:0 12px 30px rgba(0,0,0,.35);
+    display:flex;flex-direction:column;max-height:520px;
+  }
+  .bcard.is-drag{box-shadow:0 22px 48px rgba(0,0,0,.55);border-color:#39404d;z-index:5}
+  .bhead{
+    display:flex;align-items:center;gap:8px;flex:none;cursor:grab;
+    padding:9px 12px;border-bottom:1px solid var(--line-soft);user-select:none;
+  }
+  .bcard.is-drag .bhead{cursor:grabbing}
+  .bttl{font:400 9.5px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);flex:1;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bhead button{color:var(--ink-4);font-size:11px;line-height:1;padding:2px 5px;border-radius:5px;flex:none}
+  .bhead button:hover{color:var(--ink);background:var(--bg-3)}
+  .bbody{padding:10px 12px 12px;overflow-y:auto;font-size:12.5px;flex:1;min-height:0}
+  .bcard.is-min .bbody{display:none}
+  .bcard.is-min{max-height:none;height:auto!important}
+  .bcard.is-min .brs,.bcard.is-min .binfo{display:none}
+
+  /* per-component "?" note: what the card is and how it changes */
+  .binfo{
+    flex:none;padding:9px 12px;border-bottom:1px solid var(--line-soft);
+    font:400 11.5px var(--sans);line-height:1.6;color:#cfc9b4;
+    background:rgba(43,40,22,.55);
+  }
+
+  /* corner resize handle */
+  .brs{
+    position:absolute;right:2px;bottom:2px;width:16px;height:16px;flex:none;
+    cursor:nwse-resize;border-radius:4px;
+    background:
+      linear-gradient(135deg,transparent 52%,var(--ink-4) 52%,var(--ink-4) 60%,transparent 60%,
+        transparent 72%,var(--ink-4) 72%,var(--ink-4) 80%,transparent 80%) no-repeat;
+  }
+  .brs:hover{background-color:var(--bg-3)}
+
+  /* hosted space dashboards (Projects / Sessions / Files list) as cards */
+  .bdash .bbody{padding:0}
+  .bdash .bbody .sesswrap{max-width:none;margin:0;padding:14px 16px 40px}
+  .bdash .bbody>:first-child{min-width:0}
+  /* the files-list component ships its own .ovcard chrome — inside a board
+     card that would be a card-in-card, so flatten it */
+  .bdash .bbody .ovcard{background:none;border:0;box-shadow:none;border-radius:0;margin:0;padding:12px 14px}
+  .bdash .bbody .ovtree{column-width:auto}
+
+  /* embeds: html files and iframes */
+  .bembed .bbody{padding:0;overflow:hidden}
+  .bembed iframe{display:block;width:100%;height:100%;border:0;background:#0b0c0f}
+  /* while panning or dragging, embedded pages must not swallow the pointer */
+  .board.is-pan iframe,.bcard.is-drag iframe{pointer-events:none}
+
+  /* sticky notes */
+  .bnote{background:rgba(43,40,22,.94);border-color:#4a452a;min-height:90px}
+  .bnote .bhead{border-bottom-color:rgba(74,69,42,.6)}
+  .bnote .bbody{font:400 13px var(--sans);color:#ded8c2;min-height:56px;outline:none;white-space:pre-wrap}
+  .bnote .bbody:empty::before{content:'Type a note…';color:#8d8664}
+
+  /* the permanent "How this works" guide note */
+  .bguide{font:400 12.5px var(--sans);line-height:1.7;color:#ded8c2}
+  .bguide b{color:#f2ecd4;font-weight:600}
+
+  /* cluster jump arrow */
+  .xgo{margin-left:auto;color:var(--accent);font-size:12px;padding:2px 7px;border-radius:6px;flex:none}
+  .xgo:hover{background:var(--bg-3)}
+  .board .xrow{display:flex;align-items:baseline;gap:8px;padding:5px 2px}
+  .board .xrow .xr-main{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46%}
+  .board .xrow .xr-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}

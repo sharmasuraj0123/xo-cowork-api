@@ -16,6 +16,11 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, timedelta
 
+from services.cowork_agent.visualizer.space_index import (
+    XOTYPE_LABEL,
+    XOTYPE_WEIGHT,
+    XOTYPES,
+)
 from services.cowork_agent.visualizer.session_telemetry import (
     build_session_telemetry,
 )
@@ -130,6 +135,7 @@ def build_sessions_graph() -> dict:
             "id": gid, "cat": f"s_{sid}", "label": display,
             "blurb": f"{len(rows)} session{'s' if len(rows) != 1 else ''} · "
                      f"{_fmt_tokens(tokens)} tokens · {path or '(unknown path)'}",
+            "xotype": "session",
         })
         for s in kept:
             started = _parse_started(s.get("started_at"))
@@ -144,6 +150,7 @@ def build_sessions_graph() -> dict:
                 "date": started.date().isoformat(),
                 "blurb": _session_blurb(s),
                 "path": path or "(unknown path)",
+                "xotype": "session",
             })
 
     if len(leaves) > MAX_TOTAL_LEAVES:
@@ -209,6 +216,11 @@ def build_sessions_graph() -> dict:
                 {"shape": "disc", "label": "session"},
                 {"shape": "ring", "label": "quick session"},
                 {"shape": "diamond", "label": "with sub-agents"},
+            ],
+            "typeLegend": [
+                {"id": t, "label": XOTYPE_LABEL[t],
+                 "weight": XOTYPE_WEIGHT.get(t, "full")}
+                for t in XOTYPES
             ],
             "introEyebrow": "A telemetry graph",
             "introTitle": "Every session leaves a trail.",

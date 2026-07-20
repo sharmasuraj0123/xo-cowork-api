@@ -13,6 +13,26 @@
     "pid":         { "type": ["string", "null"], "format": "uuid", "description": "UUID v4. Generated once on first boot. Never regenerated." },
     "name":        { "type": ["string", "null"], "description": "Human-readable project name. Defaults to the folder name." },
     "owner_user_id": { "type": ["string", "null"], "description": "Stable user identifier of the project owner." },
-    "created_at":  { "type": ["string", "null"], "format": "date-time", "description": "ISO 8601 UTC timestamp of first boot." }
+    "created_at":  { "type": ["string", "null"], "format": "date-time", "description": "ISO 8601 UTC timestamp of first boot." },
+    "category":    { "type": "string", "description": "Optional MANUAL environment-cluster override set by the user (app|ops|wiki|docs|customer; legacy 'marketing' aliases to customer). Wins over classification.category everywhere. Never written by the watcher." },
+    "classification": {
+      "type": "object",
+      "description": "Watcher-maintained (sinks/classification.py): the project's computed environment cluster, folder archetype, and XO data-type tallies. Graphs load from this instead of re-walking the tree.",
+      "additionalProperties": false,
+      "required": ["computed_at", "category", "ptype"],
+      "properties": {
+        "computed_at":  { "type": "string", "format": "date-time" },
+        "category":     { "type": "string", "description": "Primary computed environment cluster: app|ops|wiki|docs|customer." },
+        "categories":   { "type": "array", "items": { "type": "string" }, "description": "Every cluster the project belongs to, primary first. A project can satisfy several cluster predicates at once." },
+        "ptype":        { "type": "string", "description": "Folder archetype: app|docs|slides|readme|unknown." },
+        "label":        { "type": "string" },
+        "files":        { "type": "integer" },
+        "xotype_counts": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "Files per XO data type (output|inbox|session|system)." },
+        "signals":      { "type": "object", "description": "Raw classifier signals (iac, contract, images, has_slides, docs_site)." },
+        "last_touched": { "type": ["string", "null"] },
+        "first_commit": { "type": ["string", "null"] },
+        "facts":        { "type": "object", "description": "Root-folder facts for the detail panel (name, language, title, excerpt, ...)." }
+      }
+    }
   }
 }

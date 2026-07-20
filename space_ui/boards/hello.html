@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- Test file for the whiteboard's "+ HTML" card (load as boards/hello.html).
+     Self-contained on purpose: the embed iframe is sandboxed (scripts only,
+     no same-origin), so everything it needs must live in this one file. -->
+<html><head><meta charset="utf-8">
+<style>
+  html,body{height:100%;margin:0}
+  body{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+    background:#0b0c0f;color:#e9e4d9;
+    font:400 14px/1.5 system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  .eye{font:400 9px ui-monospace,Menlo,monospace;letter-spacing:.22em;text-transform:uppercase;color:#7d786d}
+  h1{font:400 22px "Iowan Old Style",Palatino,Georgia,serif;margin:0}
+  .clock{font:600 30px ui-monospace,Menlo,monospace;color:#a8d94f}
+  p{color:#b3ada0;font-size:12px;max-width:34ch;text-align:center;margin:0}
+</style></head><body>
+  <div class="eye">whiteboard test file</div>
+  <h1>Hello from an HTML card.</h1>
+  <div class="clock" id="clock">--:--:--</div>
+  <p>This page is live: its own script runs sandboxed inside the embed.
+     Drop any served HTML file onto the board the same way.</p>
+  <script>
+    const el=document.getElementById('clock');
+    const tick=()=>{el.textContent=new Date().toLocaleTimeString();};
+    tick();setInterval(tick,1000);
+  </script>
+</body></html>

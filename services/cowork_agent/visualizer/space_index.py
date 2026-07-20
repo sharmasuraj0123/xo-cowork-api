@@ -107,6 +107,77 @@ _FACT_READ_BYTES = 16384        # max bytes read per fact file
 _FACT_MAX_READS = 4             # max content reads per group
 _FACT_DEADLINE_RESERVE_S = 2.0  # stop content reads this close to the deadline
 
+# Environment-category signals (see environments_graph.py). Filename-only —
+# no content reads — tallied for free inside _folder_facts's existing loop.
+# Deliberately NOT Dockerfile/docker-compose/CI-workflow: those are ubiquitous
+# in ordinary app repos (every deployable Next.js/FastAPI project has one) and
+# would misclassify most of "app" as "ops". Terraform/Helm/Pulumi/Ansible are
+# rare enough outside genuine infra-as-code repos to be a precise signal.
+_IAC_EXT = {".tf", ".tfvars"}
+# Full lowercased filenames only (not a stem/substring set): "chart" or
+# "pulumi" alone would match ordinary React files like Chart.tsx or a
+# pulumi.ts helper in any JS codebase — false-positived on real projects
+# during calibration against this workspace.
+_IAC_FULL_NAMES = {"chart.yaml", "chart.yml", "ansible.cfg"}
+_CONTRACT_PREFIXES = ("contract", "sow", "msa", "statement-of-work", "invoice", "proposal")
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+              ".psd", ".ai", ".eps", ".bmp", ".tiff"}
+# Research artefacts: LaTeX papers, Jupyter/R notebooks, bibliographies.
+# Rare outside genuine research/paper projects, so a precise Research signal.
+_RESEARCH_EXT = {".tex", ".ipynb", ".bib", ".rmd"}
+
+# ---- XO data-type tags ------------------------------------------------------
+# Every file/folder node carries exactly one of XO's four data types:
+# output (artifacts, the default), inbox (human intent), system (manifests/
+# config/locks), session (agent session data — the whole Sessions dataset;
+# nothing in the Projects walk earns it). Filename-only, tallied in
+# _folder_facts's existing loop (zero new I/O); the watcher's classification
+# sink persists the per-project tallies into .xo/project.json.
+XOTYPES = ("output", "inbox", "session", "system")
+XOTYPE_LABEL = {"output": "Output", "inbox": "Inbox",
+                "session": "Sessions", "system": "System"}
+# Lightweight types render dimmed in the graph until their filter is chosen.
+XOTYPE_WEIGHT = {"session": "dim", "system": "dim"}
+_INBOX_PREFIXES = ("readme", "objectives", "plan", "progress", "todo",
+                   "notes", "memory", "agents", "soul", "identity")
+# Intent must be prose: a bare prefix match would tag identity.ts or
+# progressive.css as human intent.
+_INBOX_EXT = {"", ".md", ".mdx", ".txt", ".rst", ".docx", ".pdf"}
+_SYSTEM_NAMES = {
+    "package.json", "pyproject.toml", "setup.py", "pnpm-lock.yaml",
+    "yarn.lock", "package-lock.json", "poetry.lock", "cargo.lock",
+    "dockerfile", "makefile", "mkdocs.yml", "mkdocs.yaml", "biome.json",
+    "components.json", "xo.json", ".env.example",
+}
+_SYSTEM_PREFIXES = ("requirements", "tsconfig", "docker-compose")
+_SYSTEM_EXT = {".lock", ".cfg", ".ini", ".tf", ".tfvars"}
+
+
+def _xotype_for(rel: str, name: str) -> str:
+    """One of XOTYPES for a file, from its name/relpath only."""
+    n = name.lower()
+    ext = ("." + n.rsplit(".", 1)[-1]) if "." in n else ""
+    stem = n[: -len(ext)] if ext else n
+    if stem.startswith(_INBOX_PREFIXES) and ext in _INBOX_EXT:
+        return "inbox"
+    if ext == ".docx" and "notes" in rel.lower():
+        return "inbox"
+    if n in _SYSTEM_NAMES or n.startswith(_SYSTEM_PREFIXES):
+        return "system"
+    if ".config." in n or ext in _SYSTEM_EXT:
+        return "system"
+    if "/.github/" in f"/{rel.lower()}":
+        return "system"
+    return "output"
+
+
+def dominant_xotype(counts: dict) -> str:
+    """Majority tag for a folder; ties and empties resolve to output."""
+    if not counts:
+        return "output"
+    best = max(counts.items(), key=lambda kv: (kv[1], kv[0] == "output"))
+    return best[0] if best[1] > 0 else "output"
+
 
 def _is_docs_site_signal(rel: str, name: str) -> bool:
     """Docs-SITE configs only; a bare docs/ folder of md is not docs."""
@@ -194,14 +265,37 @@ def _pptx_slide_count(path: Path) -> int | None:
 def _folder_facts(ftype: str, files: list[Path], rels: list[str],
                   deadline: float | None) -> dict:
     """Type-specific facts for the detail panel. Content reads are bounded
-    (count + bytes) and stop entirely near the build deadline."""
+    (count + bytes) and stop entirely near the build deadline.
+
+    Also tallies two filename-only signals every group carries regardless of
+    ftype — infrastructure-as-code and contract/SOW paperwork — for free,
+    since environments_graph.py's business-category classifier needs them
+    and this loop already visits every relative path. No extra I/O."""
     facts: dict = {"files": len(rels)}
     ext_counts: dict[str, int] = {}
+    xo_counts: dict[str, int] = {}
+    iac = contract = image = research = 0
     for r in rels:
         n = r.rsplit("/", 1)[-1]
         e = ("." + n.rsplit(".", 1)[-1].lower()) if "." in n else "(none)"
         ext_counts[e] = ext_counts.get(e, 0) + 1
+        name_lower = n.lower()
+        if e in _IAC_EXT or name_lower in _IAC_FULL_NAMES:
+            iac += 1
+        elif name_lower.startswith(_CONTRACT_PREFIXES):
+            contract += 1
+        if e in _IMAGE_EXT:
+            image += 1
+        if e in _RESEARCH_EXT:
+            research += 1
+        xt = _xotype_for(r, n)
+        xo_counts[xt] = xo_counts.get(xt, 0) + 1
     facts["exts"] = sorted(ext_counts.items(), key=lambda kv: -kv[1])[:4]
+    facts["iac_signal"] = iac
+    facts["contract_signal"] = contract
+    facts["image_files"] = image
+    facts["research_signal"] = research
+    facts["xotype_counts"] = xo_counts
 
     can_read = deadline is None or time.monotonic() < deadline - _FACT_DEADLINE_RESERVE_S
     reads = 0
@@ -241,6 +335,15 @@ def _folder_facts(ftype: str, files: list[Path], rels: list[str],
             if len(sections) >= 6:
                 break
         facts["sections"] = sections
+        # "docs" conflates two different things: a genuine documentation
+        # SITE (fumadocs/mkdocs/docusaurus config, or a content/docs tree)
+        # vs a folder that's just writing-majority (meeting notes, research
+        # dumps) with no site tooling. environments_graph.py's wiki/docs
+        # split needs to tell them apart; re-checking the site signal here
+        # is cheap (rels/names are already in memory, no new I/O).
+        names = [r.rsplit("/", 1)[-1].lower() for r in rels]
+        facts["docs_site"] = any(_is_docs_site_signal(r, nm)
+                                 for r, nm in zip(rels, names))
     elif ftype == "app":
         names = {r.rsplit("/", 1)[-1].lower(): f for r, f in zip(rels, files)}
         code = sum(1 for r in rels
@@ -373,6 +476,7 @@ def _walk_project(pid: str, cat: str, created_dates: dict,
             "date": created_dates.get(rel) or _mtime_date(f),
             "blurb": rel,
             "path": f"{pid}/{rel}",
+            "xotype": _xotype_for(rel, f.name),
         })
 
     def emit_classified(files: list[Path], rels: list[str],
@@ -386,6 +490,7 @@ def _walk_project(pid: str, cat: str, created_dates: dict,
             "id": gid, "cat": cat, "label": label,
             "blurb": blurb_prefix or f"{len(files)} files",
             "ftype": ftype, "facts": facts, "shape": shape,
+            "xotype": dominant_xotype(facts.get("xotype_counts") or {}),
         })
 
     entries = sorted(pdir.iterdir(), key=lambda e: e.name)
@@ -581,10 +686,15 @@ def build_space_data() -> dict:
             for k in ("name", "description", "language", "title", "excerpt"):
                 if root_group["facts"].get(k):
                     pfacts[k] = root_group["facts"][k]
+        hub_xo: dict[str, int] = {}
+        for g in p_groups:
+            for k, v in (g["facts"].get("xotype_counts") or {}).items():
+                hub_xo[k] = hub_xo.get(k, 0) + int(v)
         hubs.append({
             "id": cat, "cat": cat, "label": display,
             "blurb": str(meta.get("description") or f"Project {display}."),
             "ftype": ptype, "facts": pfacts, "shape": _TYPE_SHAPE[ptype],
+            "xotype": dominant_xotype(hub_xo),
         })
         groups.extend(p_groups)
         leaves.extend(p_leaves)
@@ -626,6 +736,13 @@ def build_space_data() -> dict:
                 {"shape": "stack", "label": "docs"},
                 {"shape": "slab", "label": "slides"},
                 {"shape": "diamond", "label": "unknown"},
+            ],
+            # XO data-type overlay (chips + dimming); weight 'dim' types
+            # render faded until their chip is selected.
+            "typeLegend": [
+                {"id": t, "label": XOTYPE_LABEL[t],
+                 "weight": XOTYPE_WEIGHT.get(t, "full")}
+                for t in XOTYPES
             ],
         },
         "categories": categories,

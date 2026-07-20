@@ -1,16 +1,46 @@
 {
   "schema": 2,
-  "updated_at": "2026-07-19T21:02:58Z",
+  "updated_at": "2026-07-20T04:23:50Z",
   "sessions": {
     "7246401c-08a0-4ed0-80b0-06c64b4d23bd": {
-      "messageCount": 949,
+      "messageCount": 3375,
       "messageCountByRole": {
-        "user": 491,
-        "assistant": 458,
+        "user": 2014,
+        "assistant": 1361,
         "toolResults": 0,
         "errors": 0
       },
-      "toolCallCount": 281,
+      "toolCallCount": 1196,
+      "taskCount": {
+        "total": 6,
+        "completed": 6,
+        "in_progress": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "blocked": 0
+      },
+      "firstActivity": 1784053729664,
+      "lastActivity": 1784521386775,
+      "ended_at": null,
+      "episode_refs": [],
+      "_task_states": {
+        "1": "completed",
+        "2": "completed",
+        "3": "completed",
+        "4": "completed",
+        "5": "completed",
+        "6": "completed"
+      }
+    },
+    "251d0be2-9531-40b1-8a77-4fa0e0643df8": {
+      "messageCount": 670,
+      "messageCountByRole": {
+        "user": 344,
+        "assistant": 326,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "toolCallCount": 184,
       "taskCount": {
         "total": 0,
         "completed": 0,
@@ -19,8 +49,30 @@
         "cancelled": 0,
         "blocked": 0
       },
-      "firstActivity": 1784053729664,
-      "lastActivity": 1784494977067,
+      "firstActivity": 1784506368438,
+      "lastActivity": 1784521430473,
+      "ended_at": null,
+      "episode_refs": []
+    },
+    "6bee2eb9-7dac-4404-988c-20110c2d3fde": {
+      "messageCount": 345,
+      "messageCountByRole": {
+        "user": 178,
+        "assistant": 167,
+        "toolResults": 0,
+        "errors": 0
+      },
+      "toolCallCount": 71,
+      "taskCount": {
+        "total": 0,
+        "completed": 0,
+        "in_progress": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "blocked": 0
+      },
+      "firstActivity": 1784506917059,
+      "lastActivity": 1784518826221,
       "ended_at": null,
       "episode_refs": []
     }

@@ -3,5 +3,57 @@
   "pid": "cb8db3e1-556b-4fd6-b764-d7ba65e99888",
   "name": "xo-cowork-api",
   "owner_user_id": "local",
-  "created_at": "2026-07-14T18:37:31Z"
+  "created_at": "2026-07-14T18:37:31Z",
+  "classification": {
+    "computed_at": "2026-07-20T04:23:09Z",
+    "category": "engineering",
+    "categories": [
+      "engineering"
+    ],
+    "ptype": "app",
+    "label": "xo-cowork-api",
+    "files": 302,
+    "xotype_counts": {
+      "inbox": 9,
+      "output": 288,
+      "system": 5
+    },
+    "signals": {
+      "iac": 0,
+      "contract": 0,
+      "images": 2,
+      "has_slides": false,
+      "docs_site": false
+    },
+    "last_touched": "2026-07-20",
+    "first_commit": "2026-02-03",
+    "facts": {
+      "files": 10,
+      "exts": [
+        [
+          ".md",
+          4
+        ],
+        [
+          ".sh",
+          2
+        ],
+        [
+          ".txt",
+          2
+        ],
+        [
+          "(none)",
+          1
+        ]
+      ],
+      "iac_signal": 0,
+      "contract_signal": 0,
+      "image_files": 0,
+      "research_signal": 0,
+      "code_files": 3,
+      "tests": 0,
+      "language": "Python"
+    }
+  }
 }
