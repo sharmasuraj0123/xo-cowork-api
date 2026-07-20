@@ -51,7 +51,9 @@ async function loadAll(){
   relay=st.ok?st.data:null;
   render();
   for(const p of items){
-    if(!p.unscaffolded){fillCommits(p.id);fillMembers(p.id);}
+    if(p.unscaffolded)continue;
+    fillCommits(p.id);
+    if(memberState(p)==='live')fillMembers(p.id);   /* otherwise no /members call at all */
   }
 }
 
@@ -64,6 +66,12 @@ async function refreshStatus(){
   for(const p of items){
     const chip=document.getElementById('prj-chip-'+p.id);
     if(chip)chip.innerHTML=chipHTML(p);
+    if(p.unscaffolded)continue;
+    /* a poll that flips a project to shared is what unlocks the member list */
+    const el=membersBox(p.id),st=memberState(p);
+    if(!el||el.dataset.members===st)continue;
+    el.dataset.members=st;
+    if(st==='live')fillMembers(p.id);else paintIdle(el,st);
   }
 }
 
@@ -72,6 +80,32 @@ function relayEntry(projectId){
   for(const r of Object.values(relay.repos))if(r.project===projectId)return r;
   return null;
 }
+
+/* Relay state is the single source of truth for "is this shared", because the
+   chip beside the panel reads it too and the two must never disagree. /members
+   reads the swarm, which knows about an A->B share instantly; the relay only
+   learns on its next poll (dormant 10m / active 50s), so fetching earlier would
+   print member rows next to a "solo" chip.
+
+   A missing relay entry is NOT proof of "not shared" — status.py is in-memory
+   and restarts empty, so every project looks unshared until the first tick.
+   Answer and silence get separate states; only `solo` suppresses the rows as a
+   statement of fact, and only `live` is allowed to fetch. */
+function memberState(p){
+  if(!relay)return'unknown';
+  if(relay.cadence==='parked')return'disabled';
+  if(!relay.last_poll_at||relay.last_poll_ok===false)return'unknown';
+  const e=relayEntry(p.id);
+  return e&&e.shared?'live':'solo';
+}
+const IDLE_NOTE={
+  disabled:'sharing is disabled for this workspace',
+  unknown:'waiting for the relay to report',
+  solo:'not shared yet',
+};
+/* the card element carries its own state — no module-level mirror to drift */
+function membersBox(id){return document.getElementById('prj-members-'+id);}
+function paintIdle(el,st){el.dataset.members=st;el.innerHTML='<div class="prj-note">'+IDLE_NOTE[st]+'</div>';}
 
 function stripHTML(){
   if(!relay)return'<span class="prj-note">relay status unavailable</span>';
@@ -124,7 +158,8 @@ function cardHTML(p){
       +'<div class="prj-sec"><div class="prj-ptitle">Commits</div>'
       +'<div id="prj-commits-'+esc(p.id)+'"><div class="prj-note">loading…</div></div></div>'
       +'<div class="prj-sec"><div class="prj-ptitle">Sharing</div>'
-      +'<div id="prj-members-'+esc(p.id)+'"><div class="prj-note">loading…</div></div>'
+      +'<div id="prj-members-'+esc(p.id)+'" data-members="'+memberState(p)+'">'
+      +'<div class="prj-note">'+(memberState(p)==='live'?'loading…':IDLE_NOTE[memberState(p)])+'</div></div>'
       +'<div class="prj-shareform">'
       +'<input class="prj-input" id="prj-ws-'+esc(p.id)+'" placeholder="recipient workspace id" spellcheck="false">'
       +'<button class="prj-btn prj-share-btn" data-id="'+esc(p.id)+'">Share</button>'
@@ -191,7 +226,12 @@ async function share(id){
   if(!res.ok){toast('share failed: '+res.error);return;}
   toast('shared with '+ws);
   if(input)input.value='';
-  fillMembers(id);
+  /* the swarm has it, our relay does not yet. Report the pending write rather
+     than fetching rows the chip would contradict — the next poll promotes it. */
+  const el=membersBox(id);
+  if(el&&el.dataset.members!=='live')
+    el.innerHTML='<div class="prj-note">shared with '+esc(ws)+' · appears here after the next poll</div>';
+  else fillMembers(id);
 }
 
 async function revoke(id,ws){

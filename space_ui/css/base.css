@@ -18,6 +18,16 @@
     overflow:hidden;-webkit-font-smoothing:antialiased;
   }
   ::selection{background:rgba(168,217,79,.28)}
+  /* slim, floating, theme-tinted scrollbars (WebKit + Firefox). Track stays
+     transparent; the thumb is a translucent pill whose 2px transparent border
+     reads as inset padding so it floats. .tabs opts out (scrollbar-width:none). */
+  *{scrollbar-width:thin;scrollbar-color:rgba(179,173,160,.22) transparent}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(179,173,160,.22);border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(179,173,160,.42);background-clip:padding-box}
+  ::-webkit-scrollbar-button{display:none;width:0;height:0}
+  ::-webkit-scrollbar-corner{background:transparent}
   button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   input{font:inherit;color:var(--ink)}
   [hidden]{display:none!important}
