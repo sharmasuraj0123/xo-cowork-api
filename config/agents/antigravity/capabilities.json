@@ -1,0 +1,22 @@
+{
+  "models": {
+    "enabled": true,
+    "oauth": {
+      "antigravity": { "enabled": true }
+    },
+    "api_keys": {
+      "enabled": false
+    }
+  },
+  "data": {
+    "enabled": true,
+    "google_drive": { "enabled": true },
+    "one_drive": { "enabled": true },
+    "github": { "enabled": true },
+    "vercel": { "enabled": true }
+  },
+  "channels": {
+    "enabled": false
+  },
+  "secrets": { "enabled": true }
+}

@@ -11,7 +11,7 @@
 # xo-cowork-api
 
 **The local control plane for AI coding agents.**
-One workspace, many runtimes — Claude Code, OpenClaw, Codex, Hermes, and whatever comes next.
+One workspace, many runtimes — Claude Code, OpenClaw, Codex, Hermes, Antigravity, and whatever comes next.
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -64,7 +64,7 @@ Every coding agent ships with its own session store, its own auth, its own todo 
 
 `xo-cowork-api` is the part of the [XO Cowork](https://xo.builders) stack that puts a uniform API in front of all of them, keeps the project folder portable and sharing-safe by construction, and gives you back something you can build a product on.
 
-- 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code, OpenClaw, and Hermes are first-class; Codex is partial; new runtimes plug in without router changes.
+- 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code, OpenClaw, Hermes, and Antigravity are first-class; Codex is partial; new runtimes plug in without router changes.
 - 🗂️ **Sharing-safe project model** — chat content stays in the runtime's own storage (`~/.claude/`, `~/.openclaw/`). The project folder at `~/xo-projects/<id>/` is pure metadata + work files, structurally safe to share, fork, or rebase.
 - 📡 **SSE streaming with sane reconnects** — `event: text-delta` / `done` / `heartbeat` / `agent-error`, React-Strict-Mode-safe via a 600 s reconnect window, server-side single-flight on conflicts.
 - 🔌 **Connector hub** — Google Drive, OneDrive, GitHub (PAT + `gh` device flow), Vercel (OAuth 2.1 PKCE + Dynamic Client Registration), Manus. Each is dropped into `mcp-tokens.json` or `rclone.conf` and survives restarts.
@@ -165,6 +165,7 @@ Adapters live under `services/cowork_agent/adapters/<name>/`. The dispatch class
 | **Claude Code** | ✅ first-class | `~/.claude/projects/<encoded>/<sid>.jsonl` | `claude` CLI subprocess + `--output-format stream-json` |
 | **OpenClaw** | ✅ first-class | `~/.openclaw/agents/<a>/sessions/<sid>.jsonl` | HTTP gateway on `:18789` (OpenAI-compatible SSE) |
 | **Hermes** | ✅ first-class | `~/.hermes/profiles/<name>/` (or `~/.hermes/` for `default`) | `hermes` CLI subprocess + profile-based provider routing |
+| **Antigravity** | ✅ first-class | `~/.gemini/antigravity-cli/brain/<cid>/…/transcript_full.jsonl` | `agy` CLI subprocess (`-p`, transcript-tailing) + Google consumer OAuth (token file, self-refreshing) |
 | **Codex** | 🟡 partial — auth + legacy chat | `~/.codex/...` | `codex` CLI subprocess (via `/ask_question*` legacy path) |
 | **Your runtime** | 🔧 fork friendly | wherever you like | drop `config/agents/<name>/` + `adapters/<name>/adapter.py` — auto-discovered, zero core edits |
 
@@ -184,7 +185,7 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 | **Files** | `/api/files/{upload,list-directory,content,content-binary,save,mkdir}` | [Files API](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Files-Api) |
 | **Sessions** | `/api/sessions/*`, `/api/messages/{id}` | [Sessions & messages](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Sessions-Messages-Api) |
 | **Agents** | `/api/agents/*`, `/api/models`, `/api/config/*` | [Agents & config](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Agents-Config-Api) |
-| **Auth** | `/xo-auth/*`, `/connect/claude-code`, `/connect/codex`, `/openclaw/usage/*` | [Auth & setup](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Auth-Api) |
+| **Auth** | `/xo-auth/*`, `/connect/claude-code`, `/connect/codex`, `/connect/antigravity`, `/openclaw/usage/*` | [Auth & setup](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Auth-Api) |
 | **Connectors** | `/api/connectors/{gdrive,onedrive,github,vercel,manus}/*` | [Connectors](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Connectors-Api) |
 | **Secrets & misc** | `/api/secrets/*`, `/api/usage`, `/api/onboarding/*`, `/api/channels/add` | [Misc](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Misc-Api) |
 | **Server** | `/health`, `/sessions`, `/gateway/restart`, `/app/{restart,update}` | [Server & lifecycle](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Server-Api) |

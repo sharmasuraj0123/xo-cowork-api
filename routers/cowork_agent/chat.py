@@ -113,6 +113,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     our_session_id = stream_info.get("our_session_id") or stream_info.get("session_id")
     agent_type = stream_info.get("agent_type")
     agent_id = stream_info.get("agent_id")
+    model = stream_info.get("model")
     is_new_session = stream_info.get("is_new_session", False)
 
     if is_new_session and our_session_id:
@@ -134,6 +135,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 agent_type=agent_type,
                 our_session_id=our_session_id,
                 agent_id=agent_id,
+                model=model,
                 is_new_session=is_new_session,
             ):
                 await queue.put(event)
@@ -265,6 +267,7 @@ async def chat_prompt(request: Request):
         "agent_name": agent_name,
         "agent_type": body.get("agent_type"),
         "agent_id": agent_id,
+        "model": body.get("model"),
         "is_new_session": is_new_session,
     }
     return {"stream_id": stream_id, "session_id": our_session_id}
