@@ -201,7 +201,10 @@ def start(name: Optional[str] = None) -> dict[str, Any]:
 
     binary = resolve_binary("CLAUDE_CLI_PATH", "claude")
     label = (name or "").strip() or _default_name()
-    cmd = [binary, "remote-control", "--name", label, "-c"]
+    # NB: no `-c`/`--continue`. It errors out ("No recent session found in this
+    # directory") whenever there's no prior RC session — i.e. on every first Start
+    # — so each Start creates a fresh session instead.
+    cmd = [binary, "remote-control", "--name", label]
 
     logf = open(LOG_FILE, "ab")
     try:
