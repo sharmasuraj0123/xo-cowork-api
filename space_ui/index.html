@@ -1,0 +1,146 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XO Space</title>
+<style>html{color-scheme:dark}</style>
+</head><body>
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/stage.css">
+<link rel="stylesheet" href="css/graph.css">
+<link rel="stylesheet" href="css/sessions.css">
+<link rel="stylesheet" href="css/timeline.css">
+<link rel="stylesheet" href="css/sixdegrees.css">
+<link rel="stylesheet" href="css/chrome.css">
+<link rel="stylesheet" href="css/projects.css">
+<link rel="stylesheet" href="css/chat.css">
+
+<div class="topbar">
+  <div class="brand">
+    <span class="mark"><svg width="34" height="14" viewBox="20 155 460 190" aria-label="XO">
+      <polyline stroke="#e9e4d9" stroke-width="26" fill="none" stroke-miterlimit="10" points="36.99 165.84 118.47 247.31 31.16 334.61"/>
+      <polyline stroke="#e9e4d9" stroke-width="26" fill="none" stroke-miterlimit="10" points="244.91 165.84 163.44 247.31 250.74 334.61"/>
+      <polyline stroke="#83d63a" stroke-width="26" fill="none" stroke-miterlimit="10" points="328.12 165.06 246.65 246.53 333.95 333.84"/>
+      <polyline stroke="#83d63a" stroke-width="26" fill="none" stroke-miterlimit="10" points="380.51 165.06 461.99 246.53 374.68 333.84"/>
+    </svg></span>
+    <b>Space</b><span>a workspace knowledge graph</span></div>
+  <div class="tabs"><!-- populated by core/registry.js from the registered views --></div>
+  <div class="tright">
+    <div class="rootpick">
+      <button id="root-btn" title="Re-root the graph on any node">
+        <span class="rlab">Root</span><b id="root-name">XO</b><span class="caret">&#9662;</span>
+      </button>
+      <div class="rootdd" id="rootdd">
+        <div class="hint">Re-root the graph</div>
+        <input id="root-q" placeholder="Pick any node&hellip;" autocomplete="off" spellcheck="false">
+        <div class="ac" id="root-ac"></div>
+        <button id="root-reset">Reset to XO</button>
+      </div>
+    </div>
+    <div class="searchwrap">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4.6" stroke="#b3ada0" stroke-width="1.3"/><path d="M9.6 9.6L13 13" stroke="#b3ada0" stroke-width="1.3" stroke-linecap="round"/></svg>
+      <input id="q" type="text" placeholder="Search the workspace&hellip;" autocomplete="off" spellcheck="false">
+      <kbd>/</kbd>
+      <div class="ac" id="qac"></div>
+    </div>
+  </div>
+</div>
+
+<main id="stage">
+  <!-- GRAPH -->
+  <section class="view is-active intro-dim" id="view-graph">
+    <canvas id="gcanvas"></canvas>
+    <div class="ov" id="chips"></div>
+    <p class="ov" id="hint"><b>Click</b> a node to focus its neighbourhood &middot; <b>Double-click</b> a cluster to open or close it &middot; <b>Drag</b> to reposition &middot; <b>Scroll</b> to zoom</p>
+    <div class="ov" id="intro">
+      <div class="eyebrow">An interconnected workspace history</div>
+      <h1>Every artifact leaves a trail.</h1>
+      <p id="intro-p">Wander through the repos, papers, decks, and experiments that bind thirteen months of XO together, from the first commit to this morning.</p>
+      <button class="cta" id="intro-cta">Enter the space &rarr;</button>
+    </div>
+    <div class="ov" id="legend"></div>
+    <div class="ov" id="counts"></div>
+    <div class="ov" id="crumb">
+      <span class="name" id="crumb-name"></span>
+      <span class="depth" id="crumb-depth"></span>
+      <button id="crumb-clear" title="Clear focus (Esc)">Clear</button>
+    </div>
+    <div class="ov" id="simstat"><span class="pip"></span>settling&hellip;</div>
+  </section>
+
+  <!-- TIMELINE -->
+  <section class="view" id="view-time">
+    <div class="thead">
+      <div>
+        <h2>Thirteen months, four departments.</h2>
+        <div class="sub" id="tsub">Scrub through the workspace as it grew. Open any cluster from the graph to watch its run unfold here.</div>
+      </div>
+      <div class="grow"></div>
+      <button class="ghost" id="tclear" hidden>Clear trace</button>
+      <button id="tplay"><svg width="9" height="10" viewBox="0 0 9 10"><path d="M0 0L9 5L0 10Z" fill="#14100a"/></svg><span>Play</span></button>
+      <div id="treadout">Jul 2026</div>
+    </div>
+    <div class="scrubrow">
+      <input id="tscrub" type="range" min="0" max="1000" value="1000">
+      <div class="ticks"><span>JUN 2025</span><span>SEP</span><span>DEC</span><span>MAR 2026</span><span>JUL 2026</span></div>
+    </div>
+    <div id="tmilestone"></div>
+    <div id="tplot"></div>
+  </section>
+
+  <!-- SIX DEGREES -->
+  <section class="view" id="view-six">
+    <div class="sixwrap">
+      <div class="sixhead">
+        <h2>Six degrees of XO</h2>
+        <div class="sub">Two artifacts. The shortest chain of work that connects them.</div>
+      </div>
+      <div class="sixform">
+        <div class="sfield"><label for="six-a">From</label><input id="six-a" placeholder="e.g. music" autocomplete="off" spellcheck="false"><div class="ac" id="six-aac"></div></div>
+        <button id="sixswap" title="Swap">&#8645;</button>
+        <div class="sfield"><label for="six-b">To</label><input id="six-b" placeholder="e.g. XO Labs seed deck" autocomplete="off" spellcheck="false"><div class="ac" id="six-bac"></div></div>
+        <button id="sixgo">Connect</button>
+        <button id="sixrand">Surprise me</button>
+      </div>
+      <div id="sixerr"></div>
+      <div id="sixout">
+        <div class="sixempty" id="sixempty">
+          <div class="big">6&deg;</div>
+          <p>Every folder is a bridge. Pick two artifacts to reveal the route between them.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- SESSIONS (Argus telemetry dashboard; content rendered by the
+       sessions-tab closure below, independent of boot()) -->
+  <section class="view" id="view-sessions">
+    <div class="sesswrap" id="sesswrap"></div>
+  </section>
+</main>
+
+<!-- detail panel -->
+<aside id="panel">
+  <button class="close" id="panel-close" title="Close (Esc)">&#10005;</button>
+  <div class="scroll" id="panel-scroll"></div>
+</aside>
+
+<!-- hover card -->
+<div id="hc"></div>
+<div id="toast"></div>
+
+<footer>
+  <div class="srv">
+    <span class="pip" id="srv-pip"></span>
+    <span id="srv-text">checking xo-cowork-api&hellip;</span>
+    <button id="srv-btn" hidden></button>
+    <div class="srvpop" id="srvpop">
+      <div class="hint">Start the server from a shell</div>
+      <pre>cd xo-cowork-api &amp;&amp; ./cowork-api.sh start</pre>
+      <button id="srv-copy">Copy command</button>
+      <p>A page can check the server, but starting or stopping it needs a shell. This pill keeps polling and flips back on by itself.</p>
+    </div>
+  </div>
+  <div class="meta" id="fmeta"></div>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+
+</body></html>

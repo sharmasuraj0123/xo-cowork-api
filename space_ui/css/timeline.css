@@ -1,0 +1,34 @@
+  /* ---------------- timeline ---------------- */
+  #view-time{display:flex;flex-direction:column;padding:20px 22px 6px}
+  .thead{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap}
+  .thead h2{font:500 22px var(--serif);letter-spacing:.01em}
+  .thead .sub{font-size:12px;color:var(--ink-3);margin-top:3px;max-width:520px}
+  .thead .grow{flex:1}
+  .thead .ghost{
+    font:400 10.5px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);
+    border:1px solid var(--line);border-radius:999px;padding:7px 14px;transition:all .16s var(--ease);
+  }
+  .thead .ghost:hover{color:var(--ink);border-color:#39404d}
+  #tplay{
+    display:flex;align-items:center;gap:8px;
+    font:600 10.5px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:#14100a;
+    background:var(--accent);border-radius:999px;padding:8px 16px;
+  }
+  #treadout{font:400 24px var(--mono);letter-spacing:.02em;color:var(--accent);
+    font-variant-numeric:tabular-nums;min-width:118px;text-align:right}
+  .scrubrow{margin:16px 0 2px}
+  #tscrub{width:100%;appearance:none;-webkit-appearance:none;height:14px;background:transparent;cursor:ew-resize}
+  #tscrub::-webkit-slider-runnable-track{height:1px;background:var(--line)}
+  #tscrub::-webkit-slider-thumb{
+    -webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);
+    margin-top:-6px;box-shadow:0 0 0 4px rgba(168,217,79,.16);
+  }
+  #tscrub::-moz-range-track{height:1px;background:var(--line)}
+  #tscrub::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 4px rgba(168,217,79,.16)}
+  .ticks{display:flex;justify-content:space-between;font:400 9.5px var(--mono);letter-spacing:.08em;color:#56534b;margin-top:4px}
+  #tmilestone{font:italic 400 13px var(--serif);color:var(--ink-2);margin-top:10px;min-height:18px;
+    transition:opacity .4s var(--ease)}
+  #tplot{flex:1;min-height:0;margin-top:6px}
+  #tplot svg{width:100%;height:100%;display:block}
+

@@ -389,7 +389,7 @@ configure_hermes() {
     # Provider is determined by whichever API key is present.
     # Anthropic wins if multiple are set.
     _configure_model() {
-        local provider="$1" key_var="$2" default_model="$3" base_url="$4"
+        local provider="$1" key_var="$2" default_model="$3" base_url="$4" api_mode="${5:-}"
         local api_key="${!key_var:-}"
         [ -z "$api_key" ] && return 1
         log "Configuring model: $provider / $default_model"
@@ -397,15 +397,16 @@ configure_hermes() {
         hermes config set model.provider "$provider"
         hermes config set model.default "$default_model"
         [ -n "$base_url" ] && hermes config set model.base_url "$base_url"
+        [ -n "$api_mode" ] && hermes config set model.api_mode "$api_mode"
         log_success "Model: $provider / $default_model"
     }
 
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-8 https://api.anthropic.com
     elif [ -n "${OPENAI_API_KEY:-}" ]; then
-        _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+        _configure_model custom OPENAI_API_KEY gpt-5.5 https://api.openai.com/v1
     elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
+        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-opus-4.8 https://openrouter.ai/api/v1 chat_completions
     else
         log_warn "No model provider key — model not configured"
     fi

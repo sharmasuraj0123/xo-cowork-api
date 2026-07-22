@@ -1,0 +1,49 @@
+  /* ---------------- sessions tab ---------------- */
+  #view-sessions{overflow-y:auto}
+  /* the global `canvas` rule makes every canvas a full-bleed overlay (graph,
+     timeline). Chart canvases in this tab are ordinary in-flow elements —
+     undo the overlay positioning inside the panel. */
+  .sesswrap canvas{position:static;inset:auto}
+  .sesswrap{max-width:1180px;margin:0 auto;padding:26px 26px 60px;font-family:var(--sans)}
+  .sess-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .sess-subnav,.sess-win{display:flex;gap:2px;background:var(--bg-2);border:1px solid var(--line);border-radius:9px;padding:3px}
+  .sess-subnav button{font-size:12.5px;color:var(--ink-2);padding:5px 12px;border-radius:6px}
+  .sess-subnav button.is-on{background:var(--bg-3);color:var(--ink)}
+  .sess-win button{font-size:12px;color:var(--ink-3);padding:4px 10px;border-radius:6px}
+  .sess-win button.is-on{background:var(--bg-3);color:var(--accent)}
+  .sess-spacer{flex:1}
+  .sess-refresh{font-size:13px;color:var(--ink-2);border:1px solid var(--line);border-radius:9px;padding:6px 12px}
+  .sess-refresh:hover{color:var(--accent);border-color:var(--accent)}
+  .scard{background:var(--bg-2);border:1px solid var(--line-soft);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+  .scard .eyebrow2{font:600 10.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:12px}
+  .sess-hero{display:flex;align-items:baseline;gap:26px;flex-wrap:wrap}
+  .sess-hero .big{font:600 44px/1 var(--serif);color:var(--accent)}
+  .sess-hero .unit{font:600 10.5px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3)}
+  .sess-hero .kv{color:var(--ink-2);font-size:13px}
+  .sess-hero .kv b{color:var(--ink)}
+  .sgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .sgrid .scard{margin-bottom:0}
+  .scards4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .scards4 .scard{margin:0}
+  .scards4 .v{font:600 24px/1.2 var(--serif);color:var(--ink)}
+  .scards4 .v.acc{color:var(--accent)}
+  .scards4 .s{font-size:11.5px;color:var(--ink-3);margin-top:4px}
+  table.stbl{width:100%;border-collapse:collapse;font-size:12.5px}
+  .stbl th{font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+  .stbl td{padding:8px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-2);vertical-align:top}
+  .stbl td b{color:var(--ink);font-weight:500}
+  .stbl tr.rowlink{cursor:pointer}
+  .stbl tr.rowlink:hover td{background:var(--bg-3)}
+  .stbl .num{text-align:right;font-family:var(--mono);font-size:11.5px}
+  .stbl .num.acc{color:var(--accent)}
+  .stbl .num.err{color:var(--err)}
+  .chip{font:500 10.5px/1 var(--mono);background:var(--bg-3);border:1px solid var(--line);border-radius:5px;padding:3px 6px;color:var(--ink-2);white-space:nowrap}
+  .sess-back{font-size:12.5px;color:var(--accent);margin-bottom:14px;display:inline-block;cursor:pointer}
+  .sess-note{color:var(--ink-3);font-size:12.5px;padding:26px 0;text-align:center}
+  .sess-err{border-left:3px solid var(--err);padding:14px 16px;background:var(--bg-2);border-radius:0 10px 10px 0;color:var(--ink-2)}
+  .sess-err b{color:var(--ink)}
+  .kvrow{display:grid;grid-template-columns:180px 1fr;font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line-soft)}
+  .kvrow dt{color:var(--ink-3)}
+  .kvrow dd{color:var(--ink-2);word-break:break-all}
+  @media(max-width:900px){.sgrid{grid-template-columns:1fr}.scards4{grid-template-columns:1fr 1fr}}
+
