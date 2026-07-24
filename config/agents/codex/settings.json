@@ -1,0 +1,5 @@
+{
+  "cli_path_env": "CODEX_CLI_PATH",
+  "cowork_root": "~/codex-cowork",
+  "timeout": 300
+}
