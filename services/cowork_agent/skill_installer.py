@@ -23,6 +23,8 @@ _SOURCE_DIR = _REPO_ROOT / ".agents" / "skills"
 # `SKILL.md`. Add a name here to bundle a new skill with every installed agent.
 BUNDLED_SKILLS = (
     "xo-projects",
+    "github",
+    "rclone-cloud",
 )
 
 
