@@ -263,6 +263,48 @@ CHAIN
 }
 
 # ==============================================================
+# Step 6 — Remote Control gate seeding (~/.claude.json).
+# `claude remote-control` shows two interactive gates on first use: the
+# workspace-trust dialog and an "Enable Remote Control?" prompt. Pre-clear both
+# so the API can launch it headless: home-dir trust (inherited by every dir
+# under it, xo-projects included) and the enable dialog. Idempotent: skips the
+# write when both are already set, so it never races the CLI (which rewrites
+# ~/.claude.json on exit). Also re-checked by remote_control.ensure_gates_seeded().
+# ==============================================================
+seed_remote_control_config() {
+    local cfg="$HOME/.claude.json"
+    local root="${XO_RC_DIR:-$HOME}"
+    root="${root/#\~/$HOME}"
+    root="$(cd "$root" 2>/dev/null && pwd -P || echo "$root")"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        log_warn "jq not found — skipping Remote Control gate seed"
+        return 0
+    fi
+
+    local current='{}'
+    [ -s "$cfg" ] && current="$(cat "$cfg")"
+
+    if printf '%s' "$current" | jq -e --arg r "$root" \
+        '(.remoteDialogSeen == true) and (.projects[$r].hasTrustDialogAccepted == true)' \
+        >/dev/null 2>&1; then
+        log "Remote Control gates already seeded (trust: $root)"
+        return 0
+    fi
+
+    local tmp; tmp="$(mktemp "${cfg}.xo-rc.XXXXXX")"
+    if printf '%s' "$current" | jq --arg r "$root" \
+        '.remoteDialogSeen = true | .projects[$r].hasTrustDialogAccepted = true' \
+        > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$cfg"
+        log_success "seeded Remote Control gates (trust: $root)"
+    else
+        rm -f "$tmp"
+        log_warn "could not seed Remote Control config (jq failed) — leaving ~/.claude.json untouched"
+    fi
+}
+
+# ==============================================================
 # Main
 # ==============================================================
 log "Starting claude_code agent bootstrap"
@@ -271,5 +313,6 @@ install_node
 write_env_file
 check_claude_cli
 install_login_guard
+seed_remote_control_config
 log_success "claude_code agent bootstrap complete"
 exit 0
