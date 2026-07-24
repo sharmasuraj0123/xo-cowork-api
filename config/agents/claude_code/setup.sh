@@ -266,14 +266,14 @@ CHAIN
 # Step 6 — Remote Control gate seeding (~/.claude.json).
 # `claude remote-control` shows two interactive gates on first use: the
 # workspace-trust dialog and an "Enable Remote Control?" prompt. Pre-clear both
-# so the API can launch it headless: projects-root trust (inherited by every
-# project under the root) and the enable dialog. Idempotent: skips the write
-# when both are already set, so it never races the CLI (which rewrites
+# so the API can launch it headless: home-dir trust (inherited by every dir
+# under it, xo-projects included) and the enable dialog. Idempotent: skips the
+# write when both are already set, so it never races the CLI (which rewrites
 # ~/.claude.json on exit). Also re-checked by remote_control.ensure_gates_seeded().
 # ==============================================================
 seed_remote_control_config() {
     local cfg="$HOME/.claude.json"
-    local root="${XO_PROJECTS_ROOT:-$HOME/xo-projects}"
+    local root="${XO_RC_DIR:-$HOME}"
     root="${root/#\~/$HOME}"
     root="$(cd "$root" 2>/dev/null && pwd -P || echo "$root")"
 
