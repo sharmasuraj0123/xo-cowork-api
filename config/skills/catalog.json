@@ -7,17 +7,14 @@
     "timeout_seconds": "optional, default 300, applies per command",
     "cwd": "optional working directory for every command",
     "success_message": "optional human-authored line shown on success; plain text or with placeholders; a default is used if omitted. Failure is always a generic 'Failed to install <name>.'",
-    "_placeholders": "in any command or success_message: {skills_dir} → active agent's <home_dir>/skills, {home_dir}, {agent_name}. Unknown {..} pass through."
+    "_placeholders": "in any command or success_message: {skills_dir} → active agent's <home_dir>/skills, {home_dir}, {agent_name}. Unknown {..} pass through. Path placeholders expand to raw paths — double-quote them in commands (--dir \"{skills_dir}\") so spaces survive."
   },
   "skills": [
     {
-      "name": "zero",
-      "description": "@zeroxyz/cli — installs into the active agent's skills dir",
-      "commands": [
-        "npm i -g @zeroxyz/cli",
-        "zero init --skills-dir {skills_dir}"
-      ],
-      "success_message": "Zero installed to {skills_dir}. Run `zero auth login` to finish setup."
+      "name": "okx",
+      "description": "okx/onchainos-skills — OKX OnchainOS skills, installed globally via npx",
+      "command": "npx skills add okx/onchainos-skills --yes -g",
+      "success_message": "OKX OnchainOS skills installed."
     }
   ]
 }

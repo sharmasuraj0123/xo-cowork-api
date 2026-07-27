@@ -106,11 +106,18 @@ async def install(name: str) -> dict:
                 steps.append(_step_result(index, ok=False, exit_code=None, stdout="",
                                           stderr=f"placeholder expansion failed: {exc}",
                                           duration=0.0, timed_out=False))
+                print(f"⚠️ skill install {name!r} step {index + 1}: placeholder expansion failed: {exc}")
                 ok = False
                 break
             step = await _run_step(index, rendered, entry["timeout_seconds"], entry["cwd"])
             steps.append(step)
             if not step["ok"]:
+                detail = step["stderr"].strip() or step["stdout"].strip()
+                print(
+                    f"⚠️ skill install {name!r} step {index + 1}/{len(entry['commands'])} failed "
+                    f"(exit={step['exit_code']}, timed_out={step['timed_out']})"
+                    + (f": {detail[-2000:]}" if detail else "")
+                )
                 ok = False
                 break
         steps_total = len(entry["commands"])
