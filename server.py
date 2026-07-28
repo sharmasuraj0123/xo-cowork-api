@@ -598,6 +598,10 @@ async def lifespan(app: FastAPI):
 
     if _startup_skills_task and not _startup_skills_task.done():
         _startup_skills_task.cancel()
+        try:
+            await _startup_skills_task
+        except asyncio.CancelledError:
+            pass
 
     if _xo_status_task and not _xo_status_task.done():
         _xo_status_task.cancel()
