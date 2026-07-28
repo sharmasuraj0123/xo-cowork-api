@@ -627,7 +627,24 @@ async def chat_prompt(request: Request):
     return {"stream_id": stream_id, "session_id": our_session_id}
 
 
-@router.get("/api/chat/stream/{stream_id}")
+# GET *and* POST. The product client picks the verb by transport, not by
+# preference (xo-coworker src/lib/sse.ts:169-175): Cloudflare Quick Tunnels
+# buffer a GET SSE response until the connection closes, which breaks streaming
+# outright, so whenever a remote token is present it connects with
+# fetch+ReadableStream over POST instead of EventSource over GET. This route was
+# GET-only, so POST returned 405 and every remote/tunnel user had NO SSE at all —
+# their answers arrived solely via the 10 s /api/messages poll.
+#
+# The POST carries no body (sse.ts:217 sends only headers), and `last_event_id`
+# is a query param on both verbs, so the handler is identical for the two and
+# must not try to read a request body.
+# Registered as two operations rather than one `api_route(methods=[...])`: a
+# single route serving both verbs derives ONE operation id for BOTH, and FastAPI
+# then warns `Duplicate Operation ID` and emits an OpenAPI document that client
+# generators reject. Explicit distinct ids keep the schema valid. The path is
+# unchanged either way, so route parity is unaffected.
+@router.get("/api/chat/stream/{stream_id}", operation_id="chat_stream_get")
+@router.post("/api/chat/stream/{stream_id}", operation_id="chat_stream_post")
 async def chat_stream(stream_id: str, request: Request, last_event_id: str | None = None):
     chat_state.ensure_janitor()
     cursor = _resolve_cursor(request, last_event_id)

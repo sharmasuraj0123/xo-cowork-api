@@ -27,11 +27,17 @@ class SSESession:
         await s.disconnect()
     """
 
-    def __init__(self, app, path: str, *, query: bytes = b"", headers=None):
+    def __init__(self, app, path: str, *, query: bytes = b"", headers=None,
+                 method: str = "GET"):
         self.app = app
         self.path = path
         self.query = query
         self.headers = headers or []
+        # The product client picks the verb by transport: EventSource/GET
+        # locally, fetch+ReadableStream/POST whenever a remote token is present,
+        # because Cloudflare tunnels buffer GET SSE (sse.ts:169-175). Both must
+        # behave identically, so the driver has to be able to speak both.
+        self.method = method.upper()
         self.status: int | None = None
         self.frames: list[dict] = []
         self._buf = ""
@@ -47,7 +53,7 @@ class SSESession:
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
-            "method": "GET",
+            "method": self.method,
             "scheme": "http",
             "path": self.path,
             "raw_path": self.path.encode(),

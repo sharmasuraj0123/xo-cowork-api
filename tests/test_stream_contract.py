@@ -480,6 +480,80 @@ async def test_stream_not_found_carries_no_id(app):
     assert frames[0]["id"] is None, frames
 
 
+# ── remote/tunnel transport — the stream route must accept POST ──────────────
+
+async def test_stream_route_accepts_post_as_well_as_get(app, fake_dispatcher):
+    """The client chooses the verb by TRANSPORT, not preference.
+
+    `xo-coworker/src/lib/sse.ts:169-175`: Cloudflare Quick Tunnels buffer a GET
+    SSE response until the connection closes, which breaks streaming outright,
+    so whenever a remote token is present the client connects with
+    fetch+ReadableStream over **POST** instead of EventSource over GET.
+
+    This route was GET-only, so POST returned 405 and remote/tunnel users had NO
+    working SSE at all — every answer reached them via the 10 s /api/messages
+    poll. That made PR-1's live progress and PR-3's reconnect fix local-only.
+
+    Asserts the two verbs are equivalent, not merely that POST is routable: a
+    405 and a 200-that-streams-nothing look the same to a status-code check.
+    """
+    fake_dispatcher("text_only", gap=0.0)
+    stream_id, _ = await start_turn(app)
+
+    post = SSESession(app, f"/api/chat/stream/{stream_id}", method="POST")
+    await post.start()
+    frames = await post.read_until(lambda f: f["event"] == "done", timeout=3)
+    await post.disconnect()
+
+    assert frames, "POST produced no frames at all"
+    assert any(f["event"] == "text-delta" for f in frames), (
+        f"POST streamed no content: {[f['event'] for f in frames]}"
+    )
+    assert any(f["event"] == "done" for f in frames)
+
+    # ...and the GET path still works, on its own fresh turn.
+    fake_dispatcher("text_only", gap=0.0)
+    get_id, _ = await start_turn(app)
+    get = SSESession(app, f"/api/chat/stream/{get_id}", method="GET")
+    await get.start()
+    get_frames = await get.read_until(lambda f: f["event"] == "done", timeout=3)
+    await get.disconnect()
+
+    assert [f["event"] for f in get_frames if f["event"] != "heartbeat"] == \
+           [f["event"] for f in frames if f["event"] != "heartbeat"], (
+        "GET and POST produced different event sequences"
+    )
+
+
+async def test_post_stream_ignores_a_body_and_honours_the_cursor(app, fake_dispatcher):
+    """The client's POST sends NO body (sse.ts:217 — headers only) and passes
+    `last_event_id` as a QUERY param on both verbs. Two regressions this guards:
+    a handler that tries to read a JSON body would 400 every remote reconnect,
+    and a cursor read only on the GET path would silently replay the whole turn
+    to tunnel users on every reconnect."""
+    fake_dispatcher("multi_tool", scale=400.0)
+    stream_id, _ = await start_turn(app)
+
+    first = SSESession(app, f"/api/chat/stream/{stream_id}", method="POST")
+    await first.start()
+    seen = await first.read_until(lambda f: f["event"] == "done", timeout=5)
+    await first.disconnect()
+    ids = [int(f["id"]) for f in seen if f.get("id")]
+    assert ids, "no ids emitted over POST"
+
+    # Reconnect over POST with a cursor: nothing already seen may be re-sent.
+    again = SSESession(app, f"/api/chat/stream/{stream_id}",
+                       query=f"last_event_id={max(ids)}".encode(), method="POST")
+    await again.start()
+    replay = await again.read_frames(timeout=1.0)
+    await again.disconnect()
+
+    replayed = [int(f["id"]) for f in replay if f.get("id")]
+    assert all(i > max(ids) - 1 for i in replayed) or not replayed, (
+        f"POST reconnect re-sent frames the client already had: {replayed} <= {max(ids)}"
+    )
+
+
 # ── Gate #6 — progress density ───────────────────────────────────────────────
 
 @pytest.mark.xfail(
