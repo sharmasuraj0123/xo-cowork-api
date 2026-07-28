@@ -1,8 +1,22 @@
 {
   "n_input_lines": 33,
-  "n_sse_frames": 1,
+  "n_sse_frames": 4,
   "text": "`a.txt` contains three lines of text: `alpha`, `beta`, and `gamma`. It's a plain list of the first three Greek letter names, with no other content or structure.",
   "frames": [
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000007",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000007"
+    },
+    {
+      "type": "reasoning",
+      "title": "Thinking"
+    },
     {
       "type": "token",
       "token": "`a.txt` contains three lines of text: `alpha`, `beta`, and `gamma`. It's a plain list of the first three Greek letter names, with no other content or structure."

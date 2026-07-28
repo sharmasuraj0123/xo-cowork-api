@@ -1,6 +1,6 @@
 {
   "n_input_lines": 24,
-  "n_sse_frames": 3,
+  "n_sse_frames": 18,
   "text": "I'll work through those steps in order.Glob and Grep aren't available in this session's toolset, so I used Bash for the listing and will do the same for the grep step. Reading the files now:The sandbox holds three small files — `a.txt` (alpha/beta/gamma, 3 lines), `b.txt` (one/two, 2 lines), and `c.py` (a trivial `f()` returning 42) — with \"beta\" appearing exactly once, at `a.txt:2`.\n\nNote: this session's toolset doesn't include Glob or Grep, so I used `ls` and `grep -rn` via Bash for those two steps; the Read and `wc -l` steps ran as requested.",
   "frames": [
     {
@@ -8,8 +8,82 @@
       "token": "I'll work through those steps in order."
     },
     {
+      "type": "tool-call",
+      "tool": "bash",
+      "call_id": "toolu_000000000000000000000006",
+      "title": "Running a command"
+    },
+    {
+      "type": "tool-call",
+      "tool": "tool",
+      "call_id": "toolu_000000000000000000000008",
+      "title": "Working…"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000008"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000006"
+    },
+    {
+      "type": "reasoning",
+      "title": "Thinking"
+    },
+    {
       "type": "token",
       "token": "Glob and Grep aren't available in this session's toolset, so I used Bash for the listing and will do the same for the grep step. Reading the files now:"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000020",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000020"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000023",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000023"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000026",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000026"
+    },
+    {
+      "type": "tool-call",
+      "tool": "bash",
+      "call_id": "toolu_000000000000000000000030",
+      "title": "Running a command"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000030"
+    },
+    {
+      "type": "tool-call",
+      "tool": "bash",
+      "call_id": "toolu_000000000000000000000035",
+      "title": "Running a command"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000035"
     },
     {
       "type": "token",

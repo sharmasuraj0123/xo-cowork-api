@@ -84,6 +84,11 @@ _KEEPALIVE_INTERVAL = 20  # seconds of silence before emitting an SSE keepalive 
 
 _SENTINEL = object()  # marks end-of-stream in the keepalive queue
 
+# Upper bound on the per-turn call_id -> tool map (see _dispatcher_sse). A turn's
+# tool count is unbounded, so the correlation table needs a ceiling; past it,
+# later steps simply lose the `tool` field rather than the process losing memory.
+_MAX_TRACKED_TOOL_CALLS = 512
+
 
 async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None):
     """
@@ -126,6 +131,33 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     dispatcher = AgentDispatcher(agent_name)
     final_native_session_id = None
     queue: asyncio.Queue = asyncio.Queue()
+
+    # call_id -> the mapped tool name we already sent on that step's `tool-call`.
+    # A `tool_result` record on the wire identifies its step by id only and does
+    # NOT repeat the tool name, so an adapter parsing one line at a time cannot
+    # put `tool` on a `tool-result` frame. Correlating here (per turn, in the
+    # generator's own scope — never module state, which would bleed between
+    # concurrent turns) is what makes two client integrations reachable:
+    # `use-sse.ts:336` refreshes the workspace file tree after a write/edit/bash
+    # result, and `use-sse.ts:322` routes todo results to the progress panel.
+    # Both are keyed on `data.tool` and both were dead code without this.
+    #
+    # No privacy cost: the value echoed back is the mapped, allowlisted name the
+    # client was already given, never a raw CLI or `mcp__*` name.
+    tool_by_call: dict[str, str] = {}
+
+    def _tool_step_payload(event: dict) -> dict:
+        """Build the shared tool-result / tool-error payload for one step."""
+        payload = {"call_id": event["call_id"]}
+        for key in ("tool", "title", "output"):
+            if event.get(key):
+                payload[key] = event[key]
+        if "tool" not in payload:
+            # No adapter supplied one — recover it from the matching tool-call.
+            recovered = tool_by_call.pop(event["call_id"], None)
+            if recovered:
+                payload["tool"] = recovered
+        return payload
 
     async def _produce():
         try:
@@ -173,6 +205,61 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 event_id += 1
             elif event.get("type") == "error":
                 yield f"id: {event_id}\nevent: agent-error\ndata: {json.dumps({'error_message': event.get('error', 'Stream error')})}\n\n"
+                event_id += 1
+            elif event.get("type") == "tool-call":
+                # Live tool progress. The client's TOOL_START handler is
+                # `if (data.tool && data.call_id)` — both must be truthy or the
+                # frame renders nothing at all. ``tool`` has already been mapped
+                # by the adapter onto the client's fixed lowercase vocabulary, so
+                # no raw name (which could be `mcp__<server>__<tool>`) reaches
+                # the SSE wire. ``arguments`` is never forwarded here: tool
+                # inputs are PII.
+                #
+                # CAVEAT — do not read the two sentences above as an end-to-end
+                # guarantee. The message-history endpoint is a second path to
+                # the same client and it is not covered: engine/messages.py:360
+                # ships the raw tool name and :364 the raw ``input``, and the
+                # client refetches history on ``done``. See the SCOPE note in
+                # adapters/claude_code/streaming.py.
+                if event.get("tool") and event.get("call_id"):
+                    if len(tool_by_call) < _MAX_TRACKED_TOOL_CALLS:
+                        tool_by_call[event["call_id"]] = event["tool"]
+                    yield f"id: {event_id}\nevent: tool-call\ndata: {json.dumps({'tool': event['tool'], 'call_id': event['call_id'], 'title': event.get('title', '')})}\n\n"
+                    event_id += 1
+            elif event.get("type") == "tool-result":
+                # ``call_id`` is mandatory — the client's handler is
+                # `if (data.call_id)`. ``title`` is omitted by the adapter on
+                # purpose (the client does `title ?? existing`, so sending a
+                # generic one would overwrite the informative start label) and
+                # ``output`` is only forwarded if an adapter supplies a redacted
+                # one; raw tool output is PII and is not sent today.
+                #
+                # ``tool`` is absent on every claude_code tool-result — the wire
+                # record identifies its step by id only — so _tool_step_payload
+                # recovers it from the matching tool-call.
+                if event.get("call_id"):
+                    payload = _tool_step_payload(event)
+                    yield f"id: {event_id}\nevent: tool-result\ndata: {json.dumps(payload)}\n\n"
+                    event_id += 1
+            elif event.get("type") == "tool-error":
+                # A separate event, not a flag on tool-result: the client's
+                # TOOL_RESULT handler marks the step *completed*, so a failed
+                # step reported that way renders a green check labelled
+                # "Step failed". TOOL_ERROR is the only shape that renders red.
+                if event.get("call_id"):
+                    payload = _tool_step_payload(event)
+                    yield f"id: {event_id}\nevent: tool-error\ndata: {json.dumps(payload)}\n\n"
+                    event_id += 1
+            elif event.get("type") == "reasoning":
+                # One pulse per thinking block. Forwarded rather than dropped so
+                # the frame stream stays dense during long silent thinking
+                # stretches (it also refreshes the client's activity watchdog).
+                # NOTE: deliberately NO ``text`` key — the client's
+                # REASONING_DELTA handler appends ``data.text`` verbatim into the
+                # user-visible reasoning transcript, so shipping the label
+                # "Thinking" there would print it in the transcript once per
+                # block. With no ``text`` the handler is a no-op by design.
+                yield f"id: {event_id}\nevent: reasoning-delta\ndata: {json.dumps({'title': event.get('title', 'Thinking')})}\n\n"
                 event_id += 1
     finally:
         producer.cancel()

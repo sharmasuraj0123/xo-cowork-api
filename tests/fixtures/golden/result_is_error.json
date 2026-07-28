@@ -1,6 +1,6 @@
 {
   "n_input_lines": 10,
-  "n_sse_frames": 2,
+  "n_sse_frames": 8,
   "text": "I'll read the three files.",
   "frames": [
     {
@@ -8,8 +8,38 @@
       "token": "I'll read the three files."
     },
     {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000007",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000007"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000010",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000010"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000013",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000013"
+    },
+    {
       "type": "error",
-      "error": "Claude Code error"
+      "error": "Reached maximum number of turns (1)"
     }
   ]
 }

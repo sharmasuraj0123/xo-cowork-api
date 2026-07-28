@@ -100,9 +100,23 @@ async def test_reconnect_after_genuine_completion_does_say_done(app, fake_dispat
 
 @pytest.mark.xfail(
     strict=True,
-    reason="docs §9 gate 6 / §3.1: tool_use and tool_result never become SSE "
-           "frames today, so a multi-tool turn is silent apart from heartbeats. "
-           "Phase 2.1/2.2 must make this pass.",
+    reason="docs §9 gate 6 / §3.1. STILL FAILING, but no longer for the "
+           "original reason — do not read the old text ('tool_use and "
+           "tool_result never become SSE frames') as current. Phase 2.1/2.2 "
+           "landed: multi_tool now yields 20 informational frames, up from 0. "
+           "What remains is a 7.8 s residual gap that the parser cannot close "
+           "by forwarding more events, because there are no more events to "
+           "forward. Measured on the fixture's real timeline: the 7.77 s window "
+           "(tool-result toolu_…0006 -> the next reasoning pulse) contains only "
+           "three `system`/`subtype=thinking_tokens` records, and those carry "
+           "no timestamp so they replay at delta 0 — i.e. they land at the "
+           "START of the window and would not split it even if forwarded; the "
+           "second 5.15 s window (lines 18->19) has no wire traffic at all. "
+           "Closing gate #6 therefore needs a ROUTER-side informational "
+           "keepalive on a timer, not more parser output — a deliberate design "
+           "decision (it changes what an idle turn puts on the wire, and it "
+           "interacts with gate #8's heartbeat budget), so it is left "
+           "unimplemented rather than bolted on here.",
 )
 async def test_informational_frame_every_five_seconds(app, fake_dispatcher, monkeypatch):
     """No gap > 5 s between *informational* (non-heartbeat) frames on a
@@ -127,6 +141,62 @@ async def test_informational_frame_every_five_seconds(app, fake_dispatcher, monk
         f"largest informational gap {worst:.1f}s (scaled) exceeds 5 s; "
         f"{len(informational)} informational frames out of {len(session.frames)}"
     )
+
+
+# ── tool-step frames carry what the client keys off ──────────────────────────
+
+async def test_tool_result_frames_carry_the_tool_name(app, fake_dispatcher):
+    """Every `tool-result` must repeat the `tool` its `tool-call` announced.
+
+    The wire record for a finished step identifies it by `tool_use_id` only, so
+    a line-at-a-time parser cannot supply `tool` and the router used to emit a
+    bare `{"call_id": ...}`. Two client integrations are keyed on `data.tool`
+    inside the TOOL_RESULT handler and were therefore dead code:
+    `use-sse.ts:336` re-fetches the workspace file tree after a
+    write/edit/bash, and `use-sse.ts:322` routes todo results to the progress
+    panel. The visible symptom was the workspace file list never refreshing
+    after the agent wrote a file.
+
+    Also asserts the value stays inside the client's allowlisted vocabulary —
+    recovering the name must not smuggle a raw `mcp__<server>__<tool>` back on.
+    """
+    from services.cowork_agent.adapters.claude_code.streaming import (
+        _GENERIC_TOOL, _TOOL_MAP,
+    )
+
+    allowed = {t for t, _ in _TOOL_MAP.values()} | {_GENERIC_TOOL[0]}
+
+    fake_dispatcher("multi_tool", gap=0.0)
+    stream_id, _ = await start_turn(app)
+    session = SSESession(app, f"/api/chat/stream/{stream_id}")
+    await session.start()
+    frames = await session.read_until(lambda f: f["event"] == "done", timeout=5)
+
+    started = {}
+    for f in frames:
+        if f["event"] == "tool-call":
+            data = json.loads(f["data"])
+            started[data["call_id"]] = data["tool"]
+
+    results = [json.loads(f["data"]) for f in frames
+               if f["event"] in ("tool-result", "tool-error")]
+    assert results, "fixture produced no tool-result frames at all"
+
+    for data in results:
+        assert data.get("tool"), (
+            f"tool-result for {data['call_id']} has no `tool`; "
+            f"use-sse.ts:322/336 can never fire. Frame: {data}"
+        )
+        assert data["tool"] in allowed, f"non-allowlisted tool name on the wire: {data}"
+        if data["call_id"] in started:
+            assert data["tool"] == started[data["call_id"]], (
+                "the step changed tool between start and finish"
+            )
+
+    # `arguments` and raw `output` are PII and must never appear on the SSE path.
+    for f in frames:
+        if f["event"].startswith("tool-"):
+            assert "arguments" not in json.loads(f["data"]), f["data"]
 
 
 # ── Gate #8 — old-client safety ──────────────────────────────────────────────

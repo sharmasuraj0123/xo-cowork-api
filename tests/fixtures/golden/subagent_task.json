@@ -1,8 +1,42 @@
 {
   "n_input_lines": 20,
-  "n_sse_frames": 1,
+  "n_sse_frames": 8,
   "text": "The subagent found both files: `a.txt` contains three lines (alpha, beta, gamma) and `b.txt` contains two (one, two), each with a trailing newline.",
   "frames": [
+    {
+      "type": "reasoning",
+      "title": "Thinking"
+    },
+    {
+      "type": "tool-call",
+      "tool": "task",
+      "call_id": "toolu_000000000000000000000009",
+      "title": "Delegating to a subagent"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000016",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000016"
+    },
+    {
+      "type": "tool-call",
+      "tool": "read",
+      "call_id": "toolu_000000000000000000000021",
+      "title": "Reading files"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000021"
+    },
+    {
+      "type": "tool-result",
+      "call_id": "toolu_000000000000000000000009"
+    },
     {
       "type": "token",
       "token": "The subagent found both files: `a.txt` contains three lines (alpha, beta, gamma) and `b.txt` contains two (one, two), each with a trailing newline."
