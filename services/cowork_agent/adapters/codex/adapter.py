@@ -10,13 +10,17 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
+from services.cowork_agent.adapters.process_owner import ProcessOwnerMixin
 from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
 from services.cowork_agent.adapters.subprocess_io import (
+    KILL_CONFIRM_SECONDS,
     LARGE_LINE_NOTICE_BYTES,
     STREAM_LIMIT,
     discard_stream,
     large_line_notice,
     overflow_notice,
+    stream_timeout_notice,
+    wait_exited,
 )
 from services.cowork_agent.project_layout import (
     project_dir as _xo_project_dir,
@@ -260,7 +264,28 @@ def _normalize_wire_usage(usage: dict) -> dict:
 # ── Adapter class ──────────────────────────────────────────────────────────────
 
 
-class CodexAdapter(BaseAgentAdapter):
+class CodexAdapter(ProcessOwnerMixin, BaseAgentAdapter):
+    """Streams the ``codex`` CLI.
+
+    Owns a real process tree — ``codex exec`` is a node process that spawns tool
+    subprocesses of its own — so it gets the same ownership as the claude_code
+    lane: ``start_new_session=True``, a group-terminating ``abort()``, and the
+    per-stream wall clock. The httpx lanes (hermes, openclaw) do not, because
+    they have no process to own.
+
+    NOT A COMPLETE ACCOUNT OF THE CODEBASE, and the gap is deliberate rather
+    than a claim: ``antigravity`` DOES spawn a real ``agy`` CLI
+    (adapters/antigravity/adapter.py:441) without ``start_new_session=True``,
+    and its 300 s timeout still does a child-only ``proc.kill()`` — the pattern
+    this change exists to replace, which leaves the reparented descendant tree
+    alive. It is out of scope here (pre-existing, temp-file transport, its own
+    timeout semantics); it is not "a lane with no process to own".
+
+    ONE CODEX-SPECIFIC CARE POINT: this backend exits 0 while reporting a failed
+    turn on the wire, so ``returncode`` is NOT a failure signal here and this
+    file still has no rc-based check. The timeout notice below is therefore
+    driven by the watchdog's own flag, never by ``proc.returncode``.
+    """
 
     @property
     def adapter_name(self) -> str:
@@ -506,6 +531,7 @@ class CodexAdapter(BaseAgentAdapter):
         # ``create_subprocess_exec`` and the ``finally`` would otherwise read an
         # unbound ``proc`` and turn the real error into an UnboundLocalError.
         proc: asyncio.subprocess.Process | None = None
+        watchdog = None
         native_session_id: str | None = None
         response_parts: list[str] = []
         usage: dict = {}
@@ -532,7 +558,21 @@ class CodexAdapter(BaseAgentAdapter):
                 limit=STREAM_LIMIT,
                 env=self._subprocess_env(),
                 cwd=effective_cwd,
+                # PRECONDITION for the group signal in ``abort()``: setsid()
+                # makes the child a session and group leader so ``proc.pid`` IS
+                # its pgid, and its tool subprocesses inherit that group.
+                # Without it the child shares the API SERVER's process group and
+                # a killpg would take the server down. Must land before, not
+                # after, anything that can signal.
+                start_new_session=True,
             )
+
+            # Wall clock armed only once the handle exists — a killer that fires
+            # mid-spawn finds nothing and silently skips the kill. This is the
+            # only thing that can signal this process: nothing registers a
+            # killer on the turn's abort handle, so a client abort ("client",
+            # sent on unmount and session switch) stays state-only.
+            watchdog = self.arm_stream_watchdog(proc)
 
             async for raw_line in iter_lines(proc.stdout, on_overflow=overflows.append):
                 while overflows:
@@ -586,7 +626,39 @@ class CodexAdapter(BaseAgentAdapter):
             # streaming.py's HARD RULE, ``codex`` exits 0 while emitting
             # ``turn.failed`` (e.g. unauthenticated), so rc is not a failure
             # signal for this backend — the wire events are.
-            await proc.wait()
+            if watchdog is not None and watchdog.expired:
+                # Timeout is the ONE ending this lane reports itself, and it is
+                # reported from the watchdog — never from a return code, which
+                # stays meaningless here.
+                #
+                # ``settled()``, not ``expired``: the clock running out is not
+                # the same event as us stopping something. If the CLI had
+                # already exited, the termination signalled nothing and the turn
+                # is complete — claiming it was cut short is a false report of
+                # data loss.
+                signalled = await watchdog.settled()
+                # Bounded poll rather than ``proc.wait()``: after a signal,
+                # wait() blocks until every pipe disconnects and a descendant
+                # holding an inherited fd can stall it indefinitely (measured
+                # >5 s with the pid already gone). The terminate already waited;
+                # this only confirms.
+                await wait_exited(proc, KILL_CONFIRM_SECONDS)
+                if signalled:
+                    # ``type: "error"`` in BOTH cases, deliberately. The
+                    # ``model-loading`` channel this used to ride is a boolean in
+                    # the shipped client (use-sse.ts:201 names the payload
+                    # ``_data`` and drops it), so a partial answer was truncated
+                    # with no visible explanation whatsoever. Same fix and same
+                    # reasoning as claude_code.
+                    limit = self.stream_timeout_seconds()
+                    yield {
+                        "type": "error",
+                        "error": stream_timeout_notice(
+                            limit, partial=bool(response_parts)
+                        ),
+                    }
+            else:
+                await proc.wait()
         except Exception as exc:
             # Terminal-event contract, matching claude_code: this generator must
             # always end with a ``done``. Without this, a spawn failure (missing
@@ -607,6 +679,16 @@ class CodexAdapter(BaseAgentAdapter):
             #
             # NOT a kill path, and must never become one: an orphaned turn is
             # deliberately allowed to finish. This lets it; it does not stop it.
+            # ``disarm()`` sends nothing and is CONDITIONAL — see its docstring.
+            # It cancels the clock only once the child has exited. A client
+            # disconnect does not reach here (the producer outlives the
+            # connection); the one path that closes this generator with a live
+            # child is the janitor's max-runtime cancel, which sends no signal —
+            # so disarming there would leave that orphan unbounded.
+            if watchdog is not None:
+                watchdog.disarm()
+            self.release_process(proc)
+
             if proc is not None and proc.returncode is None:
                 discard_stream(proc.stdout)
 

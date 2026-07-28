@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
+from services.cowork_agent.adapters.process_owner import ProcessOwnerMixin
 from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
 from services.cowork_agent.adapters.subprocess_io import (
+    KILL_CONFIRM_SECONDS,
     LARGE_LINE_NOTICE_BYTES,
     STDERR_TEXT_CAP,
     STREAM_LIMIT,
@@ -22,6 +24,8 @@ from services.cowork_agent.adapters.subprocess_io import (
     drain_stderr,
     large_line_notice,
     overflow_notice,
+    stream_timeout_notice,
+    wait_exited,
 )
 from services.cowork_agent.helpers import iso_now
 from services.cowork_agent.project_layout import (
@@ -293,7 +297,15 @@ def find_session_key_for_session_id(session_id: str) -> str | None:
 # ── Adapter class ──────────────────────────────────────────────────────────────
 
 
-class ClaudeCodeAdapter(BaseAgentAdapter):
+class ClaudeCodeAdapter(ProcessOwnerMixin, BaseAgentAdapter):
+    """Streams the ``claude`` CLI.
+
+    ``ProcessOwnerMixin`` supplies ``abort()`` — the capability to terminate the
+    spawned process GROUP — plus the per-stream wall clock that is its ONLY
+    production caller. Read that module's docstring before wiring ``abort()`` to
+    anything; in particular it must never be reachable from
+    ``POST /api/chat/abort``.
+    """
 
     @property
     def adapter_name(self) -> str:
@@ -527,6 +539,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         # then be unbound and turn the real error into an UnboundLocalError.
         proc: asyncio.subprocess.Process | None = None
         stderr_tail: StderrTail | None = None
+        watchdog = None
         native_session_id: str | None = None
         response_parts: list[str] = []
         result_text: str = ""
@@ -559,7 +572,30 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                 limit=STREAM_LIMIT,
                 env=self._subprocess_env(),
                 cwd=effective_cwd,
+                # PRECONDITION for every group signal in this file, and the
+                # reason it must land in the same change as the killer rather
+                # than after it. setsid() makes the child a session and group
+                # leader, so ``proc.pid`` IS its pgid and its own descendants
+                # inherit that group. Without it, measured on this box, the
+                # child shares the API SERVER's process group
+                # (child pgid == server pgid), and a killpg would take down the
+                # server. It also detaches the child from our controlling tty,
+                # so a Ctrl-C in a dev terminal no longer broadcasts SIGINT into
+                # live turns.
+                start_new_session=True,
             )
+
+            # Arm the wall clock only NOW, with a real handle in hand. Measured:
+            # a killer that fires while the spawn is still in flight sees no
+            # process, returns early, and SILENTLY SKIPS THE KILL — the spawn
+            # then completes and runs unbounded. Ordering, not style.
+            #
+            # This is the ONLY thing in the codebase that can signal this
+            # process. Nothing registers a killer on the turn's abort handle: a
+            # client abort ("client", sent on component unmount and on session
+            # switch, not only on Stop) and the janitor's max-runtime sweep
+            # ("timeout") stay state-only. See process_owner's module docstring.
+            watchdog = self.arm_stream_watchdog(proc)
 
             # Start draining stderr IMMEDIATELY: piped-and-unread stalls the
             # child at ~64 KiB, and makes ``proc.wait()`` hang forever once the
@@ -628,7 +664,27 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             while overflows:
                 yield _overflow_event(overflows.pop(0))
 
-            await proc.wait()
+            # ``expired`` means THE CLOCK RAN OUT. It does not mean we stopped
+            # anything: if the CLI had already exited, ``terminate_process_group``
+            # takes its "already-exited" early return and signals nothing.
+            # Reproduced — a turn that delivered a complete answer and exited 0
+            # was told "The answer is incomplete", purely because stdout EOF
+            # landed a few milliseconds after the deadline. ``settled()`` waits
+            # (bounded) for the termination attempt to finish and reports
+            # whether a signal ACTUALLY left this process; that, not ``expired``,
+            # is what the user-visible claim below is allowed to rest on.
+            timed_out = False
+            if watchdog is not None and watchdog.expired:
+                timed_out = await watchdog.settled()
+                # NOT ``proc.wait()`` on the kill path. Entered with
+                # ``returncode is None`` it blocks until every pipe disconnects,
+                # which a descendant holding an inherited fd can prevent
+                # indefinitely — measured hanging >5 s with the pid already gone
+                # and rc already -9. The terminate already waited for exit; this
+                # is a bounded confirmation, not the wait.
+                await wait_exited(proc, KILL_CONFIRM_SECONDS)
+            else:
+                await proc.wait()
 
             # Fall back to result event text when no token events were captured.
             if not response_parts and result_text:
@@ -645,7 +701,42 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             # it away, and rendered an OOM mid-answer as a normally-finished
             # reply. ``saw_error`` still suppresses both, because the wire has
             # already reported that failure in full.
-            if proc.returncode and not saw_error:
+            if timed_out:
+                # The seam ``_how_it_ended`` documents. The adapter cannot tell
+                # an intentional stop from an OOM kill — from in here both are
+                # just rc=-15 — so it reports the signal. Here the caller DOES
+                # know why the process died, because it is the thing that killed
+                # it (``timed_out`` is true only when a signal actually left this
+                # process), so it suppresses that frame entirely and says the
+                # true cause. Surfacing "claude was terminated by SIGTERM" for a
+                # server-side timeout is technically accurate and actively
+                # misleading.
+                #
+                # ``result``/wire-error already seen ⇒ the turn had FINISHED and
+                # the process was merely lingering. Nothing was truncated, so
+                # nothing is claimed.
+                if not result_text and not saw_error:
+                    # 🔴 ``type: "error"``, NOT a model-loading warning, and this
+                    # is the whole point of the branch. Measured against the
+                    # shipped client: ``model-loading`` is a BOOLEAN there —
+                    # ``client.on(MODEL_LOADING, (_data, id) => …
+                    # setModelLoading(true))`` (use-sse.ts:201) discards the
+                    # label, and docs/COWORK_STREAMING_UX_OPTIMIZATION.md:269
+                    # records the same measurement. A 30-minute turn killed with
+                    # a partial answer therefore reached the user as a silently
+                    # truncated reply with ``finish_reason: "stop"`` and no
+                    # explanation at all — the exact "destroys work silently"
+                    # failure this feature exists to prevent. ``agent-error``
+                    # surfaces as a toast and triggers the client's history
+                    # refetch, so the partial answer is still shown.
+                    limit = self.stream_timeout_seconds()
+                    yield {
+                        "type": "error",
+                        "error": stream_timeout_notice(
+                            limit, partial=bool(response_parts)
+                        ),
+                    }
+            elif proc.returncode and not saw_error:
                 if stderr_tail is not None:
                     # wait() can win the race against the last stderr write.
                     await stderr_tail.settle()
@@ -685,6 +776,20 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             # tab), and killing here would turn a late answer into a destroyed
             # one. Discarding lets it finish; it does not stop it. It is also
             # what makes a later ``proc.wait()`` able to return at all.
+            #
+            # ``disarm()`` sends nothing, and it is CONDITIONAL — read its
+            # docstring before touching it. It cancels the clock only when the
+            # child has already exited. A client disconnect does NOT reach here
+            # (the producer task outlives the connection; ``_turn_subscriber``'s
+            # finally only cancels its own pump), so the one path that closes
+            # this generator with the child still running is the janitor's
+            # max-runtime cancel — which deliberately sends no signal. Disarming
+            # there would leave that orphan with no bound at all.
+            # ``release_process`` likewise only stops tracking.
+            if watchdog is not None:
+                watchdog.disarm()
+            self.release_process(proc)
+
             if proc is not None and proc.returncode is None:
                 discard_stream(proc.stdout)
 

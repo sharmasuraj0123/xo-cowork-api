@@ -212,6 +212,7 @@ async def _run_dispatcher_turn(turn: Turn, stream_info: dict) -> None:
 
     final_native_session_id = None
     state = chat_state.COMPLETED
+    saw_error = False
     try:
         dispatcher = AgentDispatcher(agent_name)
         async for event in dispatcher.stream(
@@ -222,6 +223,18 @@ async def _run_dispatcher_turn(turn: Turn, stream_info: dict) -> None:
             agent_id=agent_id,
             model=model,
             is_new_session=is_new_session,
+            # 🔴 DELIBERATELY NOT PASSED: ``turn_handle=turn.handle``.
+            #
+            # The process-owning adapters bound their child with their own
+            # per-stream wall clock and terminate it directly. An earlier draft
+            # handed them this handle so they could also register a killer on
+            # it, gated on a single abort reason. That killer was unreachable
+            # (nothing produces that reason) and its only real effect was to put
+            # a live SIGKILL primitive on the one object ``POST /api/chat/abort``
+            # fires — an endpoint the client calls on component UNMOUNT and on
+            # SESSION SWITCH, not only from Stop. One renamed reason away from
+            # destroying live work, for no benefit. The handle stays state-only,
+            # and it stays that way because no kill path is wired to it at all.
         ):
             # `done` is tested FIRST: a done event carries no `type` key.
             if event.get("done"):
@@ -242,6 +255,13 @@ async def _run_dispatcher_turn(turn: Turn, stream_info: dict) -> None:
                 # them as well.
                 _emit(turn, "model-loading", {"label": event.get("label", "")})
             elif event.get("type") == "error":
+                # Remembered, not just forwarded. Until now an adapter error
+                # event reached the wire and the turn still finished COMPLETED
+                # with ``finish_reason: "stop"`` — so a turn the server had
+                # SIGKILLed at its time limit was recorded as a clean stop, and
+                # every consumer keying on state or finish_reason (metrics,
+                # retry, the janitor, a client replaying the ring) saw a success.
+                saw_error = True
                 _emit(turn, "agent-error", {"error_message": event.get("error", "Stream error")})
             elif event.get("type") == "tool-call":
                 # Live tool progress. The client's TOOL_START handler is
@@ -317,7 +337,14 @@ async def _run_dispatcher_turn(turn: Turn, stream_info: dict) -> None:
     resolved_session_id = our_session_id or final_native_session_id
     if resolved_session_id:
         turn.session_id = resolved_session_id
-    _emit(turn, "done", {"finish_reason": "stop", "session_id": resolved_session_id})
+    if saw_error and state == chat_state.COMPLETED:
+        state = chat_state.FAILED
+    # ``finish_reason`` already carries non-"stop" values elsewhere in this file
+    # ("timeout" at the sweep, "abort" at the abort endpoint) and the client only
+    # types the field, so widening it here changes no rendering — it just stops
+    # a failed turn from being indistinguishable from a successful one.
+    finish_reason = "error" if state == chat_state.FAILED else "stop"
+    _emit(turn, "done", {"finish_reason": finish_reason, "session_id": resolved_session_id})
     turn.finish(state)
 
 

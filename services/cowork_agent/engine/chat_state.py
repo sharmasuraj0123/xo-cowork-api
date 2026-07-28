@@ -96,15 +96,30 @@ _TERMINAL = frozenset({COMPLETED, FAILED, ABORTED})
 class TurnHandle:
     """A cooperative abort signal for one turn.
 
-    Today nothing registers a killer, so ``abort()`` is state-only: it flips a
-    flag and wakes anyone waiting on it. That is deliberate and load-bearing —
-    the client POSTs /api/chat/abort on component unmount and on session switch,
-    not only from a Stop button, and the server cannot tell those apart. Killing
-    a process here would SIGKILL live work every time a user switches sessions.
+    ``abort("client")`` — the only thing POST /api/chat/abort ever calls — is
+    STATE-ONLY: it flips a flag and wakes anyone waiting on it. That is
+    deliberate and load-bearing. The client POSTs /api/chat/abort on component
+    unmount and on session switch, not only from a Stop button, and the server
+    cannot tell those apart. Killing a process on it would SIGKILL live work
+    every time a user switches sessions.
 
-    The killer list is the seam a later change can use to make abort real for a
-    lane that genuinely owns a process, once the client can distinguish "stop"
-    from "I navigated away". Nothing in this module ever signals a process.
+    NOTHING REGISTERS A KILLER, and that is now a decision rather than an
+    accident. The CLI adapters DO own a process and DO kill it — at their own
+    per-stream wall clock, which they run and fire themselves
+    (``adapters/process_owner.py``). An intermediate design had them also
+    register a killer here, gated on an abort reason no caller produces; four
+    reviewers independently observed that this was unreachable code whose one
+    real effect was to arm a SIGKILL primitive on the exact object the abort
+    endpoint fires. It was removed. The guarantee that ``abort()`` cannot signal
+    a process now holds because there is no path, not because a string
+    comparison is right.
+
+    The killer list stays as the seam for a lane that genuinely owns a process
+    AND a client that can distinguish "stop" from "I navigated away". Until both
+    are true, the honest answer to "should this kill" is no.
+
+    If you add a new abort reason, the question to answer is not "is this an
+    abort" but "can an unmount or a session switch produce it".
     """
 
     __slots__ = ("_event", "_killers", "reason")
@@ -122,6 +137,22 @@ class TurnHandle:
         await self._event.wait()
 
     def register_killer(self, killer: Callable[[str], None]) -> None:
+        """Add a killer. It receives the abort REASON and must gate on it.
+
+        Nothing calls this today (see the class docstring). Two traps for
+        whoever first does:
+
+        * The immediate invocation below. Registering onto an already-aborted
+          handle fires the killer straight away with whatever reason latched it
+          — in practice "client", from an abort that landed during the spawn.
+          A killer that ignores its argument therefore kills on a client abort
+          even though it was never wired to that endpoint.
+        * There is no unregister. A handle lives in ``turns`` for
+          TURN_RETENTION after the turn ends, so a killer closure holding a
+          subprocess handle keeps that transport and its pipes alive for the
+          whole retention window. Add the removal in the same change as the
+          registration.
+        """
         self._killers.append(killer)
         if self._event.is_set():
             self._invoke(killer)
@@ -316,6 +347,20 @@ def sweep(emit_terminal: Callable[[Turn], None] | None = None) -> None:
             # background so it can exit on its own. No signal is sent to any
             # process here. Do not "unify" this with a stream timeout that
             # kills — they are different mechanisms with different blast radii.
+            #
+            # STILL TRUE now that a per-stream wall clock exists: no killer is
+            # registered on any handle, so this ``abort`` reaches no signal
+            # whatever reason it carries.
+            #
+            # The two mechanisms interact in exactly one place, and it is
+            # handled on the adapter side rather than assumed here. Cancelling
+            # the task below runs the adapter's ``finally`` while its child may
+            # still be alive; ``StreamWatchdog.disarm`` therefore refuses to
+            # cancel a wall clock whose process is still running, so this sweep
+            # cannot strip an orphan of its only bound. Do NOT restore an
+            # argument of the form "1800 < 3600 so the clock has already fired"
+            # — ``stream_timeout_seconds`` is operator-configurable (and can be
+            # 0, meaning no clock at all), so the ordering is not guaranteed.
             turn.handle.abort("timeout")
             if emit_terminal is not None:
                 try:

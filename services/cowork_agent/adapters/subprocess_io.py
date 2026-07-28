@@ -53,7 +53,10 @@ Deliberately retains nothing — nobody is left to show it to.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
+import signal
 from collections import deque
 from typing import Optional, Protocol, Set
 
@@ -64,15 +67,28 @@ __all__ = [
     "STDERR_TEXT_CAP",
     "REAP_TIMEOUT_SECONDS",
     "LARGE_LINE_NOTICE_BYTES",
+    "KILL_GRACE_SECONDS",
+    "KILL_CONFIRM_SECONDS",
+    "EXIT_POLL_INTERVAL",
+    "NON_SIGNALLING_OUTCOMES",
     "StderrTail",
     "cap_text",
+    "capture_pgid",
+    "close_child_stdout",
     "discard_stream",
     "drain_stderr",
     "large_line_notice",
+    "outcome_signalled",
     "overflow_notice",
     "reap",
     "redact_secrets",
+    "stdout_eof_received",
+    "stream_timeout_notice",
+    "terminate_process_group",
+    "wait_exited",
 ]
+
+logger = logging.getLogger(__name__)
 
 # StreamReader buffer for a spawned CLI. See module docstring for why this is
 # deliberately modest rather than generous.
@@ -97,6 +113,28 @@ STDERR_TEXT_CAP = 2000
 
 # How long ``reap`` waits for a child to be collected before giving up on it.
 REAP_TIMEOUT_SECONDS = 5.0
+
+# ── termination timings (see ``terminate_process_group``) ────────────────────
+#
+# Grace between SIGTERM and SIGKILL. Measured SIGTERM→exit latency on this box:
+# node (the real CLI runtime) 2.3–5.7 ms with or without a handler, 1.20 s with a
+# 1.2 s busy cleanup handler; python 2.6 ms default disposition, 57.6 ms for a
+# handler doing a 20 MB write + fsync. The GROUP's slowest member governs, not
+# the leader (the leader always died in ~7 ms), and a 1.4 s descendant cleanup
+# completed inside this grace with zero survivors. Everything that needed more
+# than 1.5 s was synthetic (hardcoded multi-second sleeps in a handler).
+#
+# This is NOT a correctness knob: correctness comes from the SIGKILL, which
+# landed in ~2 ms in every trial including one where all three group members
+# SIG_IGN'd SIGTERM. Grace only buys the CLI a chance to flush. Do not grow it —
+# it is pure added latency on a path that has already waited half an hour.
+KILL_GRACE_SECONDS = 1.5
+# Bound on the post-SIGKILL confirmation wait, purely so a caller's timeout task
+# cannot wedge. SIGKILL is not refusable; this only caps the observation.
+KILL_CONFIRM_SECONDS = 2.0
+# Poll granularity for ``wait_exited``. 10 ms: fine enough that a 1.5 s grace is
+# not measurably distorted, coarse enough to cost nothing.
+EXIT_POLL_INTERVAL = 0.01
 
 
 # ── secret scrubbing ─────────────────────────────────────────────────────────
@@ -317,6 +355,410 @@ async def reap(
     return proc.returncode
 
 
+async def wait_exited(
+    proc: "asyncio.subprocess.Process",
+    timeout: float,
+    *,
+    interval: float = EXIT_POLL_INTERVAL,
+) -> bool:
+    """Poll ``proc.returncode`` until it is set or ``timeout`` elapses.
+
+    Deliberately NOT ``proc.wait()``. Entered with ``returncode is None`` — which
+    is exactly the state of a process you have just signalled — ``wait()``
+    registers an exit waiter that is only resolved once EVERY pipe has
+    disconnected. Measured on this box, immediately after a ``killpg``:
+
+        stderr drained    → wait() returned in 0.0008–0.0011 s
+        stderr undrained  → wait() HUNG (>5 s, every trial) with the pid already
+                            gone and ``returncode`` already -9
+
+    The mechanism is flow control: at kill time the StreamReader held 131,103
+    buffered bytes with ``_paused=True``, so the transport never saw EOF and
+    ``connection_lost`` never fired. A grandchild that escaped the group and
+    holds the pipe open reproduces the same hang even WITH a drainer running.
+    Since killing is now routine, the kill path must not depend on drainage:
+    polling ``returncode`` observed rc=-9 in 0.0060 s with the pipe still full
+    and paused.
+
+    Returns True if the process has exited, False on timeout.
+    """
+    if proc.returncode is not None:
+        return True
+    deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
+    while proc.returncode is None:
+        if asyncio.get_running_loop().time() >= deadline:
+            return proc.returncode is not None
+        await asyncio.sleep(interval)
+    return True
+
+
+async def terminate_process_group(
+    proc: "asyncio.subprocess.Process | None",
+    *,
+    pgid: Optional[int] = None,
+    grace: float = KILL_GRACE_SECONDS,
+    reason: str = "unspecified",
+) -> str:
+    """SIGTERM → grace → SIGKILL the process GROUP led by ``proc``. Never raises.
+
+    THE ONLY KILL PATH IN THIS CODEBASE. ``reap`` above is, and stays,
+    non-killing; the adapters' ``finally`` blocks are, and stay, non-killing. A
+    client disconnect must never reach this function — a disconnect is routine
+    (45 s heartbeat gap, 15 s stale check, 30 s backgrounded tab) and killing on
+    one converts "late answer" into "destroyed answer".
+
+    PRECONDITION: ``proc`` was spawned with ``start_new_session=True``, which
+    makes the child a session and group leader so that ``proc.pid`` IS its pgid.
+    Without that flag the child shares the API SERVER's process group — measured
+    here, ``child pgid == server pgid``.
+
+    WHY ``os.killpg(proc.pid, …)`` AND NEVER ``os.killpg(os.getpgid(proc.pid), …)``
+    -----------------------------------------------------------------------------
+    With the flag the lookup is redundant; without it the lookup returns the
+    server's own group and the call is a suicide note. Demonstrated, not argued:
+    a sacrificial stand-in server that was its own group leader ran the
+    ``getpgid`` form against a child spawned without the flag and died with exit
+    code -9; the line after the call never executed. ``proc.pid`` is the only
+    value that is either correct or harmlessly ESRCH — it can never resolve to
+    the server's group. (``claude_code/remote_control.py:331,344`` ships the
+    ``getpgid`` form. It is safe there only because its own spawn sets the flag.
+    Do not copy it.)
+
+    WHY THE GROUP AND NOT ``proc.kill()``
+    -------------------------------------
+    ``proc.kill()`` signals the direct child only. Measured: a ``sleep 300``
+    grandchild reparents to init and survives (2 of 3 survived on a depth-3
+    tree), and it keeps the inherited stdout/stderr open so ``proc.wait()``
+    never returns. ``killpg`` on a depth-3 tree left 0 of 3 survivors, including
+    when every member SIG_IGN'd SIGTERM.
+
+    WHY "THE LEADER EXITED" IS NOT "THE GROUP IS GONE"
+    -------------------------------------------------
+    Both the entry guard and the SIGTERM→SIGKILL escalation used to key on the
+    LEADER's ``returncode``, and both were wrong for the same reason: a process
+    group outlives its leader. Reproduced here, twice:
+
+      * leader forks a ``sleep 300`` (inheriting stdout) and exits 0 →
+        ``returncode`` is 0, ``killpg(pid, 0)`` is still VALID (the group is
+        non-empty), and the old entry guard returned "already-exited" having
+        signalled nothing. The turn then hung on stdout forever.
+      * depth-3 tree where only the MIDDLE process ``SIG_IGN``s SIGTERM → the
+        leader died in 11 ms, the old code returned "terminated" and never sent
+        the SIGKILL; 2 of 3 members survived indefinitely. Real ``claude`` tool
+        subprocesses (node children with SIGTERM handlers, bash background jobs,
+        MCP servers) are exactly those members.
+
+    So liveness is asked of the GROUP (``killpg(pgid, 0)``), not of the leader,
+    everywhere below. That is safe against pid recycling in the leader-exited
+    case only when the pgid was captured while the leader was ALIVE — which is
+    what ``pgid`` is for; see :func:`capture_pgid`. Without it, a leader that
+    has exited is treated as gone, exactly as before.
+
+    Returns a short outcome string for logging/tests; ``outcome_signalled``
+    turns it into "did a signal actually leave this process". Idempotent; safe
+    on an already-dead process, safe with ``None``, safe called concurrently.
+    """
+    if proc is None:
+        return "already-exited"
+
+    # LAYER 0 — liveness / pid-recycling guard.
+    # asyncio uses PidfdChildWatcher and AUTO-REAPS: measured 0.05 s after a
+    # child exited, with wait() never called, the /proc entry was already gone
+    # and the pid free for reuse. "Hold the handle to reserve the pid" is true
+    # for subprocess.Popen and FALSE here. ``returncode`` is set within
+    # 0.49–1.65 µs of the pid being released (8 trials), so it is a tight, sound
+    # proxy for "this pid is still mine". Signalling a pid we have already seen
+    # exit risks hitting a stranger's entire group after pid wraparound.
+    #
+    # …EXCEPT when we hold a pgid captured while the leader was alive. A pgid is
+    # reserved by the kernel for as long as the group is non-empty (the pid
+    # number cannot be handed to a new process while any task still names it as
+    # its pgid), so "captured pgid + group still answers signal 0" identifies
+    # OUR group with the same confidence ``returncode`` gives for the leader.
+    if proc.returncode is not None:
+        if pgid is None or pgid != proc.pid or not _group_alive(pgid):
+            return "already-exited"
+        return await _signal_group_until_empty(
+            pgid, proc=None, grace=grace, reason=reason, orphaned=True
+        )
+
+    pid = proc.pid
+    if not pid or pid <= 1:
+        logger.error("refusing to signal implausible pid %r (reason=%s)", pid, reason)
+        return "bad-pid"
+
+    own = os.getpgid(0)
+
+    # LAYER 1 — belt: never signal our own group, whatever else is true.
+    if pid == own:
+        logger.error(
+            "refusing to signal own process group %s (reason=%s)", pid, reason
+        )
+        return "self-group"
+
+    # LAYER 2 — braces: prove ``start_new_session`` actually took effect. If the
+    # child is not its own group leader then its group is somebody else's —
+    # ours, most likely — and a killpg would take down the API server and every
+    # other user's live turn with it. ``actual != pid`` is strictly stronger
+    # than ``actual == own``: it also refuses a third party's group.
+    try:
+        actual = os.getpgid(pid)
+    except ProcessLookupError:
+        # The leader exited in the microseconds since the returncode check. Its
+        # group can still be non-empty — same orphaned-daemon case as LAYER 0.
+        if pgid is not None and pgid == pid and _group_alive(pgid):
+            return await _signal_group_until_empty(
+                pgid, proc=None, grace=grace, reason=reason, orphaned=True
+            )
+        return "already-exited"
+    except PermissionError as exc:                       # pragma: no cover
+        logger.error("cannot resolve pgid of %s: %s (reason=%s)", pid, exc, reason)
+        return "pgid-unresolvable"
+
+    if actual != pid or actual == own:
+        logger.error(
+            "child %s is not its own group leader (pgid=%s, server pgid=%s); "
+            "start_new_session did not take effect — refusing killpg and "
+            "falling back to a single-process terminate (reason=%s)",
+            pid, actual, own, reason,
+        )
+        # Degraded fallback: the direct child only, never a group signal. This
+        # leaks any descendants as orphans, which is the correct trade — leaking
+        # two children beats SIGKILLing the API server.
+        try:
+            proc.terminate()
+        except (ProcessLookupError, PermissionError):
+            return "not-group-leader"
+        if not await wait_exited(proc, grace):
+            try:
+                proc.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+            await wait_exited(proc, KILL_CONFIRM_SECONDS)
+        return "not-group-leader"
+
+    return await _signal_group_until_empty(
+        pid, proc=proc, grace=grace, reason=reason, orphaned=False
+    )
+
+
+def _group_alive(pgid: int) -> bool:
+    """Does a process group with this id still have members?
+
+    ``killpg(pgid, 0)`` is the only question the kernel answers about a group's
+    membership, and it is the RIGHT question: it stays true while any member
+    lives, whether or not that member is the leader. ``EPERM`` means the group
+    exists and is not ours to signal, which is still "alive".
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:                              # pragma: no cover
+        return True
+    return True
+
+
+async def _wait_group_gone(
+    pgid: int,
+    timeout: float,
+    *,
+    interval: float = EXIT_POLL_INTERVAL,
+) -> bool:
+    """Poll until the process group is empty or ``timeout`` elapses.
+
+    The replacement for ``wait_exited(proc, …)`` on the kill path. ``wait_exited``
+    watches ONE process — the leader — and the whole point of a group signal is
+    the members that are not the leader. A zombie leader that asyncio has not
+    reaped yet also keeps the group non-empty for a few milliseconds; that only
+    costs a poll or two, and signals to a zombie are discarded by the kernel, so
+    the worst case is a redundant SIGKILL.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(timeout, 0.0)
+    while True:
+        if not _group_alive(pgid):
+            return True
+        if loop.time() >= deadline:
+            return not _group_alive(pgid)
+        await asyncio.sleep(interval)
+
+
+async def _signal_group_until_empty(
+    pgid: int,
+    *,
+    proc: "asyncio.subprocess.Process | None",
+    grace: float,
+    reason: str,
+    orphaned: bool,
+) -> str:
+    """SIGTERM → grace → SIGKILL, escalating on GROUP emptiness. Never raises.
+
+    ``orphaned`` only changes the wording of the logs: it means the leader had
+    already exited and the group survived it, which is the case worth spotting
+    in production (a tool left a daemon behind).
+    """
+    what = "orphaned process group" if orphaned else "process group"
+
+    # ProcessLookupError here is normal, not an error: the last member may have
+    # exited microseconds before the signal landed.
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return "already-exited"
+    except PermissionError as exc:                       # pragma: no cover
+        # Logged and dropped, never widened into a different kill. Degrading to
+        # ``os.kill(pid, …)`` here would mask a wrong-group resolution.
+        logger.error("not permitted to signal group %s: %s (reason=%s)", pgid, exc, reason)
+        return "not-permitted"
+
+    logger.info("sent SIGTERM to %s %s (reason=%s)", what, pgid, reason)
+
+    if await _wait_group_gone(pgid, grace):
+        if proc is not None:
+            # The group is empty; the leader's returncode may still be a poll
+            # behind. Bounded, and never ``proc.wait()`` — see ``wait_exited``.
+            await wait_exited(proc, EXIT_POLL_INTERVAL * 10)
+        return "terminated"
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "terminated"
+    except PermissionError as exc:                       # pragma: no cover
+        logger.error("not permitted to SIGKILL group %s: %s (reason=%s)", pgid, exc, reason)
+        return "not-permitted"
+
+    logger.warning(
+        "%s %s still had members %.1fs after SIGTERM; sent SIGKILL (reason=%s)",
+        what.capitalize(), pgid, grace, reason,
+    )
+    gone = await _wait_group_gone(pgid, KILL_CONFIRM_SECONDS)
+    if proc is not None:
+        await wait_exited(proc, EXIT_POLL_INTERVAL * 10)
+    if not gone:
+        # SIGKILL is not refusable, so this is uninterruptible sleep or a pid
+        # namespace we cannot reach. Say so instead of reporting a clean kill —
+        # the one diagnostic an operator has for a leaked tree.
+        logger.error(
+            "%s %s still has members after SIGKILL (reason=%s)", what.capitalize(), pgid, reason,
+        )
+        return "killed-survivors"
+    return "killed"
+
+
+def capture_pgid(proc: "asyncio.subprocess.Process | None") -> Optional[int]:
+    """Record a child's process group WHILE THE CHILD IS STILL ALIVE.
+
+    Call this immediately after the spawn. It exists for one reason: once the
+    leader exits, ``os.getpgid(pid)`` can no longer tell you whether
+    ``start_new_session=True`` took effect, and a pid whose process never led a
+    group can be recycled into a stranger's pgid. Capturing while the leader is
+    alive turns "the leader exited but the group has not" — the orphaned-daemon
+    case that used to hang a turn forever — into a case that is safe to signal.
+
+    Returns the pgid, or ``None`` when the group must not be trusted (the flag
+    did not take effect, or the group is ours). ``None`` is not an error; it
+    degrades ``terminate_process_group`` to exactly its old behaviour.
+    """
+    if proc is None or proc.returncode is not None:
+        return None
+    pid = proc.pid
+    if not pid or pid <= 1:
+        return None
+    try:
+        actual = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return None
+    if actual != pid or actual == os.getpgid(0):
+        logger.error(
+            "child %s is not its own group leader (pgid=%s, server pgid=%s); "
+            "start_new_session did not take effect",
+            pid, actual, os.getpgid(0),
+        )
+        return None
+    return actual
+
+
+#: Outcomes of ``terminate_process_group`` in which NO signal left this process.
+#: The distinction is user-visible: "the clock ran out" is not "we stopped your
+#: turn", and a turn that finished on its own microseconds before the deadline
+#: must not be reported as truncated.
+NON_SIGNALLING_OUTCOMES = frozenset({
+    "already-exited", "bad-pid", "self-group", "pgid-unresolvable", "not-permitted",
+})
+
+
+def outcome_signalled(outcome: Optional[str]) -> bool:
+    """Did ``terminate_process_group`` actually deliver a signal?"""
+    return outcome is not None and outcome not in NON_SIGNALLING_OUTCOMES
+
+
+def stdout_eof_received(proc: "asyncio.subprocess.Process | None") -> bool:
+    """Has the child's stdout reader seen EOF (all write ends closed)?
+
+    True means the reader will finish on its own once its buffer is delivered,
+    so nobody needs to force anything. False after a kill means some survivor
+    still holds the inherited write end.
+    """
+    reader = getattr(proc, "stdout", None)
+    if reader is None:
+        return True
+    return bool(getattr(reader, "_eof", False))
+
+
+def close_child_stdout(proc: "asyncio.subprocess.Process | None") -> bool:
+    """Close OUR read end of the child's stdout, synthesising EOF for the reader.
+
+    THE ONLY THING THAT CAN END A READ LOOP WHOSE WRITER WILL NEVER CLOSE.
+    Reproduced against the real adapter: after the wall clock killed the group,
+    a descendant that had escaped it (``start_new_session`` in a Bash tool — a
+    dev server, an MCP server) still held the inherited stdout write end, so
+    ``async for … in iter_lines(proc.stdout)`` never saw EOF. The turn produced
+    no timeout notice, no terminal ``done``, and stayed RUNNING until the 3600 s
+    janitor sweep — with the leader already dead, so no further output could
+    ever arrive. Measured: still blocked 12 s after a 1 s wall clock.
+
+    Called ONLY after a kill, and only once the reader has been given a chance
+    to see a real EOF (see ``StreamWatchdog``), because closing the pipe
+    discards whatever the kernel still holds in it.
+
+    Never raises. Returns True if a close/EOF was actually applied.
+    """
+    if proc is None:
+        return False
+    candidates = []
+    subprocess_transport = getattr(proc, "_transport", None)
+    getter = getattr(subprocess_transport, "get_pipe_transport", None)
+    if getter is not None:
+        try:
+            candidates.append(getter(1))
+        except Exception:                                # pragma: no cover
+            pass
+    reader = getattr(proc, "stdout", None)
+    candidates.append(getattr(reader, "_transport", None))
+
+    for transport in candidates:
+        if transport is None:
+            continue
+        try:
+            transport.close()
+        except Exception:                                # pragma: no cover
+            continue
+        return True
+
+    # Last resort when the private transport layout ever changes under us: feed
+    # the EOF straight into the reader. Wakes the parked ``readline`` the same
+    # way ``pipe_connection_lost`` would.
+    if reader is not None and not getattr(reader, "_eof", False):
+        try:
+            reader.feed_eof()
+            return True
+        except Exception:                                # pragma: no cover
+            pass
+    return False
+
+
 def discard_stream(reader: Optional[_Readable], **kwargs) -> StderrTail:
     """Consume and throw away the rest of ``reader``, in the background.
 
@@ -372,3 +814,46 @@ def large_line_notice(size: int) -> str:
     was streamed in full. Compare ``overflow_notice``, which reports real loss.
     """
     return f"Handling an unusually large output line ({size:,} bytes) — streamed intact."
+
+
+def _humanize_seconds(seconds: float) -> str:
+    """Render a limit the way an operator would say it. 1800 -> "30 minutes".
+
+    Sub-minute values are only ever produced by tests and by a deliberately
+    tightened config, but they must not round to "0 seconds" — a message that
+    reports the wrong limit is worse than one that reports an awkward one.
+    """
+    if seconds >= 3600 and seconds % 3600 == 0:
+        hours = int(seconds // 3600)
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+    if seconds >= 60:
+        minutes = seconds / 60 if seconds % 60 else seconds // 60
+        # Rounded BEFORE the plural is chosen, or 61 s renders "1 minutes":
+        # round(61/60, 1) is 1.0, and the pluralisation has to agree with the
+        # number the user is actually shown, not with the one before rounding.
+        minutes = round(minutes, 1)
+        return f"{minutes:g} minute" + ("s" if minutes != 1 else "")
+    value = round(seconds, 2)
+    return f"{value:g} second" + ("s" if value != 1 else "")
+
+
+def stream_timeout_notice(seconds: float, *, partial: bool = False) -> str:
+    """Human-readable text for a turn ended by the wall-clock timeout.
+
+    THE POINT OF THIS FUNCTION is that a timeout must not reach the user as
+    "was terminated by SIGTERM". That phrasing is correct and useless: it is how
+    an operator kill, an OOM kill and this timeout all look from inside the
+    adapter, which is exactly why the adapter cannot describe it and the caller
+    that scheduled the kill must. Whoever knows WHY the process died owns the
+    message.
+    """
+    limit = _humanize_seconds(seconds)
+    if partial:
+        return (
+            f"The answer is incomplete — this turn was stopped after reaching "
+            f"its time limit of {limit}."
+        )
+    return (
+        f"This turn was stopped after reaching its time limit of {limit} "
+        f"without producing a response."
+    )
