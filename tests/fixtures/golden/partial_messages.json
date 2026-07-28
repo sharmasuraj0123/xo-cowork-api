@@ -1,0 +1,11 @@
+{
+  "n_input_lines": 33,
+  "n_sse_frames": 1,
+  "text": "`a.txt` contains three lines of text: `alpha`, `beta`, and `gamma`. It's a plain list of the first three Greek letter names, with no other content or structure.",
+  "frames": [
+    {
+      "type": "token",
+      "token": "`a.txt` contains three lines of text: `alpha`, `beta`, and `gamma`. It's a plain list of the first three Greek letter names, with no other content or structure."
+    }
+  ]
+}

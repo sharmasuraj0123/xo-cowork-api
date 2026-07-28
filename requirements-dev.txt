@@ -1,0 +1,23 @@
+# XO Cowork API — development / test dependencies
+#
+# Install:  venv/bin/pip install -r requirements-dev.txt
+# Run:      venv/bin/pytest
+#
+# The suite does `import server`, so it needs the full runtime dependency set
+# in addition to the test tooling. Including requirements.txt keeps that in one
+# place instead of a duplicated list that drifts.
+-r requirements.txt
+
+# Test runner. Floors match the versions installed in venv/ as of 2026-07-28;
+# raise them deliberately, don't pin to an exact version (the suite is not
+# sensitive to patch releases).
+pytest>=9.1.1
+
+# pytest.ini sets `asyncio_mode = auto`. Without this plugin the async tests
+# and the `client` fixture in tests/conftest.py are not collected at all —
+# they silently skip rather than fail, so this is a hard requirement.
+pytest-asyncio>=1.4.0
+
+# NOTE: httpx (the ASGI transport behind the `client` fixture) and anyio are
+# already runtime dependencies in requirements.txt and are pulled in by the
+# include above. They are deliberately not re-pinned here.

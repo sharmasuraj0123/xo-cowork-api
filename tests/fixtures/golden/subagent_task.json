@@ -1,0 +1,11 @@
+{
+  "n_input_lines": 20,
+  "n_sse_frames": 1,
+  "text": "The subagent found both files: `a.txt` contains three lines (alpha, beta, gamma) and `b.txt` contains two (one, two), each with a trailing newline.",
+  "frames": [
+    {
+      "type": "token",
+      "token": "The subagent found both files: `a.txt` contains three lines (alpha, beta, gamma) and `b.txt` contains two (one, two), each with a trailing newline."
+    }
+  ]
+}

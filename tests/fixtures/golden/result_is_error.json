@@ -1,0 +1,15 @@
+{
+  "n_input_lines": 10,
+  "n_sse_frames": 2,
+  "text": "I'll read the three files.",
+  "frames": [
+    {
+      "type": "token",
+      "token": "I'll read the three files."
+    },
+    {
+      "type": "error",
+      "error": "Claude Code error"
+    }
+  ]
+}

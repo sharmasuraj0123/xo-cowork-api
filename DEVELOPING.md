@@ -181,11 +181,13 @@ AGENT_NAME=hermes python server.py                 # boot a specific backend
 **Validation playbook — run before every commit:**
 
 ```bash
-# 1. Import gate + route parity under each agent (expect 146 / 149 / 173 / 148)
-for a in claude_code openclaw hermes antigravity; do
-  AGENT_NAME=$a venv/bin/python -c "import server; \
-    print('$a', len(server.app.openapi()['paths']))"
+# 1. Import gate — each agent must boot the app
+for a in claude_code openclaw hermes antigravity codex; do
+  AGENT_NAME=$a venv/bin/python -c "import server" && echo "$a ok"
 done
+
+# 1b. Route parity — snapshot-based, no counts to keep in sync
+venv/bin/pytest tests/test_route_parity.py
 
 # 2. Modularity invariant (§6) — no agent name in core code. Upheld in review;
 #    a local AST guard can verify it if you have it (kept out of the repo, §6).
@@ -195,8 +197,12 @@ done
 #    (501 only where a capability is intentionally absent).
 ```
 
-Per-agent route counts differ by design (the route de-leak): non-hermes agents
-don't carry the `/api/channels/hermes/*` and `/api/config/hermes*` routes.
+`tests/test_route_parity.py` asserts three things and hardcodes no numbers:
+every discovered agent imports, each agent's route set matches its reviewable
+snapshot in `tests/fixtures/routes/`, and no route is served by some-but-not-all
+agents. Deliberate per-agent differences live in the snapshots, where a diff
+makes them reviewable — e.g. the route de-leak: non-hermes agents don't carry
+the `/api/channels/hermes/*` and `/api/config/hermes*` routes.
 
 ---
 

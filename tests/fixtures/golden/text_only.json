@@ -1,0 +1,11 @@
+{
+  "n_input_lines": 4,
+  "n_sse_frames": 1,
+  "text": "The quick brown fox jumps over the lazy dog.",
+  "frames": [
+    {
+      "type": "token",
+      "token": "The quick brown fox jumps over the lazy dog."
+    }
+  ]
+}
