@@ -31,8 +31,8 @@ from fastapi import HTTPException, Request
 
 log = logging.getLogger(__name__)
 
-# Matches the sentinel in composio_service / routers.cowork_agent.composio so a
-# flag-off install keeps sharing one set of connected accounts.
+# Matches the sentinel in service.py / router.py so a flag-off install keeps
+# sharing one set of connected accounts.
 _DEFAULT_USER_ID = "default_user"
 
 
@@ -121,7 +121,7 @@ async def resolve_user_from_bearer(request: Request) -> Optional[str]:
         return None
     # Local import: session_identity.mint() imports _validate_token from here,
     # so keep this function-scoped to avoid a module load cycle.
-    from services.session_identity import resolve as resolve_session
+    from services.composio.session_identity import resolve as resolve_session
     uid = resolve_session(token)
     if uid:
         return uid

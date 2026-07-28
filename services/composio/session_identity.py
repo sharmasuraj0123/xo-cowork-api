@@ -81,7 +81,7 @@ async def mint(xo_access_token: str, ttl_seconds: Optional[float] = None) -> Opt
         return None
     # Local import: composio_identity also imports this module's resolve() at
     # call time, so keep the dependency function-scoped to avoid a load cycle.
-    from services.composio_identity import _validate_token
+    from services.composio.identity import _validate_token
 
     user_id = await _validate_token(xo_access_token)
     if not user_id:

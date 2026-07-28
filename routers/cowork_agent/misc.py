@@ -11,10 +11,13 @@ endpoints (e.g. openclaw gateway / codex status) live in that agent's adapter
 here names a backend.
 """
 
-from fastapi import APIRouter
+import logging
+
+from fastapi import APIRouter, Request
 
 from services.cowork_agent.adapters.loader import try_load_capability
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -22,8 +25,45 @@ router = APIRouter()
 
 
 @router.get("/api/tools")
-def list_tools():
-    return []
+def list_tools(request: Request):
+    """Aggregate tools across the user's connected Composio toolkits.
+
+    Returns [] when Composio is not configured or the user has no active
+    connections, preserving the previous stub's contract.
+    """
+    try:
+        from services.composio import service as composio_service
+        from services.composio.router import _resolve_user_id
+    except Exception as exc:
+        log.debug("tools: composio not importable: %s", exc)
+        return []
+
+    try:
+        user_id = _resolve_user_id(request)
+        active_toolkits = {
+            (row.get("toolkit") or "").upper()
+            for row in composio_service.list_connections(user_id)
+            if row.get("status") == "ACTIVE"
+        }
+    except Exception as exc:
+        log.debug("tools: list_connections failed: %s", exc)
+        return []
+
+    out: list[dict] = []
+    for toolkit_id, meta in composio_service.TOOLKITS.items():
+        if meta.slug not in active_toolkits:
+            continue
+        try:
+            for tool in composio_service.list_tools(user_id, toolkit_id):
+                out.append({
+                    "toolkit": meta.slug,
+                    "slug": tool.get("slug"),
+                    "name": tool.get("name"),
+                    "description": tool.get("description"),
+                })
+        except Exception as exc:
+            log.debug("tools: list_tools(%s) failed: %s", meta.slug, exc)
+    return out
 
 
 @router.get("/api/skills")
