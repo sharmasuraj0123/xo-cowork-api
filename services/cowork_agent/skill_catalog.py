@@ -25,6 +25,10 @@ Catalog entry shape (one of ``command``/``commands`` is required):
 A missing or malformed catalog degrades to an empty catalog with a printed
 warning; invalid entries are skipped, valid ones kept — matches the non-fatal
 bootstrap pattern of ``skill_installer.py``.
+
+``install_startup_skills()`` reuses the same catalog to install an agent's
+boot-time skills, declared per agent in
+``config/agents/<name>/settings.json`` → ``startup_skills``.
 """
 
 import asyncio
@@ -33,6 +37,7 @@ import json
 from pathlib import Path
 
 from services.cowork_agent.registry import agent_registry
+from services.cowork_agent.registry.settings import load_agent_config
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_PATH = _REPO_ROOT / "config" / "skills" / "catalog.json"
@@ -134,6 +139,64 @@ async def install(name: str) -> dict:
             "steps_total": steps_total,
             "steps_run": len(steps),
         }
+
+
+async def install_startup_skills() -> None:
+    """Install the active agent's declared boot-time skills.
+
+    The list is declarative and per-agent: ``startup_skills`` in
+    ``config/agents/<AGENT_NAME>/settings.json``, holding catalog names (not
+    commands — the command text stays in ``config/skills/catalog.json``, the
+    single source of truth shared with ``POST /api/skills/install``). An agent
+    that declares nothing installs nothing, so core never names a backend.
+
+    Called from ``server.py``'s lifespan as a background task: installs hit the
+    network and must not delay serving traffic. Every failure path is non-fatal
+    and logged — a skill that won't install must not take the API down. Runs on
+    every boot; entries are expected to be idempotent (re-install/upgrade).
+    """
+    try:
+        agent_name = agent_registry.get_active_agent().name
+        config = load_agent_config(agent_name)
+    except Exception as exc:
+        print(f"⚠️ startup skills: could not resolve active agent config (non-fatal): {exc}")
+        return
+
+    declared = config.get("startup_skills")
+    if declared is None:
+        return
+    if not isinstance(declared, list):
+        print(
+            f"⚠️ startup skills: {agent_name}/settings.json 'startup_skills' must be a "
+            f"list of catalog names — got {type(declared).__name__}, skipping"
+        )
+        return
+
+    names = [n.strip() for n in declared if isinstance(n, str) and n.strip()]
+    if not names:
+        return
+
+    print(f"🔧 Startup skills ({agent_name}): {', '.join(names)}")
+    for name in names:
+        try:
+            result = await install(name)
+        except UnknownSkillError:
+            print(f"⚠️ startup skill {name!r} is not in {CATALOG_PATH} — skipping")
+            continue
+        except InstallInProgressError:
+            print(f"⚠️ startup skill {name!r} is already installing — skipping")
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ startup skill {name!r} failed (non-fatal): {exc}")
+            continue
+
+        if result["ok"]:
+            print(f"✅ startup skill {name!r} installed")
+        else:
+            # install() already logged the failing step's exit code and output.
+            print(f"⚠️ startup skill {name!r} install failed (non-fatal)")
 
 
 def _success_summary(name: str, message: str | None) -> str:
