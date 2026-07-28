@@ -15,11 +15,13 @@ from .agents import router as agents_router
 from .channels import router as channels_router
 from .chat import router as chat_router
 from .config import router as config_router
+from services.composio.router import router as composio_router
 from .files import router as files_router
 from .fts import router as fts_router
 from .connectors.gdrive import router as gdrive_router
 from .connectors.github import router as github_router
 from .connectors.manus import router as manus_router
+from services.composio.mcp_proxy import router as mcp_proxy_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
 from .connectors.onedrive import router as onedrive_router
@@ -65,6 +67,8 @@ all_routers: list[APIRouter] = [
     onedrive_router,
     github_router,
     vercel_router,
+    composio_router,
+    mcp_proxy_router,
     manus_router,
     *bff_routers,
     xo_projects_sync_router,

@@ -45,7 +45,7 @@ async def _resolve_user_id(request: Request, body: dict) -> str:
     off, or no valid token is present, we keep the legacy order: explicit body
     field, request.state.user_id, auth_state["user_id"], then "default_user".
     """
-    from services.composio_identity import multi_tenant_enabled, resolve_user_from_bearer
+    from services.composio.identity import multi_tenant_enabled, resolve_user_from_bearer
     if multi_tenant_enabled():
         bearer_user = await resolve_user_from_bearer(request)
         if bearer_user:
@@ -151,6 +151,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
     agent_id = stream_info.get("agent_id")
     model = stream_info.get("model")
     is_new_session = stream_info.get("is_new_session", False)
+    user_id = stream_info.get("user_id")
 
     if is_new_session and our_session_id:
         event_id = 1
@@ -173,6 +174,7 @@ async def _dispatcher_sse(stream_info: dict, _session_id_out: list | None = None
                 agent_id=agent_id,
                 model=model,
                 is_new_session=is_new_session,
+                user_id=user_id,
             ):
                 await queue.put(event)
         except Exception as exc:

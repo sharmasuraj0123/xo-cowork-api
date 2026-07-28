@@ -177,7 +177,7 @@ async def consume_auth_flow(auth_session_id: str, poll_token: str) -> Dict[str, 
         session_id = None
         user_id = result.get("user_id")
         if user_id:
-            from services import session_identity  # local import: avoid load cycle
+            from services.composio import session_identity  # local import: avoid load cycle
             session_id = session_identity.register(
                 user_id, access_token, ttl_seconds=result.get("expires_in"),
             )
@@ -270,9 +270,9 @@ async def xo_auth_session(request: Request):
     against XO ``/get-user-id``, store ``{user_id, token}`` server-side, and
     return ``{session_id}``. The browser then sends that opaque id as the bearer
     on ``/api/connectors/composio/*`` and ``/api/chat/prompt`` — the raw XO token
-    never reaches the client. See services/session_identity.py.
+    never reaches the client. See services/composio/session_identity.py.
     """
-    from services import session_identity  # local import: avoid load cycle
+    from services.composio import session_identity  # local import: avoid load cycle
 
     auth = request.headers.get("authorization") or ""
     parts = auth.split(None, 1)
