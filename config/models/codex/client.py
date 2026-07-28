@@ -6,6 +6,14 @@ import asyncio
 import json
 from typing import Optional, Dict, Any, AsyncGenerator
 
+from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
+from services.cowork_agent.adapters.subprocess_io import (
+    STREAM_LIMIT,
+    drain_stderr,
+    overflow_notice,
+    reap,
+)
+
 
 class CodexCodeClient:
     """Interface for Codex CLI in non-interactive mode."""
@@ -175,25 +183,58 @@ class CodexCodeClient:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                # Hygiene only (the server's stdin is already /dev/null), and it
+                # also keeps `codex exec` from blocking on an inherited stdin.
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Transport buffer bound. Oversize survivability comes from
+                # ``iter_lines``, which has no line-length limit, replacing a
+                # ``readline()`` that raised ValueError at 64 KiB and took the
+                # rest of the turn with it.
+                limit=STREAM_LIMIT,
             )
 
+            # Drain stderr immediately. This binary is the worst case for an
+            # unread pipe — its own Plane B adapter chooses stderr=DEVNULL
+            # because "codex spams non-JSON TRACE/ERROR; an unread PIPE would
+            # deadlock once the stderr buffer fills". Here the pipe is wanted
+            # (the text is reported on a non-zero exit), so it must be drained:
+            # reproduced against this client, a 6 MiB stderr blocked the child
+            # in write(2) and ``process.wait()`` below never returned.
+            stderr_tail = drain_stderr(process.stderr)
+
+            overflows: list[LineOverflow] = []
+            timed_out = False
+
+            # The per-line timeout is load-bearing here and is preserved exactly:
+            # it used to wrap ``readline()``, it now wraps "the next complete
+            # line", which may span several chunk reads.
+            lines = iter_lines(process.stdout, on_overflow=overflows.append)
             while True:
                 try:
                     line = await asyncio.wait_for(
-                        process.stdout.readline(),
+                        lines.__anext__(),
                         timeout=self.timeout_seconds,
                     )
+                except StopAsyncIteration:
+                    break
                 except asyncio.TimeoutError:
                     print("❌ Stream timeout")
                     yield {"type": "error", "error": "Stream timeout"}
+                    timed_out = True
                     break
 
-                if not line:
-                    break
+                # Logged, not yielded: server.py treats any Plane A ``error``
+                # event as turn failure (stream_success = False, so neither the
+                # session nor the chat is stored). A notice whose own text says
+                # the turn continued must not discard the turn. See the same
+                # comment in config/models/claude_code/client.py.
+                while overflows:
+                    o = overflows.pop(0)
+                    print(f"⚠️  {overflow_notice(o.dropped_bytes, o.max_line, o.at_eof)}")
 
-                line_str = line.decode().strip()
+                line_str = line.decode(errors="replace").strip()
                 if not line_str:
                     continue
 
@@ -222,11 +263,20 @@ class CodexCodeClient:
                 elif event_type == "turn.failed":
                     yield {"type": "error", "error": "Codex turn failed"}
 
-            await process.wait()
+            # An overflow can fire on the very last line before EOF, i.e. after
+            # the final iteration — drain what the callback collected.
+            while overflows:
+                o = overflows.pop(0)
+                print(f"⚠️  {overflow_notice(o.dropped_bytes, o.max_line, o.at_eof)}")
+            await lines.aclose()
 
-            if process.returncode != 0:
-                stderr = await process.stderr.read()
-                error_msg = stderr.decode().strip()
+            # Bounded and non-killing; see subprocess_io.reap. ``abandoned``
+            # says we stopped reading first, so there is nothing to wait for.
+            returncode = await reap(process, abandoned=timed_out)
+
+            if returncode not in (0, None):
+                await stderr_tail.settle()
+                error_msg = stderr_tail.text()
                 if error_msg:
                     print(f"❌ Stream stderr: {error_msg}")
                     yield {"type": "error", "error": error_msg}

@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import signal
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
+from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
+from services.cowork_agent.adapters.subprocess_io import (
+    LARGE_LINE_NOTICE_BYTES,
+    STDERR_TEXT_CAP,
+    STREAM_LIMIT,
+    StderrTail,
+    cap_text,
+    discard_stream,
+    drain_stderr,
+    large_line_notice,
+    overflow_notice,
+)
 from services.cowork_agent.helpers import iso_now
 from services.cowork_agent.project_layout import (
     project_dir as _xo_project_dir,
@@ -16,6 +30,9 @@ from services.cowork_agent.project_layout import (
     xo_dir as _xo_dir,
     xo_projects_root,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Module-level native session ID cache (session_key → native_session_id) ───
@@ -58,6 +75,81 @@ def _load_agent_index(agent_id: str) -> tuple[dict, Path]:
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
+
+
+def _warning_event(label: str) -> dict[str, Any]:
+    """One non-fatal, user-visible notice about the stdout stream.
+
+    NOT a ``type: "error"``: the turn is still healthy — at most one line is
+    affected and every neighbouring line is parsed — and an ``agent-error``
+    frame would tell the user their answer failed when it did not.
+    ``model-loading`` is the only non-fatal informational channel the SSE router
+    already forwards (chat.py:198), so the notice rides that; ``phase`` marks it
+    as a warning for anything reading adapter events directly.
+    """
+    return {"type": "model-loading", "phase": "warning", "label": label}
+
+
+def _overflow_event(overflow: LineOverflow) -> dict[str, Any]:
+    """Notice for a line DROPPED for exceeding the reader's 8 MiB ceiling."""
+    return _warning_event(
+        overflow_notice(overflow.dropped_bytes, overflow.max_line, overflow.at_eof)
+    )
+
+
+def _how_it_ended(returncode: int) -> str:
+    """Describe a wait() status the way a human reads it.
+
+    ``returncode`` is NEGATIVE when the child was terminated by a signal, and
+    formatting that verbatim produced "claude exited with status -15" — which is
+    not an exit status at all, and is what an operator kill, an OOM kill and
+    (once PR-4 lands) a user pressing Stop all look like from here. Naming the
+    signal keeps the distinction visible instead of dressing a termination up as
+    a CLI error.
+
+    NOTE FOR PR-4: this is the seam. When the stop is user-requested the caller
+    knows that and must suppress the frame entirely; the adapter cannot tell an
+    intentional stop from an OOM kill, so it reports both.
+    """
+    if returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except (ValueError, KeyError):
+            name = f"signal {-returncode}"
+        return f"was terminated by {name}"
+    return f"exited with status {returncode}"
+
+
+def _exit_error_message(returncode: int, stderr_text: str) -> str:
+    """Message for a CLI that ended non-zero having produced no answer."""
+    detail = stderr_text.strip()
+    if detail:
+        # ``cap_text``, not a head slice: ``StderrTail.text()`` has already
+        # tail-truncated to preserve the fatal LAST line, and ``detail[:cap]``
+        # then chopped characters off precisely that line. cap_text is
+        # tail-preserving and idempotent, so applying it twice is a no-op.
+        return f"claude {_how_it_ended(returncode)}: {cap_text(detail, STDERR_TEXT_CAP)}"
+    return (
+        f"claude {_how_it_ended(returncode)} without producing a response "
+        f"(no error output)"
+    )
+
+
+def _partial_exit_message(returncode: int, stderr_text: str) -> str:
+    """Notice for a CLI that streamed *some* answer and then ended non-zero.
+
+    This used to be silent: the branch below was guarded on "no output at all",
+    so an OOM or a crash mid-answer discarded the drained stderr and rendered as
+    a normally-terminated, silently truncated reply. It is deliberately NOT an
+    error frame — the tokens already delivered are real and the turn did not
+    fail wholesale — but the user has to be told the answer is cut short.
+    """
+    detail = stderr_text.strip()
+    tail = f": {cap_text(detail, STDERR_TEXT_CAP)}" if detail else ""
+    return (
+        f"The answer may be incomplete — claude {_how_it_ended(returncode)} "
+        f"before finishing{tail}"
+    )
 
 
 def _extract_native_session_id(event: dict) -> str | None:
@@ -429,6 +521,23 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         if not is_new and sk:
             native_resume_id = get_native_session_id(sk)
 
+        # Hoisted ABOVE the try on purpose. The try opens before the spawn, so a
+        # missing/unexecutable CLI raises out of ``create_subprocess_exec`` — and
+        # the ``finally`` below reads ``native_session_id``/``usage``, which would
+        # then be unbound and turn the real error into an UnboundLocalError.
+        proc: asyncio.subprocess.Process | None = None
+        stderr_tail: StderrTail | None = None
+        native_session_id: str | None = None
+        response_parts: list[str] = []
+        result_text: str = ""
+        usage: dict = {}
+        model_id = ""
+        # ``iter_lines`` reports an overflow through a callback, which may fire on
+        # the very last line before EOF — hence the drain both inside and after
+        # the loop (the module docstring's documented caller pattern).
+        overflows: list[LineOverflow] = []
+        saw_error = False
+
         try:
             cmd = self._build_cmd(
                 question, native_resume_id, stream=True, agent_type=agent_type, cwd=effective_cwd,
@@ -437,19 +546,32 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                # Hygiene, not a speedup: the server's own stdin is already
+                # /dev/null, so this changes no timing in production. It removes
+                # the possibility of a child inheriting and blocking on a stdin
+                # it should never read.
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Buffer bound only — oversize survivability comes from
+                # ``iter_lines``, which has no line-length limit at all. See
+                # subprocess_io.STREAM_LIMIT for why this is 1 MiB and not more.
+                limit=STREAM_LIMIT,
                 env=self._subprocess_env(),
                 cwd=effective_cwd,
             )
 
-            native_session_id: str | None = None
-            response_parts: list[str] = []
-            result_text: str = ""
-            usage: dict = {}
-            model_id = ""
+            # Start draining stderr IMMEDIATELY: piped-and-unread stalls the
+            # child at ~64 KiB, and makes ``proc.wait()`` hang forever once the
+            # process is signalled. Deliberately NOT cancelled in the finally —
+            # an orphaned turn (client disconnected, claude still working) must
+            # keep being drained or it wedges. It ends itself at stderr EOF.
+            stderr_tail = drain_stderr(proc.stderr)
 
-            async for raw_line in proc.stdout:
+            async for raw_line in iter_lines(proc.stdout, on_overflow=overflows.append):
+                while overflows:
+                    yield _overflow_event(overflows.pop(0))
+
                 event = parse_stream_line(raw_line)
                 if event is None:
                     continue
@@ -479,8 +601,32 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
                 if event.get("type") == "token":
                     response_parts.append(event.get("token", ""))
+                elif event.get("type") == "error":
+                    # The wire already reported the failure (result/subtype=error).
+                    # Remember it so the return-code check below does not append a
+                    # second, redundant error frame for the same turn.
+                    saw_error = True
+
+                if len(raw_line) > LARGE_LINE_NOTICE_BYTES:
+                    # Kept, not dropped: this line would have raised ValueError
+                    # out of the old `async for ... in proc.stdout` and destroyed
+                    # the turn.
+                    #
+                    # Emitted HERE, next to the forwarded event, rather than
+                    # before parsing: the ``continue``d records above are
+                    # internal bookkeeping the client never sees, and claude
+                    # writes a long answer TWICE (the `assistant` record and the
+                    # `result` record), so notifying per raw line produced two
+                    # user-visible notices for one ordinary 90 KB reply — one of
+                    # them for a line that is never forwarded at all. A notice
+                    # about output the user is not receiving is pure noise.
+                    yield _warning_event(large_line_notice(len(raw_line)))
 
                 yield event
+
+            # EOF: an overflow on the final line fires after the last iteration.
+            while overflows:
+                yield _overflow_event(overflows.pop(0))
 
             await proc.wait()
 
@@ -488,7 +634,60 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             if not response_parts and result_text:
                 response_parts.append(result_text)
                 yield {"type": "token", "token": result_text}
+
+            # The CLI ended badly. Until now this produced zero events and then a
+            # clean ``done`` — a blank bubble, and on a new session the user's
+            # own message vanished with it.
+            #
+            # Two outcomes, because "no answer" and "truncated answer" are not
+            # the same failure. The old code checked ``not response_parts`` and
+            # so did nothing at all in the second case: it drained stderr, threw
+            # it away, and rendered an OOM mid-answer as a normally-finished
+            # reply. ``saw_error`` still suppresses both, because the wire has
+            # already reported that failure in full.
+            if proc.returncode and not saw_error:
+                if stderr_tail is not None:
+                    # wait() can win the race against the last stderr write.
+                    await stderr_tail.settle()
+                    detail = stderr_tail.text()
+                else:
+                    detail = ""
+                if response_parts:
+                    # Answer exists but is cut short: a notice, not a red frame.
+                    yield _warning_event(_partial_exit_message(proc.returncode, detail))
+                else:
+                    yield {
+                        "type": "error",
+                        "error": _exit_error_message(proc.returncode, detail),
+                    }
+        except Exception as exc:
+            # Terminal-event contract: this generator must always end with a
+            # ``done``. It previously could not — ``yield {"done": True}`` sits
+            # after the try/finally, so any exception escaping here skipped it
+            # and the client got no terminal event at all. Unexpected failures
+            # are converted into an error event and the stream is closed
+            # cleanly. NOTE: ``Exception`` only — CancelledError/GeneratorExit
+            # still propagate, so ordinary teardown stays ordinary teardown.
+            logger.exception("claude_code stream failed")
+            yield {"type": "error", "error": f"{exc.__class__.__name__}: {exc}"}
         finally:
+            # We have stopped reading stdout. If the child is still running,
+            # nobody is — and an unread stdout wedges it exactly like an unread
+            # stderr does, just at a higher water mark: measured against this
+            # adapter, a client that disconnects mid-turn leaves the CLI blocked
+            # in write(2) at 2 * STREAM_LIMIT, permanently, with the stderr
+            # drainer running the whole time. Draining stderr alone was only
+            # half the guarantee the module docstring makes.
+            #
+            # This is NOT a kill path and must never become one: an orphaned
+            # turn is deliberately allowed to run to completion (the client
+            # disconnects routinely — heartbeat gap, stale check, backgrounded
+            # tab), and killing here would turn a late answer into a destroyed
+            # one. Discarding lets it finish; it does not stop it. It is also
+            # what makes a later ``proc.wait()`` able to return at all.
+            if proc is not None and proc.returncode is None:
+                discard_stream(proc.stdout)
+
             # Always roll up usage onto the sessions index, even on cancellation.
             # ``nativeSessionId`` itself was already written from inside the loop
             # via ``_patch_native_session_id``; this finally block just updates

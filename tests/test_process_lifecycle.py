@@ -106,13 +106,6 @@ async def drain(gen, *, limit: int = 500) -> list[dict]:
 
 # ── Gate #4 — oversized line ─────────────────────────────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="docs §9 gate 4 / §2: adapter.py:438 spawns without limit=, so a "
-           "200 KB stdout line raises ValueError out of `async for raw_line in "
-           "proc.stdout` and the turn — including the final `result` — is lost. "
-           "Phase 0.2 must make this pass.",
-)
 @pytest.mark.parametrize("size", [100_000, 140_000, 300_000])
 async def test_oversized_line_does_not_lose_the_turn(adapter, monkeypatch, size):
     """A single huge tool_result must cost at most that one step.
@@ -138,12 +131,6 @@ async def test_oversized_line_does_not_lose_the_turn(adapter, monkeypatch, size)
 
 # ── Gate #9 — no silent failure (adapter half) ───────────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="docs §9 gate 9 / §4.1(b): stream() never inspects proc.returncode "
-           "and never drains stderr, so a CLI that exits 1 produces `[{'done': "
-           "True}]` and nothing else. Phase 0.3 must make this pass.",
-)
 async def test_nonzero_exit_emits_agent_error_with_stderr(adapter, monkeypatch):
     monkeypatch.setenv("FAKE_EXIT_CODE", "1")
     monkeypatch.setenv("FAKE_CAPTURE", os.devnull)  # exit 1 having emitted nothing

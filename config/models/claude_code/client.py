@@ -7,6 +7,14 @@ import json
 import os
 from typing import Optional, Dict, Any, AsyncGenerator
 
+from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
+from services.cowork_agent.adapters.subprocess_io import (
+    STREAM_LIMIT,
+    drain_stderr,
+    overflow_notice,
+    reap,
+)
+
 
 class ClaudeCodeClient:
     """Interface for Claude Code CLI with optional skill selection."""
@@ -208,29 +216,68 @@ class ClaudeCodeClient:
             subprocess_env = self._build_subprocess_env()
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                # Hygiene only (the server's stdin is already /dev/null): the CLI
+                # must never inherit a stdin it could block on.
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Transport buffer bound. It is NOT what makes an oversized line
+                # survivable — ``iter_lines`` below reads with ``read(n)``, which
+                # has no line-length limit, replacing a ``readline()`` that raised
+                # ValueError at 64 KiB and destroyed the rest of the turn.
+                limit=STREAM_LIMIT,
                 cwd=self.working_directory,
                 env=subprocess_env,
             )
-            saw_token = False
-            native_session_id: Optional[str] = None
 
+            # Drain stderr from the instant it exists. Piped-and-unread is a
+            # deadlock, not a nuisance: the child blocks in write(2) once the
+            # transport pauses (measured at 2,228,224 B with limit=1 MiB), so it
+            # never exits, so ``process.wait()`` below never returns, so the SSE
+            # turn never terminates and the process is wedged permanently.
+            # Reproduced end-to-end against this client with a CLI that writes
+            # 6 MiB to stderr. The tail is bounded, decoded with errors=replace
+            # and secret-scrubbed, which is also what stops a non-UTF-8 stderr
+            # from raising ``UnicodeDecodeError`` out of the error path below
+            # and skipping the terminal ``done``.
+            stderr_tail = drain_stderr(process.stderr)
+
+            saw_token = False
+            timed_out = False
+            native_session_id: Optional[str] = None
+            overflows: list[LineOverflow] = []
+
+            # The per-line timeout is load-bearing here and is preserved exactly:
+            # it used to wrap ``readline()``, it now wraps "the next complete
+            # line", which may span several chunk reads.
+            lines = iter_lines(process.stdout, on_overflow=overflows.append)
             while True:
                 try:
                     line = await asyncio.wait_for(
-                        process.stdout.readline(),
+                        lines.__anext__(),
                         timeout=self.timeout_seconds,
                     )
+                except StopAsyncIteration:
+                    break
                 except asyncio.TimeoutError:
                     print("❌ Stream timeout")
                     yield {"type": "error", "error": "Stream timeout"}
+                    timed_out = True
                     break
 
-                if not line:
-                    break
+                # One dropped oversized line costs that line and nothing else,
+                # so it is LOGGED, not yielded. Plane A's event vocabulary is
+                # only token/error/done, and server.py treats any ``error``
+                # event as turn failure: it sets ``stream_success = False``,
+                # which suppresses both the session store and the chat save. A
+                # notice whose own text says the turn continued must not be the
+                # thing that discards the turn. (Plane B has a non-fatal channel
+                # and routes the identical notice through it.)
+                while overflows:
+                    o = overflows.pop(0)
+                    print(f"⚠️  {overflow_notice(o.dropped_bytes, o.max_line, o.at_eof)}")
 
-                line_str = line.decode().strip()
+                line_str = line.decode(errors="replace").strip()
                 if not line_str:
                     continue
 
@@ -277,11 +324,22 @@ class ClaudeCodeClient:
                 elif event_type == "error":
                     yield {"type": "error", "error": event.get("error", "Unknown error")}
 
-            await process.wait()
+            # An overflow can fire on the very last line before EOF, i.e. after
+            # the final iteration — drain what the callback collected.
+            while overflows:
+                o = overflows.pop(0)
+                print(f"⚠️  {overflow_notice(o.dropped_bytes, o.max_line, o.at_eof)}")
+            await lines.aclose()
 
-            if process.returncode != 0:
-                stderr = await process.stderr.read()
-                error_msg = stderr.decode().strip()
+            # Bounded and non-killing; see subprocess_io.reap. ``abandoned``
+            # says we stopped reading first, so the child is still running and
+            # there is nothing to wait for — waiting anyway is what left the SSE
+            # turn hanging forever after a "Stream timeout".
+            returncode = await reap(process, abandoned=timed_out)
+
+            if returncode not in (0, None):
+                await stderr_tail.settle()
+                error_msg = stderr_tail.text()
                 if error_msg:
                     print(f"❌ Stream stderr: {error_msg}")
                     yield {"type": "error", "error": error_msg}

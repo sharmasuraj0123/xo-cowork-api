@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -9,11 +10,22 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from services.cowork_agent.adapters.base import BaseAgentAdapter
+from services.cowork_agent.adapters.stream_lines import LineOverflow, iter_lines
+from services.cowork_agent.adapters.subprocess_io import (
+    LARGE_LINE_NOTICE_BYTES,
+    STREAM_LIMIT,
+    discard_stream,
+    large_line_notice,
+    overflow_notice,
+)
 from services.cowork_agent.project_layout import (
     project_dir as _xo_project_dir,
     sessions_dir as _xo_sessions_dir,
     xo_projects_root,
 )
+
+logger = logging.getLogger(__name__)
+
 
 # ── Module-level native session ID cache (session_key → native_session_id) ───
 
@@ -55,6 +67,25 @@ def _load_agent_index(agent_id: str) -> tuple[dict, Path]:
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
+
+
+def _warning_event(label: str) -> dict[str, Any]:
+    """One non-fatal, user-visible notice about the stdout stream.
+
+    Mirrors claude_code/adapter.py: NOT ``type: "error"``, because the turn is
+    still healthy — at most one line is affected and its neighbours are parsed
+    normally. ``model-loading`` is the router's non-fatal informational channel
+    (chat.py:198); ``phase`` marks it for anything reading adapter events
+    directly.
+    """
+    return {"type": "model-loading", "phase": "warning", "label": label}
+
+
+def _overflow_event(overflow: LineOverflow) -> dict[str, Any]:
+    """Notice for a line DROPPED for exceeding the reader's 8 MiB ceiling."""
+    return _warning_event(
+        overflow_notice(overflow.dropped_bytes, overflow.max_line, overflow.at_eof)
+    )
 
 
 def _extract_native_session_id(event: dict) -> str | None:
@@ -470,9 +501,17 @@ class CodexAdapter(BaseAgentAdapter):
         if not is_new and sk:
             native_resume_id = get_native_session_id(sk)
 
+        # Hoisted ABOVE the try, like the claude_code adapter: the try opens
+        # before the spawn, so a missing/unexecutable CLI raises out of
+        # ``create_subprocess_exec`` and the ``finally`` would otherwise read an
+        # unbound ``proc`` and turn the real error into an UnboundLocalError.
+        proc: asyncio.subprocess.Process | None = None
         native_session_id: str | None = None
         response_parts: list[str] = []
         usage: dict = {}
+        # Overflow reports arrive through a callback and can fire on the last
+        # line before EOF, so they are drained inside AND after the loop.
+        overflows: list[LineOverflow] = []
         try:
             cmd = self._build_cmd(
                 question, native_resume_id, agent_type=agent_type, cwd=effective_cwd, model=model,
@@ -485,11 +524,20 @@ class CodexAdapter(BaseAgentAdapter):
                 #                                       an unread PIPE would deadlock once the
                 #                                       64 KB stderr buffer fills. Failure info
                 #                                       arrives on the stdout wire (error event).
+                #                                       DEVNULL is the fix, so there is nothing
+                #                                       to drain and no stderr text to report.
+                # Buffer bound only. Oversize survivability comes from
+                # ``iter_lines`` (no line-length limit); see
+                # subprocess_io.STREAM_LIMIT for why 1 MiB.
+                limit=STREAM_LIMIT,
                 env=self._subprocess_env(),
                 cwd=effective_cwd,
             )
 
-            async for raw_line in proc.stdout:
+            async for raw_line in iter_lines(proc.stdout, on_overflow=overflows.append):
+                while overflows:
+                    yield _overflow_event(overflows.pop(0))
+
                 event = parse_stream_line(raw_line)
                 if event is None:
                     continue
@@ -518,11 +566,50 @@ class CodexAdapter(BaseAgentAdapter):
                 if etype == "token":
                     response_parts.append(event.get("token", ""))
 
+                if len(raw_line) > LARGE_LINE_NOTICE_BYTES:
+                    # Kept, not dropped: a line this size used to raise
+                    # ValueError out of `async for ... in proc.stdout` and lose
+                    # the turn. Emitted here, beside the event it belongs to,
+                    # rather than before parsing: the ``continue``d records above
+                    # are internal bookkeeping the client never sees, and a
+                    # notice about output nobody is receiving is pure noise.
+                    yield _warning_event(large_line_notice(len(raw_line)))
+
                 # token / model-loading / error → forward to the SSE layer.
                 yield event
 
+            # EOF: an overflow on the final line fires after the last iteration.
+            while overflows:
+                yield _overflow_event(overflows.pop(0))
+
+            # NOTE: still no return-code check here, deliberately. Per
+            # streaming.py's HARD RULE, ``codex`` exits 0 while emitting
+            # ``turn.failed`` (e.g. unauthenticated), so rc is not a failure
+            # signal for this backend — the wire events are.
             await proc.wait()
+        except Exception as exc:
+            # Terminal-event contract, matching claude_code: this generator must
+            # always end with a ``done``. Without this, a spawn failure (missing
+            # or unexecutable binary) raised straight out of ``stream()`` having
+            # yielded nothing at all — the SSE router happens to mask that with
+            # its own sentinel, but every other caller of this adapter got a
+            # bare exception and no terminal frame, and the two adapters had
+            # different failure contracts. ``Exception`` only:
+            # CancelledError/GeneratorExit still propagate so ordinary teardown
+            # stays ordinary teardown.
+            logger.exception("codex stream failed")
+            yield {"type": "error", "error": f"{exc.__class__.__name__}: {exc}"}
         finally:
+            # Nobody is reading stdout any more. If the child is still alive it
+            # will block in write(2) at 2 * STREAM_LIMIT and wedge forever, so
+            # hand the rest to a background discarder. stderr needs no
+            # equivalent here — it is DEVNULL by design, see the spawn above.
+            #
+            # NOT a kill path, and must never become one: an orphaned turn is
+            # deliberately allowed to finish. This lets it; it does not stop it.
+            if proc is not None and proc.returncode is None:
+                discard_stream(proc.stdout)
+
             # Roll usage onto the index even on cancellation. nativeSessionId was
             # already patched from inside the loop; here we add the turn's tokens
             # (key-remapped) + bump the timestamp. Nothing to do if codex never
