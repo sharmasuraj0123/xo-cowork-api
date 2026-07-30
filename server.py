@@ -570,6 +570,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Watcher failed to start (non-fatal): {e}")
 
+    # Workspace status collector — one shared loop probing provider/connector
+    # state so every /api/status/stream client reads a cached snapshot instead
+    # of running its own probes. Non-fatal: without it the SSE route still
+    # serves (an empty snapshot) and the polling status endpoints are unaffected.
+    _status_collector_started = False
+    try:
+        from services.cowork_agent.status_stream import start_collector
+        start_collector()
+        _status_collector_started = True
+        print("   Status stream: collector started")
+    except Exception as e:
+        print(f"⚠️ Status collector failed to start (non-fatal): {e}")
+
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
     yield
@@ -609,6 +622,13 @@ async def lifespan(app: FastAPI):
             await _xo_status_task
         except asyncio.CancelledError:
             pass
+
+    if _status_collector_started:
+        try:
+            from services.cowork_agent.status_stream import stop_collector
+            await stop_collector()
+        except Exception:
+            pass
     print("👋 Shutting down XO Cowork API Server...")
 
 
@@ -632,6 +652,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Re-probe a status source as soon as a request changes what it reports (a
+# connect/disconnect), so /api/status/stream reflects user actions immediately
+# and the background probe intervals can stay slow. Raw ASGI, not
+# BaseHTTPMiddleware — the latter interferes with streaming responses and this
+# app serves SSE from /api/chat/stream/{id} and /api/status/stream.
+from services.cowork_agent.status_stream import StatusInvalidationMiddleware
+app.add_middleware(StatusInvalidationMiddleware)
 app.include_router(auth_router)
 app.include_router(claude_setup_token_router)
 app.include_router(codex_setup_router)

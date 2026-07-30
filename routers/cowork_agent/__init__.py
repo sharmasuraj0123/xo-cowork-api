@@ -26,6 +26,7 @@ from .connectors.onedrive import router as onedrive_router
 from .secrets import router as secrets_router
 from .sessions import router as sessions_router
 from .skills import router as skills_router
+from .status_stream import router as status_stream_router
 from .usage import router as usage_router
 from .connectors.vercel import router as vercel_router
 from .workspace_memory import router as workspace_memory_router
@@ -59,6 +60,7 @@ all_routers: list[APIRouter] = [
     usage_router,
     fts_router,
     skills_router,
+    status_stream_router,
     misc_router,
     onboarding_router,
     gdrive_router,
