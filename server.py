@@ -524,6 +524,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ Skill install failed (non-fatal): {exc}")
 
+    # Install the active agent's declared boot-time skills — catalog names listed
+    # under "startup_skills" in config/agents/<AGENT_NAME>/settings.json. Agents
+    # that declare none install nothing. Backgrounded because these shell out to
+    # the network (npx/git); boot must not wait on them.
+    _startup_skills_task = None
+    try:
+        from services.cowork_agent.skill_catalog import install_startup_skills
+        _startup_skills_task = asyncio.create_task(install_startup_skills())
+        print("   Startup skills: background install scheduled")
+    except Exception as exc:
+        print(f"⚠️ Startup skill install failed to schedule (non-fatal): {exc}")
+
     # Write ~/xo-projects/.xo/xo.json (static defaults) and seed live status
     # in the background. The dispatcher inside seed_agent_status() picks the
     # right adapter for the current AGENT_NAME (no-op for agents without a
@@ -581,6 +593,13 @@ async def lifespan(app: FastAPI):
         _watcher_task.cancel()
         try:
             await _watcher_task
+        except asyncio.CancelledError:
+            pass
+
+    if _startup_skills_task and not _startup_skills_task.done():
+        _startup_skills_task.cancel()
+        try:
+            await _startup_skills_task
         except asyncio.CancelledError:
             pass
 
