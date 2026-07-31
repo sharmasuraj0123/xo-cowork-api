@@ -15,6 +15,7 @@ _dispatcher_sse. No backend is named in this file.
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 
@@ -24,6 +25,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from services.cowork_agent.adapters.loader import try_load_capability
 from services.cowork_agent.engine.chat_state import active_streams
 from services.xo_manifest import resolve_agent_name
+
+log = logging.getLogger(__name__)
 
 # Tracks recently-started streams so a fast reconnect (e.g. navigation-caused
 # double-mount) gets a graceful done event rather than "Stream not found".
@@ -35,38 +38,28 @@ router = APIRouter()
 
 
 
-async def _resolve_user_id(request: Request, body: dict) -> str:
-    """Resolve the user_id for an incoming chat request.
+async def _resolve_user_id(request: Request) -> str | None:
+    """Resolve the Composio user_id for an incoming chat request.
 
-    In multi-tenant mode a valid ``Authorization: Bearer`` token wins (so the
-    launching user is real, not default_user, and can't be spoofed via
-    body.user_id) — this only selects the Composio user passed into the
-    per-session MCP config; chat/session storage is unchanged. When the flag is
-    off, or no valid token is present, we keep the legacy order: explicit body
-    field, request.state.user_id, auth_state["user_id"], then "default_user".
+    Identity comes only from the request's ``Authorization: Bearer`` token, so
+    the launching user is always real and can never be spoofed via
+    ``body.user_id``. This selects nothing but the Composio user baked into the
+    per-session MCP config; chat/session storage is unchanged.
+
+    Returns None when the request carries no valid identity. Chat still runs —
+    the agent simply gets no Composio MCP server for that turn, which is the
+    only safe answer: there is no shared account to fall back to.
     """
-    from services.composio.identity import multi_tenant_enabled, resolve_user_from_bearer
-    if multi_tenant_enabled():
-        bearer_user = await resolve_user_from_bearer(request)
-        if bearer_user:
-            return bearer_user
-    if body.get("user_id"):
-        return str(body["user_id"])
-    state_user = getattr(request.state, "user_id", None)
-    if state_user:
-        return str(state_user)
-    try:
-        from routers.auth import auth_state
-        uid = auth_state.get("user_id")
-        if uid:
-            return str(uid)
-    except Exception:
-        pass
-    from services import instance_identity
-    iid = instance_identity.instance_user_id()
-    if iid:
-        return iid
-    return "default_user"
+    from services.composio.identity import resolve_user_from_bearer
+
+    user_id = await resolve_user_from_bearer(request)
+    if not user_id:
+        log.warning(
+            "chat: no valid session bearer on this prompt — the turn runs "
+            "without Composio tools. Mint a session id via POST /xo-auth/session "
+            "and send it as 'X-XO-Session: <session_id>'."
+        )
+    return user_id
 
 
 
@@ -307,7 +300,7 @@ async def chat_prompt(request: Request):
         "agent_id": agent_id,
         "model": body.get("model"),
         "is_new_session": is_new_session,
-        "user_id": await _resolve_user_id(request, body),
+        "user_id": await _resolve_user_id(request),
     }
     return {"stream_id": stream_id, "session_id": our_session_id}
 

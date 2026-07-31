@@ -44,10 +44,11 @@
 - The project venv is `venv/bin/python` (system `python3` lacks fastapi).
 - After touching core, uphold the modularity invariant (no agent name in core
   code; see DEVELOPING.md §6). A local AST guard can check it if present.
-- Import gate + route parity (expect 164 / 164 / 188 openapi paths for
+- Import gate + route parity (expect 165 / 165 / 189 openapi paths for
   claude_code / openclaw / hermes): `AGENT_NAME=<a> venv/bin/python -c "import server"`.
   (Was 151 / 151 / 175 before the Composio restore added 13 paths: 8 under
-  `/api/connectors/composio`, 4 MCP-proxy, 1 `/xo-auth/session`.)
+  `/api/connectors/composio`, 4 MCP-proxy, 1 `/xo-auth/session`; then +1 for
+  `/xo-auth/session/self`, the local-UI identity bootstrap.)
 - Validate behavior after edits (lint, compile/tests where feasible).
 - Keep changes minimal and targeted; behavior-preserving (no path/request/
   response changes unless explicitly asked).

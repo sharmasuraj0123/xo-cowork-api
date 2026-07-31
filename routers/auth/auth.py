@@ -290,6 +290,49 @@ async def xo_auth_session(request: Request):
     return {"success": True, "session_id": session_id}
 
 
+@router.get("/session/self")
+async def xo_auth_session_self():
+    """Mint a session id for the XO user this backend is itself authenticated as.
+
+    Bootstrap for the local/desktop UI, which has no XO login of its own: the
+    backend already holds an XO credential (XO_API_KEY, or the token from the
+    consume flow), so it resolves *that* credential's real ``user_id`` and hands
+    back an opaque session id the browser can use as its bearer.
+
+    This is a real XO user, not a shared sentinel, and it travels the same
+    per-request bearer path as any platform-supplied identity — when real
+    per-user tokens start arriving via POST /xo-auth/session, nothing else
+    changes and this endpoint simply stops being used.
+
+    401 when the backend itself is unauthenticated or XO rejects its credential.
+    """
+    from services.composio import session_identity  # local import: avoid load cycle
+
+    token = get_auth_token()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": (
+                    "Backend is not authenticated to XO (no XO_API_KEY and no "
+                    "consumed session). Cannot mint a session."
+                )
+            },
+        )
+
+    session_id = await session_identity.mint(token)
+    if not session_id:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "XO rejected this backend's credential at /get-user-id."},
+        )
+    return {
+        "success": True,
+        "session_id": session_id,
+        "user_id": session_identity.resolve(session_id),
+    }
+
+
 @router.get("/whoami")
 async def xo_auth_whoami():
     """

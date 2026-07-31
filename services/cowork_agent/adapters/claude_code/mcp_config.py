@@ -6,11 +6,12 @@ We materialize a Composio MCP URL into a JSON file and pass
 session-level meta-tools (SEARCH_TOOLS, MULTI_EXECUTE_TOOL,
 MANAGE_CONNECTIONS, GET_TOOL_SCHEMAS, REMOTE_WORKBENCH, REMOTE_BASH_TOOL).
 
-The URL written into the file is xo-cowork-api's localhost MCP proxy
-(`composio_service._cowork_proxy_url()` →
-`http://127.0.0.1:<PORT>/mcp/cowork-proxy/`). The proxy resolves user_id
-server-side and injects the COMPOSIO_API_KEY from .env at request time.
-Net: this file contains no Composio credentials — only a localhost URL.
+The URL written into the file is xo-cowork-api's loopback MCP proxy
+(`composio_service._cowork_proxy_url(user_id)` →
+`http://127.0.0.1:<PORT>/mcp/cowork-proxy/u/<token>`). The proxy resolves that
+opaque token to this session's user and injects COMPOSIO_API_KEY from .env at
+request time. Net: this file holds no Composio credentials — only a localhost
+URL scoped to one user.
 
 The file lives under /tmp/xo-cowork/<session>/mcp.json and is unlinked
 after the subprocess exits.
@@ -36,9 +37,14 @@ def write_session_mcp_config(user_id: Optional[str], session_key: Optional[str])
     """Write the cowork MCP server config to a per-session JSON file.
 
     Returns the path to pass to `claude --mcp-config`, or None when MCP
-    is unavailable / unconfigured.
+    is unavailable / unconfigured — including when the turn carried no
+    identity, since there is no shared Composio account to fall back to.
     """
     if not user_id:
+        log.info(
+            "mcp_config: turn has no Composio user (no session bearer); "
+            "running without Composio tools."
+        )
         return None
 
     try:
@@ -47,25 +53,18 @@ def write_session_mcp_config(user_id: Optional[str], session_key: Optional[str])
         log.debug("mcp_config: composio_service not importable: %s", exc)
         return None
 
-    # Use the localhost MCP proxy URL — no headers, no Composio credentials
-    # written to disk. The proxy resolves user_id and injects x-api-key
-    # server-side at request time. See services/composio/mcp_proxy.py.
-    #
-    # Multi-tenant: the URL carries this session's user as a signed token, so
-    # the header-less MCP call is attributable to the user who launched it.
+    # Loopback proxy URL — no headers, no Composio credentials on disk. The
+    # proxy resolves this session's user from the opaque token and injects
+    # x-api-key server-side. See services/composio/mcp_proxy.py.
     try:
         proxy_url = composio_service._cowork_proxy_url(user_id)
-    except RuntimeError as exc:
-        # COMPOSIO_STATE_SECRET missing while multi-tenant is on. Degrade to
-        # "no Composio tools this turn" rather than writing an unsigned URL
-        # that any co-resident process could reuse, or killing the chat.
-        log.warning("mcp_config: cannot mint user-scoped proxy URL: %s", exc)
+    except Exception as exc:
+        # No user, or the token store is unwritable. Degrade to "no Composio
+        # tools this turn" rather than killing the chat.
+        log.warning("mcp_config: cannot build user-scoped proxy URL: %s", exc)
         return None
 
-    server_entry = {
-        "type": "http",
-        "url": proxy_url,
-    }
+    server_entry = {"type": "http", "url": proxy_url}
 
     session_dir = _MCP_TMP_ROOT / (session_key or uuid.uuid4().hex)
     session_dir.mkdir(parents=True, exist_ok=True)

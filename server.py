@@ -509,18 +509,9 @@ async def lifespan(app: FastAPI):
             "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
         )
 
-    # Resolve the real single-instance user from the XO credential so Composio
-    # calls attribute to the real account instead of the "default_user" sentinel.
-    # Gated by XO_RESOLVE_INSTANCE_USER; best-effort; touches only its own cache.
-    try:
-        from services import instance_identity
-        iid = await instance_identity.prime_instance_user_id()
-        if iid:
-            print(f"   Instance user: resolved {iid} (Composio attributes here, not default_user)")
-        elif instance_identity.enabled():
-            print("⚠️ Instance user: resolution failed — staying on default_user (see logs)")
-    except Exception as exc:
-        print(f"⚠️ Instance user resolution skipped (non-fatal): {exc}")
+    # Composio identity is strictly per-request: the UI carries a session id,
+    # and each agent config carries that user's opaque MCP proxy token. There is
+    # no process-wide "instance user" to prime. See services/composio/identity.py.
 
     # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
     try:

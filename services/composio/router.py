@@ -4,6 +4,10 @@ REST routes for Composio-backed integrations.
 Composio is the single source of truth — this router is a thin proxy. See
 services/composio/service.py and docs/composio-xo-swarm-api-migration.md.
 
+Every endpoint here resolves its caller through the ``get_composio_user``
+dependency: a valid ``Authorization: Bearer <session_id>`` or a 401. There is no
+shared/sentinel user — see services/composio/identity.py.
+
 Endpoints (all under /api/connectors/composio):
   GET    /toolkits                       — catalog + per-user connection status
   POST   /{toolkit}/connect              — start OAuth flow or submit an API key
@@ -25,7 +29,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -39,36 +43,6 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _resolve_user_id(request: Request, body_user_id: Optional[str] = None) -> str:
-    """Pull user_id from (in order): request body, request.state.user_id (set by
-    middleware in future), auth_state["user_id"] from routers/auth.py, then a
-    "default_user" sentinel for single-tenant local dev.
-
-    This is the *single-tenant* chain. Endpoints below take the multi-tenant
-    identity from the ``get_composio_user`` dependency and only fall back here
-    when it returns None (i.e. COMPOSIO_MULTI_TENANT is off). With the flag on,
-    the dependency has already 401'd anything without a valid bearer, so
-    ``body_user_id`` can never be used to impersonate another tenant.
-    """
-    if body_user_id:
-        return body_user_id
-    state_user = getattr(request.state, "user_id", None)
-    if state_user:
-        return str(state_user)
-    try:
-        from routers.auth import auth_state  # local import avoids circular
-        uid = auth_state.get("user_id")
-        if uid:
-            return str(uid)
-    except Exception:
-        pass
-    from services import instance_identity
-    iid = instance_identity.instance_user_id()
-    if iid:
-        return iid
-    return "default_user"
-
 
 def _toolkit_status_map(user_id: str) -> dict[str, dict[str, Any]]:
     """{toolkit_slug_upper: {status, connected_account_id, scheme}} for fast lookups."""
@@ -89,16 +63,17 @@ def _toolkit_status_map(user_id: str) -> dict[str, dict[str, Any]]:
 # Request bodies
 # ---------------------------------------------------------------------------
 
+# NOTE: neither body carries a ``user_id``. Identity comes only from the bearer
+# token, so a client cannot name the tenant it wants to act as.
+
 class ConnectBody(BaseModel):
     auth_scheme: str = "OAUTH2"
     api_key: Optional[str] = None
     redirect_uri: Optional[str] = None
-    user_id: Optional[str] = None
 
 
 class DisconnectBody(BaseModel):
     connected_account_id: str
-    user_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -107,11 +82,9 @@ class DisconnectBody(BaseModel):
 
 @router.get("/api/connectors/composio/toolkits")
 async def list_toolkits(
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     from services.composio import categories as composio_categories  # noqa: PLC0415
-    user_id = auth_user or _resolve_user_id(request)
     status_by_slug = _toolkit_status_map(user_id)
     classified = composio_categories.classified_toolkits()
 
@@ -139,10 +112,8 @@ async def list_toolkits(
 async def connect(
     toolkit: str,
     body: ConnectBody,
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    user_id = auth_user or _resolve_user_id(request, body.user_id)
     try:
         result = composio_service.initiate_connection(
             user_id=user_id,
@@ -162,14 +133,13 @@ async def connect(
 @router.get("/api/connectors/composio/{toolkit}/status")
 async def connect_status(
     toolkit: str,
-    request: Request,
     connection_request_id: str = Query(...),
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     result = composio_service.check_connection(connection_request_id)
     # If the OAuth dance just finished, the user's pinned set changed.
     if (result.get("status") or "").upper() == "ACTIVE":
-        composio_service.invalidate_session(auth_user or _resolve_user_id(request))
+        composio_service.invalidate_session(user_id)
     return JSONResponse(result)
 
 
@@ -177,10 +147,8 @@ async def connect_status(
 async def disconnect(
     toolkit: str,
     body: DisconnectBody,
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    user_id = auth_user or _resolve_user_id(request, body.user_id)
     # Ownership gate: only revoke a connected account that belongs to the
     # caller. Composio's delete takes a bare account id, so without this a
     # tenant could disconnect another tenant's account by guessing its id.
@@ -212,8 +180,7 @@ async def disconnect(
 @router.get("/api/connectors/composio/{toolkit}/tools")
 async def list_toolkit_tools(
     toolkit: str,
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     """Full action catalogue for a toolkit — including currently disabled
     actions, each carrying `enabled` and (where supported) `category`.
@@ -223,7 +190,6 @@ async def list_toolkit_tools(
     The agent path (`composio_list_tools` meta-tool) keeps the default
     `include_disabled=False` so disabled actions never enter the prompt.
     """
-    user_id = auth_user or _resolve_user_id(request)
     try:
         tools = composio_service.list_tools(user_id, toolkit, include_disabled=True)
     except ValueError as exc:
@@ -250,15 +216,13 @@ class PrefsBody(BaseModel):
 @router.get("/api/connectors/composio/{toolkit}/prefs")
 async def get_toolkit_prefs(
     toolkit: str,
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     """Return the disabled-slug map for one toolkit. Absent slugs are enabled
     by default; the response shape mirrors the on-disk store.
     """
     # Local import: keep router lazy-loaded, mirrors composio_service style.
     from services.composio import action_prefs as composio_action_prefs  # noqa: PLC0415
-    user_id = auth_user or _resolve_user_id(request)
     return JSONResponse(
         {"actions": composio_action_prefs.get_toolkit_prefs(toolkit, user_id)}
     )
@@ -268,8 +232,7 @@ async def get_toolkit_prefs(
 async def put_toolkit_prefs(
     toolkit: str,
     body: PrefsBody,
-    request: Request,
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     """Toggle one or more actions for a toolkit.
 
@@ -286,7 +249,6 @@ async def put_toolkit_prefs(
             status_code=404,
             detail=f"Per-action prefs are not configurable for toolkit '{toolkit}' yet.",
         )
-    user_id = auth_user or _resolve_user_id(request)
     updated = composio_action_prefs.bulk_set(toolkit, body.actions, user_id)
     return JSONResponse({"actions": updated})
 
@@ -310,9 +272,8 @@ async def put_toolkit_prefs(
 
 @router.post("/api/connectors/composio/refresh-gateway")
 async def refresh_gateway(
-    request: Request,
     agent: str = Query(...),
-    auth_user: Optional[str] = Depends(get_composio_user),
+    user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     """Install the caller's cowork MCP entry into ``agent``'s gateway config.
 
@@ -320,8 +281,6 @@ async def refresh_gateway(
     ``mcp_install`` capability rather than a hardcoded list, so a new gateway
     agent works by dropping in its adapter folder — no edit here.
     """
-    from services.composio.identity import multi_tenant_enabled  # noqa: PLC0415
-
     supported = composio_service.gateway_install_agents()
     if agent not in supported:
         raise HTTPException(
@@ -332,9 +291,8 @@ async def refresh_gateway(
             ),
         )
 
-    user_id = auth_user or _resolve_user_id(request)
     result = composio_service.install_into_gateway(user_id, agent)
-    if result.get("ok") and multi_tenant_enabled():
+    if result.get("ok"):
         result["multi_tenant_warning"] = (
             f"{agent}'s MCP config is machine-global. It now points at "
             f"Composio user '{user_id}' for every session on this host, "

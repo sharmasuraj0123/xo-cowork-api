@@ -1,18 +1,24 @@
 """
 Loopback MCP reverse proxy → Composio Tool Router session.
 
-OpenClaw and Hermes connect to /mcp/cowork-proxy/ on localhost with NO
-headers. This handler resolves the user_id server-side, asks
-composio_service.build_mcp_server_entry(user_id) for the upstream session
-URL + auth headers, and forwards the request transparently. Response is
-streamed back (Composio replies are usually text/event-stream).
+Every runtime (OpenClaw, Hermes, Claude Code) connects to
+/mcp/cowork-proxy/u/<token> on localhost with NO headers. This handler resolves
+the token to a user_id, asks composio_service.build_mcp_server_entry(user_id)
+for the upstream session URL + auth headers, and forwards the request
+transparently. The response is streamed back (Composio replies are usually
+text/event-stream).
 
-End result: COMPOSIO_API_KEY never has to be written into
-~/.openclaw/openclaw.json or ~/.hermes/config.yaml. It lives only in
+End result: COMPOSIO_API_KEY is never written into ~/.openclaw/openclaw.json,
+~/.hermes/config.yaml, or Claude Code's per-session mcp.json. It lives only in
 the xo-cowork-api process's env (loaded from .env).
 
-Claude Code is NOT routed through this proxy — it keeps writing the
-direct Composio URL into /tmp/xo-cowork/<sk>/mcp.json (per the plan).
+The token is opaque and random, resolved by lookup in the session store — not
+signed, so there is no shared secret to configure. Because it is stable per
+user, a config written once keeps working after connector toggles and restarts;
+this handler picks up whatever session that user currently has.
+
+The unscoped /mcp/cowork-proxy/ paths carry no identity and always 401 — they
+exist so a stale config gets a clear error rather than a silent wrong-user call.
 """
 
 from __future__ import annotations
@@ -25,8 +31,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.composio import service as composio_service
-
-from .router import _resolve_user_id
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -57,26 +61,16 @@ def _forwarded_headers(incoming: dict[str, str], inject: dict[str, str]) -> dict
     return out
 
 
-def _proxy_user(request: Request, token: str | None) -> str | None:
+def _proxy_user(token: str | None) -> str | None:
     """Resolve which Composio user this header-less proxy call belongs to.
 
-    Single-tenant (flag off): the legacy fallback chain — process auth state,
-    else the ``default_user`` sentinel. One install, one set of connections.
-
-    Multi-tenant (flag on): identity comes *only* from the HMAC-signed token in
-    the path. The bare ``/mcp/cowork-proxy/`` routes carry no identity, and the
-    fallback chain would hand the caller whichever user happened to be in
-    process state — so with the flag on they resolve to None and the caller
-    401s rather than silently crossing tenants. Returns None on a bad
-    signature too.
+    Identity comes only from the opaque token in the path, looked up in the
+    session store. No token, or an unknown one, resolves to None and the caller
+    401s — there is no fallback that could silently cross tenants.
     """
-    from services.composio.identity import multi_tenant_enabled, verify_proxy_token
-
-    if not multi_tenant_enabled():
-        return _resolve_user_id(request)
     if not token:
         return None
-    return verify_proxy_token(token)
+    return composio_service.user_for_proxy_token(token)
 
 
 async def _proxy(
@@ -84,16 +78,17 @@ async def _proxy(
 ) -> StreamingResponse | JSONResponse:
     """Forward `request` to the Composio Tool Router session URL for the
     request's resolved user_id. Stream the upstream response back."""
-    user_id = _proxy_user(request, token)
+    user_id = _proxy_user(token)
     if not user_id:
         return JSONResponse(
             status_code=401,
             content={
                 "error": "composio_identity_required",
                 "detail": (
-                    "Composio multi-tenant mode is on; this MCP proxy call carried "
-                    "no valid signed user token. Re-run the session so its MCP "
-                    "config is written with a user-scoped proxy URL."
+                    "This MCP proxy call carried no recognised user token. "
+                    "Re-install the MCP config for this agent "
+                    "(POST /api/connectors/composio/refresh-gateway) so it "
+                    "points at a valid /mcp/cowork-proxy/u/<token> URL."
                 ),
             },
         )
@@ -182,9 +177,10 @@ async def mcp_proxy_delete(request: Request):
     return await _proxy(request, "DELETE")
 
 
-# User-scoped variants. The agent's MCP client is configured with one of these
-# URLs when COMPOSIO_MULTI_TENANT is on — the signed token is the only identity
-# a header-less call can carry. Minted by composio_service._cowork_proxy_url().
+# User-scoped variants — the only ones that resolve to a user. The agent's MCP
+# client is always configured with one of these; the opaque token is the only
+# identity a header-less call can carry. Minted by
+# composio_service._cowork_proxy_url() / proxy_token_for_user().
 
 
 @router.post("/mcp/cowork-proxy/u/{token}/")

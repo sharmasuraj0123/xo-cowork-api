@@ -19,7 +19,7 @@ relevant map.
 When adding a new toolkit:
 
 1. Pull the catalogue:
-       composio_service.list_tools("default_user", "<toolkit_id>",
+       composio_service.list_tools("<your_xo_user_id>", "<toolkit_id>",
                                    include_disabled=True)
 2. Add an exact map under `_CATEGORIES` (preferred for catalogues under ~200
    actions) or implement a verb-heuristic dispatcher for larger ones.

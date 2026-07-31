@@ -1,26 +1,28 @@
 """
-Composio per-user identity.
+Composio per-user identity — who is making this request.
 
-Two resolution paths feed the same notion of "which Composio user is this":
+This module answers that for the **management UI** only: REST under
+``/api/connectors/composio/*``. The browser sends ``X-XO-Session:
+<session_id>`` (or ``Authorization: Bearer <session_id>``);
+:func:`get_composio_user` (a FastAPI dependency) resolves it to the real XO
+``user_id``, or 401s.
 
-1. **Management UI** — REST under ``/api/connectors/composio/*``. The browser
-   sends ``Authorization: Bearer <xo_token>``. :func:`get_composio_user` (a
-   FastAPI dependency) validates it against XO's ``/get-user-id`` and returns
-   the real ``user_id``.
-2. **Agent runtime** — the loopback MCP proxy is called header-less, so the
-   ``user_id`` is baked into the proxy URL at config-write time as an
-   HMAC-signed token. :func:`sign_proxy_token` / :func:`verify_proxy_token`
-   mint and check it; any worker verifies without a shared store.
+The **agent runtime** needs nothing from this module. Its MCP config carries an
+opaque per-user token that ``services/composio/service.py`` mints and
+``mcp_proxy.py`` resolves — a lookup, not a signature, so no shared secret is
+involved. Beneath that, isolation is Composio's own:
+``sessions.create(user_id=...)`` binds a session to one user server-side.
 
-Everything is gated by ``COMPOSIO_MULTI_TENANT`` (default off). Off → callers
-fall back to the legacy ``default_user`` sentinel and nothing changes.
+Multi-tenancy is unconditional: there is no shared sentinel user and no
+process-wide "instance user". Every Composio call carries a real, per-request
+XO ``user_id`` or it is rejected. ``/api/connectors/composio/*`` needs a valid
+session id — mint one with ``POST /xo-auth/session`` (platform hands over an XO
+token), ``GET /xo-auth/session/self`` (backend mints for its own XO credential —
+the local-UI bootstrap), or read ``session_id`` off the auth-consume response.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import logging
 import os
 import time
@@ -30,17 +32,6 @@ import httpx
 from fastapi import HTTPException, Request
 
 log = logging.getLogger(__name__)
-
-# Matches the sentinel in service.py / router.py so a flag-off install keeps
-# sharing one set of connected accounts.
-_DEFAULT_USER_ID = "default_user"
-
-
-def multi_tenant_enabled() -> bool:
-    """True when per-user Composio isolation is switched on."""
-    return os.getenv("COMPOSIO_MULTI_TENANT", "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +45,18 @@ _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 _TOKEN_TTL_SECONDS = float(os.getenv("COMPOSIO_IDENTITY_CACHE_TTL", "90"))
 
 
+# Dedicated header for the session id. ``Authorization`` is already spoken for
+# in remote-tunnel mode (the tunnel's own bearer), so a browser behind a tunnel
+# has no way to also carry its XO identity there. This header is checked first
+# and never collides.
+_SESSION_HEADER = "x-xo-session"
+
+
 def _extract_bearer(request: Request) -> Optional[str]:
+    """Return the caller's identity token from ``X-XO-Session`` or ``Bearer``."""
+    session_header = (request.headers.get(_SESSION_HEADER) or "").strip()
+    if session_header:
+        return session_header
     auth = request.headers.get("authorization")
     if not auth:
         return None
@@ -77,7 +79,7 @@ async def _validate_token(token: str) -> Optional[str]:
         return cached[0]
 
     # Local import avoids a circular dependency at module load.
-    from routers.auth import CHAT_API_BASE_URL, HTTP_TIMEOUT, XO_GET_USER_ID_PATH
+    from routers.auth.auth import CHAT_API_BASE_URL, HTTP_TIMEOUT, XO_GET_USER_ID_PATH
 
     url = f"{CHAT_API_BASE_URL.rstrip('/')}{XO_GET_USER_ID_PATH}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -114,7 +116,8 @@ async def resolve_user_from_bearer(request: Request) -> Optional[str]:
 
     Never raises — returns None when there's no token or neither shape resolves.
     Callers that must enforce identity (the UI dependency) turn None into a 401;
-    callers with their own auth semantics (chat) fall back to legacy resolution.
+    callers with softer semantics (chat, /api/tools) degrade to "no Composio
+    identity" rather than guessing a user.
     """
     token = _extract_bearer(request)
     if not token:
@@ -128,21 +131,24 @@ async def resolve_user_from_bearer(request: Request) -> Optional[str]:
     return await _validate_token(token)
 
 
-async def get_composio_user(request: Request) -> Optional[str]:
+async def get_composio_user(request: Request) -> str:
     """FastAPI dependency for the Composio management endpoints.
 
-    - Flag **off** → returns None, signalling the caller to use its legacy
-      ``_resolve_user_id`` chain (body / state / auth_state / default_user).
-      Nothing changes versus today.
-    - Flag **on** → requires a valid ``Authorization: Bearer`` token. Missing or
-      invalid → 401. The validated identity wins over any ``body.user_id``.
+    Requires a valid session id (``X-XO-Session``, or ``Authorization: Bearer``)
+    and returns the real XO ``user_id`` behind it. Missing or invalid → 401.
+    There is no fallback
+    identity: a request that cannot say who it is cannot touch anyone's
+    connections. Any ``body.user_id`` is ignored, so it can't impersonate.
     """
-    if not multi_tenant_enabled():
-        return None
     if not _extract_bearer(request):
         raise HTTPException(
             status_code=401,
-            detail="Missing bearer token (Composio multi-tenant mode is on).",
+            detail=(
+                "Missing session identity. Send 'X-XO-Session: <session_id>' "
+                "(or 'Authorization: Bearer <session_id>'). Mint one with "
+                "POST /xo-auth/session, or GET /xo-auth/session/self when the "
+                "backend holds the XO credential."
+            ),
         )
     user_id = await resolve_user_from_bearer(request)
     if not user_id:
@@ -152,62 +158,3 @@ async def get_composio_user(request: Request) -> Optional[str]:
         )
     return user_id
 
-
-# ---------------------------------------------------------------------------
-# Signed proxy token (agent-runtime path)
-# ---------------------------------------------------------------------------
-#
-# The agent's MCP proxy call carries no headers, so the user is encoded into the
-# proxy URL path as ``base64url(user_id).base64url(hmac_sha256)``. Stateless and
-# signed: any worker verifies it with COMPOSIO_STATE_SECRET, and a local process
-# can't forge a different user without the secret.
-
-
-def _state_secret() -> Optional[str]:
-    return os.getenv("COMPOSIO_STATE_SECRET", "").strip() or None
-
-
-def _b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-
-def sign_proxy_token(user_id: str) -> str:
-    """Mint a stateless, URL-safe proxy token encoding ``user_id``.
-
-    Raises if COMPOSIO_STATE_SECRET is unset — in multi-tenant prod the secret
-    is required and a missing one must fail loudly rather than silently drop to
-    an unsigned, spoofable URL.
-    """
-    secret = _state_secret()
-    if not secret:
-        raise RuntimeError(
-            "COMPOSIO_STATE_SECRET is not set; cannot sign Composio proxy tokens."
-        )
-    payload = _b64url(user_id.encode("utf-8"))
-    sig = hmac.new(secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
-    return f"{payload}.{_b64url(sig)}"
-
-
-def verify_proxy_token(token: str) -> Optional[str]:
-    """Return the ``user_id`` carried by a proxy token, or None if invalid."""
-    secret = _state_secret()
-    if not secret or not token or "." not in token:
-        return None
-    payload_b64, _, sig_b64 = token.partition(".")
-    try:
-        expected = hmac.new(
-            secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256
-        ).digest()
-        got = _b64url_decode(sig_b64)
-    except Exception:
-        return None
-    if not hmac.compare_digest(expected, got):
-        return None
-    try:
-        return _b64url_decode(payload_b64).decode("utf-8")
-    except Exception:
-        return None

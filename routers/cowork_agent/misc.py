@@ -25,21 +25,27 @@ router = APIRouter()
 
 
 @router.get("/api/tools")
-def list_tools(request: Request):
-    """Aggregate tools across the user's connected Composio toolkits.
+async def list_tools(request: Request):
+    """Aggregate tools across the caller's connected Composio toolkits.
 
-    Returns [] when Composio is not configured or the user has no active
-    connections, preserving the previous stub's contract.
+    Identity comes from the request's session bearer. Returns [] when Composio
+    is not configured, the caller sent no valid bearer, or the user has no
+    active connections — preserving the previous stub's contract rather than
+    401ing a list the UI polls opportunistically.
     """
     try:
         from services.composio import service as composio_service
-        from services.composio.router import _resolve_user_id
+        from services.composio.identity import resolve_user_from_bearer
     except Exception as exc:
         log.debug("tools: composio not importable: %s", exc)
         return []
 
+    user_id = await resolve_user_from_bearer(request)
+    if not user_id:
+        log.debug("tools: no valid session bearer on request; returning []")
+        return []
+
     try:
-        user_id = _resolve_user_id(request)
         active_toolkits = {
             (row.get("toolkit") or "").upper()
             for row in composio_service.list_connections(user_id)

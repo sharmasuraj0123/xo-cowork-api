@@ -10,6 +10,11 @@ Environment:
 - COMPOSIO_API_KEY                       required for any call to succeed
 - COMPOSIO_AUTH_CONFIG_<TOOLKIT>         per-toolkit auth_config_id from the dashboard
 - COMPOSIO_CALLBACK_URL                  OAuth callback URL Composio redirects to
+
+Every public function here is per-user: ``user_id`` is a real XO user id and is
+mandatory. There is no shared/sentinel user — passing an empty one raises.
+Isolation is Composio's: a session created with ``user_id`` only ever sees that
+user's connected accounts.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -24,11 +30,19 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 
-# Single-tenant sentinel. Matches the fallback in
-# services/composio/router.py's _resolve_user_id() so a session created here
-# sees the same connected_accounts a UI-initiated Connectors flow created
-# for "default_user".
-_DEFAULT_USER_ID = "default_user"
+def _require_user_id(user_id: Optional[str], what: str) -> str:
+    """Guard: every Composio call is scoped to one real user.
+
+    Raises rather than substituting a fallback — a missing user_id here used to
+    silently become the shared ``default_user`` bucket, which is exactly the
+    cross-tenant mixing this module must not do.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        raise ValueError(
+            f"composio.{what}: a real user_id is required (got {user_id!r})."
+        )
+    return uid
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +370,176 @@ def _toolkit_id_for_slug(slug: str) -> Optional[str]:
 # every runtime and every chat turn.
 
 
+# Composio sessions persist server-side and the API documents no TTL, so a
+# session we forget is a session that lives forever. Two consequences drive the
+# store below:
+#
+#   1. The id is persisted to disk, not just held in memory. Composio's docs
+#      say to "store the session ID and reuse it with composio.use()"; an
+#      in-memory-only cache re-mints one session per user on every restart and
+#      abandons the old one.
+#   2. invalidate_session() deletes the remote session before dropping the id,
+#      so the connect/disconnect path stops orphaning one session per toggle.
+#
+# The same file also holds each user's **agent proxy token** — the opaque id the
+# loopback MCP proxy resolves back to a user. It is a random 256-bit value, not
+# a signed one: there is nothing to forge and therefore no signing secret to
+# configure. It is deliberately *stable per user* and outlives the session id,
+# so an agent config written once stays valid across connector toggles and
+# restarts; only the session behind it is re-minted.
+#
+# File shape:
+#   {"version": 2,
+#    "sessions":     {user_id: session_id},
+#    "proxy_tokens": {proxy_token: user_id}}
+# A v1 document (sessions only) is read and upgraded on the next write. Same
+# lock + atomic-write discipline as action_prefs.py.
+#
+# This file DOES hold a secret now: a proxy token grants agent-level tool access
+# for its user, so it is chmod 0600 and lives under data/ (gitignored).
+
+_SESSIONS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "composio_sessions.json"
+
+# In-process mirrors of the file. Populated on first use; kept in sync on write.
 _SESSION_IDS: dict[str, str] = {}
+_PROXY_TOKENS: dict[str, str] = {}   # proxy_token -> user_id
+_SESSIONS_LOADED = False
+
+
+def _load_store() -> tuple[dict[str, str], dict[str, str]]:
+    """Read the persisted store as ``(sessions, proxy_tokens)``."""
+    from services.cowork_agent.visualizer.reader import read_json  # noqa: PLC0415
+
+    data = read_json(_SESSIONS_PATH)
+    if not isinstance(data, dict):
+        return {}, {}
+
+    def _str_map(raw: object) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in raw.items()
+            if isinstance(k, str) and isinstance(v, str) and k and v
+        }
+
+    # v1 had only "sessions"; the tokens map is simply absent and gets minted
+    # on demand, so no migration step is required.
+    return _str_map(data.get("sessions")), _str_map(data.get("proxy_tokens"))
+
+
+def _ensure_sessions_loaded() -> None:
+    global _SESSIONS_LOADED
+    if _SESSIONS_LOADED:
+        return
+    try:
+        sessions, tokens = _load_store()
+        _SESSION_IDS.update(sessions)
+        _PROXY_TOKENS.update(tokens)
+    except Exception as exc:  # never let a bad cache file break tool access
+        log.warning("composio: could not read session store: %s", exc)
+    _SESSIONS_LOADED = True
+
+
+def _write_store(mutate) -> None:
+    """Apply ``mutate(sessions, proxy_tokens)`` under the file lock and save.
+
+    Best-effort: a failure costs a re-mint on the next restart, never a failed
+    request.
+    """
+    from services.cowork_agent.visualizer.atomic_write import write_json_atomic  # noqa: PLC0415
+    from services.cowork_agent.visualizer.flock import locked  # noqa: PLC0415
+
+    try:
+        with locked(_SESSIONS_PATH):
+            # Re-read inside the lock so a concurrent worker's entry survives.
+            sessions, tokens = _load_store()
+            mutate(sessions, tokens)
+            write_json_atomic(
+                _SESSIONS_PATH,
+                {"version": 2, "sessions": sessions, "proxy_tokens": tokens},
+            )
+        # Tokens are credentials — keep the file owner-only.
+        try:
+            _SESSIONS_PATH.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        log.warning("composio: could not persist session store: %s", exc)
+
+
+def _persist_session_id(user_id: str, session_id: Optional[str]) -> None:
+    """Write (or remove) one user's session id."""
+    def _mutate(sessions: dict[str, str], _tokens: dict[str, str]) -> None:
+        if session_id:
+            sessions[user_id] = session_id
+        else:
+            sessions.pop(user_id, None)
+
+    _write_store(_mutate)
+
+
+def proxy_token_for_user(user_id: str) -> str:
+    """Return this user's stable agent proxy token, minting one if needed.
+
+    Opaque and random — the proxy resolves it by lookup, so a local process
+    cannot construct another user's token, and no shared signing secret exists
+    to manage or rotate.
+    """
+    uid = _require_user_id(user_id, "proxy_token_for_user")
+    _ensure_sessions_loaded()
+    for token, owner in _PROXY_TOKENS.items():
+        if owner == uid:
+            return token
+
+    token = secrets.token_urlsafe(32)
+    _PROXY_TOKENS[token] = uid
+
+    def _mutate(_sessions: dict[str, str], tokens: dict[str, str]) -> None:
+        # Another worker may have minted one first; prefer the persisted value.
+        for existing, owner in tokens.items():
+            if owner == uid:
+                _PROXY_TOKENS.pop(token, None)
+                _PROXY_TOKENS[existing] = uid
+                return
+        tokens[token] = uid
+
+    _write_store(_mutate)
+    # _mutate may have adopted a peer's token; return whatever we now hold.
+    for tok, owner in _PROXY_TOKENS.items():
+        if owner == uid:
+            return tok
+    return token
+
+
+def user_for_proxy_token(token: str) -> Optional[str]:
+    """Resolve an agent proxy token back to its user, or None if unknown."""
+    if not token:
+        return None
+    _ensure_sessions_loaded()
+    user_id = _PROXY_TOKENS.get(token)
+    if user_id:
+        return user_id
+    # Miss: another worker may have minted it since we loaded. Re-read once.
+    try:
+        _, tokens = _load_store()
+    except Exception:
+        return None
+    _PROXY_TOKENS.update(tokens)
+    return _PROXY_TOKENS.get(token)
+
+
+def _delete_remote_session(session_id: str, user_id: str) -> None:
+    """Ask Composio to drop the session. Best-effort — an unreachable API must
+    not block the local eviction that called us."""
+    try:
+        _composio().sessions.delete(session_id)
+        log.info("composio: deleted session %s for user=%s", session_id, user_id)
+    except Exception as exc:
+        log.warning(
+            "composio: could not delete session %s for user=%s (it may linger "
+            "server-side): %s", session_id, user_id, exc,
+        )
 
 
 def _pinned_connected_accounts(user_id: str) -> dict[str, list[str]]:
@@ -386,29 +569,48 @@ def _pinned_connected_accounts(user_id: str) -> dict[str, list[str]]:
 
 
 def invalidate_session(user_id: str) -> None:
-    """Evict the cached session for `user_id`. Call after any Connectors UI
-    state change (connect / disconnect / status flip) so the next agent
-    turn re-mints a session with the updated pin map."""
-    _SESSION_IDS.pop(user_id or _DEFAULT_USER_ID, None)
+    """Evict this user's session. Call after any Connectors UI state change
+    (connect / disconnect / status flip) so the next agent turn re-mints a
+    session with the updated pin map.
+
+    The remote session is deleted, not just forgotten: Composio sessions have
+    no documented expiry, so dropping the id alone would leave one orphan per
+    toggle. A no-op for an empty user_id — eviction is best-effort and never
+    worth raising over.
+    """
+    if not user_id:
+        return
+    _ensure_sessions_loaded()
+    session_id = _SESSION_IDS.pop(user_id, None)
+    _persist_session_id(user_id, None)
+    if session_id:
+        _delete_remote_session(session_id, user_id)
 
 
 def get_session(user_id: str):
     """Return Composio's session object for `user_id`.
 
-    Reuses an existing session (`composio.use(session_id)`) when we have
-    its id from a previous call, otherwise mints a new one
-    (`composio.create(user_id=…, connected_accounts=…)`) with the user's
-    ACTIVE Connected Accounts pinned. In-memory cache only — if
-    xo-cowork-api restarts, the next call re-mints.
+    Reuses an existing session (`composio.use(session_id)`) when we have its id
+    from a previous call, otherwise mints a new one
+    (`composio.create(user_id=…, connected_accounts=…)`) with the user's ACTIVE
+    Connected Accounts pinned.
+
+    The id survives restarts (see the session store above), so a bounce reuses
+    the same session rather than abandoning it. An id the API no longer
+    recognises is discarded and replaced.
     """
-    user_id = user_id or _DEFAULT_USER_ID
+    user_id = _require_user_id(user_id, "get_session")
+    _ensure_sessions_loaded()
     sid = _SESSION_IDS.get(user_id)
     if sid:
         try:
             return _composio().use(sid)
         except Exception as exc:
             log.debug("composio: use(%s) failed for user=%s: %s", sid, user_id, exc)
-            _SESSION_IDS.pop(user_id, None)  # stale id; fall through to create
+            # Stale id — Composio has already forgotten it, so there is nothing
+            # to delete. Drop it locally and fall through to create.
+            _SESSION_IDS.pop(user_id, None)
+            _persist_session_id(user_id, None)
     create_kwargs: dict[str, Any] = {"user_id": user_id}
     pinned = _pinned_connected_accounts(user_id)
     if pinned:
@@ -417,6 +619,7 @@ def get_session(user_id: str):
     new_id = getattr(session, "session_id", None) or getattr(session, "id", None)
     if new_id:
         _SESSION_IDS[user_id] = str(new_id)
+        _persist_session_id(user_id, str(new_id))
     return session
 
 
@@ -442,7 +645,7 @@ def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
         entry["headers"] = dict(headers)
     log.info(
         "composio: session %s for user=%s -> %s",
-        _SESSION_IDS.get(user_id or _DEFAULT_USER_ID, "?"), user_id, url,
+        _SESSION_IDS.get(user_id, "?"), user_id, url,
     )
     return entry
 
@@ -451,38 +654,29 @@ def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
 # Gateway install — openclaw / hermes
 # ---------------------------------------------------------------------------
 #
-# Both gateways accept MCP wiring at config time (not per request). To keep
-# the Composio API key out of these on-disk configs, we point both gateways
-# at xo-cowork-api's localhost MCP proxy (services/composio/mcp_proxy.py)
-# rather than at Composio's session URL directly. The proxy resolves user_id
-# server-side and injects x-api-key from .env at request time.
+# Every runtime points at xo-cowork-api's loopback MCP proxy, never at Composio
+# directly, so COMPOSIO_API_KEY is never written to an agent config file. The
+# proxy injects it from .env at request time (services/composio/mcp_proxy.py).
 #
-# Claude Code uses its own per-session mcp.json path
-# (services/cowork_agent/adapters/claude_code/mcp_config.py) and is NOT
-# routed through the proxy — its config file is per-turn and auto-deleted.
+# The URL carries an opaque per-user token — an MCP client calls the proxy with
+# no headers, so the path is the only place identity can ride. The proxy looks
+# the token up (no signature, no shared secret) and uses that user's session.
+#
+# Two layers of isolation, and the outer one is Composio's: the token selects a
+# user, and `sessions.create(user_id=...)` already bound that user's session to
+# their connected accounts.
 
 
 def _cowork_proxy_url(user_id: str | None = None) -> str:
-    """Localhost URL of the MCP reverse proxy that injects x-api-key
-    server-side. Trailing slash matches the routed paths in
-    services/composio/mcp_proxy.py and avoids 307 redirects.
+    """Loopback URL of the MCP proxy, scoped to ``user_id``.
 
-    Single-tenant (default): the bare ``/mcp/cowork-proxy/`` path — the proxy
-    resolves the user from process auth state at request time.
-
-    Multi-tenant: the caller's identity is baked into the path as an
-    HMAC-signed token (``/mcp/cowork-proxy/u/<token>``). The agent's MCP client
-    calls the proxy header-less, so the URL is the only place the user can be
-    carried; signing it means a co-resident process cannot swap in a different
-    user_id without COMPOSIO_STATE_SECRET. See services/composio/identity.py.
+    ``/mcp/cowork-proxy/u/<opaque-token>``. The token is stable per user, so a
+    config written once survives connector toggles and restarts — only the
+    Composio session behind it is re-minted.
     """
+    uid = _require_user_id(user_id, "_cowork_proxy_url")
     port = int(os.getenv("PORT", "5002"))
-    base = f"http://127.0.0.1:{port}/mcp/cowork-proxy"
-
-    from services.composio.identity import multi_tenant_enabled, sign_proxy_token
-    if user_id and multi_tenant_enabled():
-        return f"{base}/u/{sign_proxy_token(user_id)}"
-    return f"{base}/"
+    return f"http://127.0.0.1:{port}/mcp/cowork-proxy/u/{proxy_token_for_user(uid)}"
 
 
 def install_into_gateway(user_id: str, agent: str) -> dict[str, Any]:
@@ -509,7 +703,14 @@ def install_into_gateway(user_id: str, agent: str) -> dict[str, Any]:
                 "(no mcp_install capability)."
             ),
         }
-    return mod.install(_cowork_proxy_url(user_id))
+    try:
+        proxy_url = _cowork_proxy_url(user_id)
+    except Exception as exc:
+        # No user id. Report it as a normal not-ok result (the route turns it
+        # into a 422) rather than a 500 — actionable configuration, not a crash.
+        log.warning("composio: gateway install could not build proxy URL: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    return mod.install(proxy_url)
 
 
 def gateway_install_agents() -> list[str]:

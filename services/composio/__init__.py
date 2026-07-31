@@ -2,8 +2,8 @@
 Composio integration package — everything Composio lives here.
 
 - service.py           SDK wrapper: toolkit catalog, connections, sessions, MCP entry
-- identity.py          multi-tenant identity (bearer validation, signed proxy tokens)
-- session_identity.py  backend-minted opaque session ids for multi-tenant mode
+- identity.py          per-user identity (bearer validation, signed proxy tokens)
+- session_identity.py  backend-minted opaque session ids carrying that identity
 - action_prefs.py      per-user per-action enable/disable store
 - categories.py        Read-vs-Write classification of toolkit actions
 - router.py            REST endpoints under /api/connectors/composio
