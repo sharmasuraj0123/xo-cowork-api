@@ -72,21 +72,21 @@ The backend scaffolds the canonical tree (top-level docs + `memory/` + `.xo/`) f
 
 `AGENTS.md` (or `CLAUDE.md`, which is just `@AGENTS.md`) is the operating contract for every xo-project folder, and the first thing the agent reads every session. **Read it before doing anything else.** It covers:
 
-- **§2** — the canonical file map (top-level docs + `memory/` + `.xo/`)
+- **§2** — the canonical file map: top-level docs + `memory/` + the four-file `.xo/` contract, and where the machine-local runtime tier lives instead (outside the project, at `~/.xo/<pid>/`)
 - **§3** — first-boot behaviour: replacing `[TEMPLATE]` markers in `PROJECT.md` / `OBJECTIVES.md` / `PLAN.md` / `PROGRESS.md`
-- **§4** — the boot ritual (what to read, in what order, before answering)
+- **§4** — the boot ritual (what to read, in what order, before answering — the last two steps are API calls, not file reads)
 - **§5** — during-work conventions (and why there is no project-level `TASKS.json`)
 - **§6** — the six-step closing ritual
 - **§7** — `PROGRESS.md` format and the three logs
 - **§8** — memory discipline (semantic / episodic / procedural / working)
 - **§9** — hard rules
-- **§10** — the index → filter pattern for looking up past sessions
+- **§10** — the index → detail pattern for looking up past sessions, over the project endpoints
 
 The skill defers to AGENTS.md for all of these — read the section there rather than paraphrasing here.
 
 Two guardrails to internalize **before** opening AGENTS.md, since they apply from the moment the folder exists:
 
-1. **Never write to `.xo/`.** A background watcher service tails the runtime's native session logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos, then writes session events, list/timeline entries, todos, stats, and activity heartbeats on your behalf. Any agent write conflicts with the watcher, gets overwritten, or corrupts sync state. This applies even to `.xo/project.json` on first boot — the watcher clears its `_template: true` flag itself.
+1. **Never write to `.xo/`.** A background watcher service tails the runtime's native session logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos, then writes session events, list/timeline entries, todos, stats, and activity heartbeats on your behalf. Any agent write conflicts with the watcher, gets overwritten, or corrupts sync state. This applies even to `.xo/project.json` on first boot — the watcher clears its `_template: true` flag itself. Note that only part of what the watcher writes lands in `<project>/.xo/`: sessions, activity, stats and timeline are machine-local and live outside the project tree at `~/.xo/<pid>/`, so you read those over the API rather than by path (AGENTS.md §2, §10).
 2. **Work lives in the project folder.** Outputs scattered into `~/`, `/tmp/`, or sibling projects become orphaned from the project's memory, plan, and history — they don't get narrated in `PROGRESS.md`, don't get committed, and the next agent can't find them. If something genuinely must live outside, surface that to the user instead of doing it silently.
 
 ---

@@ -69,6 +69,62 @@ The **only** two trees an agent author touches are `config/agents/<name>/` and
 `services/cowork_agent/adapters/<name>/`. (`config/models/<name>/` is the
 Plane-A equivalent.) Everything else is framework.
 
+### 2.1 On-disk tiers — synced vs machine-local runtime
+
+Per-project state is split by *where it lives on disk*. This is a share-safety
+invariant enforced by the filesystem, not a convention:
+
+```
+~/xo-projects/<name>/.xo/     SYNCED — commit/shareable, the A2A channel
+  project.json                  identity {pid, name, owner_user_id, created_at}
+  todos.json                    coordination surface
+  peers.json                    collaborator roster (another service writes it)
+  agent.json                    per-project agent record (3 adapters write it)
+
+~/.xo/                        RUNTIME — machine-local, NEVER synced
+  registry.json                 pid → folder/path reverse map, rebuilt each tick
+  <pid>/                        keyed by project.json:pid
+    activity.json  stats.json  timeline*.jsonl
+    sync.json  remote-head.json  reserved relay seam (currently a no-op)
+    sessions/{sessionslist,sessions-augment}.json
+  workspace/                    cross-project aggregation
+```
+
+**Why outside the tree rather than a `.gitignore` line.** The goal is
+agent-to-agent collaboration where git history is the only channel. The project
+template ships no `.gitignore`, and the backup tarball only honours one for git
+projects — so a project without `.git/` would tar the whole telemetry firehose.
+Putting runtime physically outside every project tree makes leakage impossible
+rather than merely discouraged.
+
+**Roots** are env-driven and created on first read: `XO_PROJECTS_ROOT`
+(default `~/xo-projects`) and `XO_RUNTIME_ROOT` (default `~/.xo`). Both are in
+`.env.example`.
+
+**The chokepoint.** Every sessions path resolves through
+`project_layout.sessions_dir(name)`; all tier/path math lives in
+`services/cowork_agent/project_layout.py` and nowhere else. Adapters pass a
+**folder name** and never learn about pids or tiers — which is what let the
+runtime tier move with zero adapter edits. Conversely, any code that hand-builds
+`<project>/.xo/sessions` silently reads a location nothing writes any more.
+
+> This has already gone wrong twice. `codex` and `antigravity` were forked from
+> `claude_code` *before* the chokepoint refactor and inherited four hardcoded
+> paths, which cost codex its conversation resume and made antigravity invisible
+> to the watcher from turn two — through a textually clean merge.
+> `tests/test_path_chokepoint_guard.py` now fails the build on any hand-built
+> tier path outside a reasoned allowlist. **Keep it green by fixing paths, not by
+> widening the allowlist.** When adding an adapter by copying an existing one,
+> diff its paths against `claude_code`'s first.
+
+**Watcher ordering.** `project_json.fill_identity` must run before
+`project_runtime_dir` — the runtime root is keyed by the pid that call mints.
+Resolve it first and a new project keys runtime under the transitional
+folder-name fallback. Pinned by `tests/test_watcher_tick.py` for both the event
+loop and the activity loop.
+
+Design and rationale: `docs/xo-runtime-tier-restructure.md` (local, gitignored).
+
 ---
 
 ## 3. How dispatch works (Plane B)
@@ -181,22 +237,61 @@ AGENT_NAME=hermes python server.py                 # boot a specific backend
 **Validation playbook — run before every commit:**
 
 ```bash
-# 1. Import gate + route parity under each agent (expect 146 / 149 / 173 / 148)
-for a in claude_code openclaw hermes antigravity; do
-  AGENT_NAME=$a venv/bin/python -c "import server; \
-    print('$a', len(server.app.openapi()['paths']))"
+# 0. Test suite (deps: venv/bin/python -m pip install -r requirements-dev.txt)
+venv/bin/python -m pytest -q
+
+# 1. Import gate + route parity under each agent. One FRESH interpreter per
+#    agent: AGENT_NAME is resolved once and frozen at import (manifest cache,
+#    agent_env.ENV_FILE, sys.modules), so a loop inside one process silently
+#    tests the first agent five times.
+for a in claude_code openclaw hermes codex antigravity; do
+  AGENT_NAME=$a venv/bin/python -c "
+import server
+def walk(routes):
+    # Starlette 1.x hides mounted routers behind _IncludedRouter proxies that
+    # carry no .path, so you must recurse original_router. The naive form,
+    # {r.path for r in server.app.routes if hasattr(r,'path')}, sees only the
+    # ~15 top-level routes and returns the SAME number for every agent — it
+    # fails OPEN and would never catch a router that stopped mounting.
+    for r in routes:
+        o = getattr(r, 'original_router', None)
+        if o is not None:
+            yield from walk(o.routes)
+        elif hasattr(r, 'path'):
+            yield r
+print('$a', len({r.path for r in walk(server.app.routes)}),
+      len(server.app.openapi()['paths']))
+"
 done
 
-# 2. Modularity invariant (§6) — no agent name in core code. Upheld in review;
-#    a local AST guard can verify it if you have it (kept out of the repo, §6).
+# 2. Modularity invariant (§6) — no agent name in core code. The AST guard is
+#    committed: venv/bin/python -m pytest -q tests/test_modularity.py
 
 # 3. Smoke where data exists: list_models() per agent; /api/usage,
 #    /models/status, /channels/status, /providers/status, /api/sessions non-5xx
 #    (501 only where a capability is intentionally absent).
 ```
 
+Measured baseline for the current HEAD. The two columns are **different
+metrics** and the gap between them is currently 8 for every agent: the unique
+count also sees `Mount`s and the `include_in_schema=False` routes (`/docs`,
+`/redoc`, `/openapi.json`, `/docs/oauth2-redirect`, and the three setup-token
+endpoints), which never reach the schema. Always say which column you quote —
+past revisions of this doc and `CLAUDE.md` disagreed only because each had
+silently picked a different one:
+
+| agent | unique paths | openapi paths |
+|---|--:|--:|
+| claude_code | 159 | 151 |
+| openclaw | 159 | 151 |
+| hermes | 183 | 175 |
+| codex | 156 | 148 |
+| antigravity | 158 | 150 |
+
 Per-agent route counts differ by design (the route de-leak): non-hermes agents
 don't carry the `/api/channels/hermes/*` and `/api/config/hermes*` routes.
+`tests/test_import_parity.py` pins this whole matrix, and also asserts that the
+naive counting form cannot be used as the gate.
 
 ---
 
@@ -216,10 +311,11 @@ exceptions:
 - the legacy `/openclaw/usage` URL alias in `routers/cowork_agent/legacy/openclaw_usage.py`,
 - codex's legacy openclaw-gateway credential writes in `routers/auth/codex_setup.py`.
 
-> An AST-based guard for this invariant (ignores docstrings/comments and
-> `config.models.*` imports) is kept as local dev tooling, not committed. If you
-> have it, run it after touching core; otherwise verify the rule by hand against
-> the allowlist above.
+> The AST-based guard for this invariant (it ignores docstrings/comments and
+> `config.models.*` imports) is now committed as `tests/test_modularity.py` —
+> run `venv/bin/python -m pytest -q tests/test_modularity.py` after touching
+> core. It discovers the forbidden names from `list_adapters()` rather than
+> hardcoding them, so a new adapter tightens the guard with no edit.
 
 ---
 
@@ -254,6 +350,7 @@ The agent-modular refactor was finished and tidied:
   is openclaw-specific) and allowlisted.
 - **Dead code removed** — the unused `seed_openclaw_status` alias.
 - **Modularity invariant documented** — §6 codifies "no agent name in core
-  code"; a local AST guard (kept out of the repo) can check it.
+  code"; an AST guard can check it (since committed as
+  `tests/test_modularity.py`).
 
 Full record: `docs/refactor/STATUS.md` and `HANDOFF.md` (local).

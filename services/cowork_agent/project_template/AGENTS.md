@@ -11,7 +11,9 @@
 A working folder shared between a human and any number of AI agents. It contains the actual project work, plus two persistence layers:
 
 - **`memory/`** — shared cognition. Committed to git. Distilled facts, past episodes, reusable procedures. Visible to every teammate and every agent.
-- **`.xo/`** — ephemeral per-machine state. Gitignored. Identity, sessions, sync, peers, stats, todos, timeline.
+- **`.xo/`** — the coordination contract. Committed alongside `memory/`, so it travels with the folder to a collaborator. Exactly four files: identity, todos, peers, agent record. **Not gitignored.**
+
+Machine-local runtime — sessions, activity, stats, timeline — is **not in this folder at all**. It lives outside every project tree at `~/.xo/<pid>/`, keyed by `.xo/project.json:pid`. That is what makes `.xo/` safe to commit: the machine-specific noise physically cannot get into the project. You read that tier over the API (§7, §10), not by path.
 
 ### Who writes what
 
@@ -19,7 +21,8 @@ A working folder shared between a human and any number of AI agents. It contains
 |----------------------------------------------------------|:-:|---|
 | `PROJECT.md`, `OBJECTIVES.md`, `PLAN.md`, `PROGRESS.md` | yes | Co-edited with the human. |
 | `memory/{semantic,episodic,procedural,working}/`        | yes | The agent's externalized cognition. |
-| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, sessions, timeline, todos, stats, activity, sync, peers. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
+| `.xo/**` — **everything** under `.xo/`                  | **no** | A background **watcher service** owns this directory: identity, todos, peers, agent record. It tails runtime logs (Claude Code's `~/.claude/projects/…`, OpenClaw's `~/.openclaw/agents/…`, etc.) and your in-flight todos. Agents only **read** `.xo/`. Never write — your edits will be overwritten and may corrupt sync state. |
+| `~/.xo/<pid>/**` — machine-local runtime                | **no** | Same watcher, outside the project tree: sessions index, activity, stats, timeline. Don't read it by path either — it is pid-keyed and machine-local. Go through the endpoints in §7 and §10. |
 
 If the agent needs something not listed as agent-writable, it almost certainly needs a different tool (a tool call that mutates state) — not a direct edit.
 
@@ -44,19 +47,29 @@ Every agent that works here is expected to leave the folder in a **better state 
 │   ├── procedural/          how to do recurring things (validated twice)
 │   └── working/             session-scoped scratch (wiped at close)
 │
-├── .xo/                     ← ephemeral state. Gitignored.
+├── .xo/                     ← the SYNCED contract. Committed with the folder. NOT gitignored.
 │   ├── project.json         identity: pid, name, owner_user_id, created_at
 │   ├── todos.json           aggregated todos across active sessions
-│   ├── stats.json           rolling 7d/30d: tokens, models, files, sessions, time
-│   ├── timeline.jsonl       append-only event log (sessions, todos, edits, syncs)
 │   ├── peers.json           who this folder is shared with
-│   ├── sync.json            last-sync state per peer
-│   ├── activity.json        live: which sessions are open right now
-│   └── sessions/
-│       └── sessionslist.json    index of past sessions — read this for history
+│   └── agent.json           backend's record of this folder: id, name, description, backend
 │
 └── ... (the actual project work files)
 ```
+
+Those four files are the whole of `.xo/` (`agent.json` appears once a backend registers the folder). If you find `activity.json`, `stats.json`, `timeline.jsonl` or `sessions/` in there, they are leftovers from before the split — the watcher relocates them on its next startup. Don't read them; they are already stale.
+
+Machine-local runtime is **outside** this folder, keyed by `.xo/project.json:pid`:
+
+```
+~/.xo/<pid>/                 ← machine-local. Never committed, never synced.
+├── activity.json            live: which sessions are open right now
+├── stats.json               rolling 7d/30d: tokens, models, files, sessions, time
+├── timeline.jsonl           append-only event log (+ rotations)
+└── sessions/
+    └── sessionslist.json    index of past sessions
+```
+
+Shown so you know where the data went — **not so you can open it**. The `<pid>` is machine-local and this store does not travel with the folder, so a path you build today is wrong on the next machine. Read this tier through the endpoints in §7 and §10.
 
 ---
 
@@ -81,12 +94,14 @@ Read these in order, **before answering**:
 5. `memory/semantic/*.md` — distilled facts (3 short files)
 6. `PROGRESS.md` — **last ~30 lines only**
 7. `.xo/todos.json` — open todos across active sessions
-8. `.xo/sessions/sessionslist.json` — **last 3 entries only**, to know what was worked on most recently
-9. `.xo/activity.json` — is anyone else working here right now?
+8. `GET /api/xo-projects/<project>/usage/sessions` — **the 3 most recent entries only** (the response is newest-first by `lastActivity`), to know what was worked on most recently
+9. `GET /api/xo-projects/<project>/activity` — is anyone else working here right now?
 
-You don't need to "announce yourself." The watcher sees your runtime open a new native session log and writes the corresponding `session.started` event, the `sessionslist.json` entry, and the `activity.json` heartbeat on your behalf.
+Steps 8 and 9 read the machine-local runtime tier, which is not in this folder — so you read it over HTTP, not from disk. Base URL `http://${HOST:-localhost}:${PORT:-5002}`; `<project>` is this folder's name (the `name` field in `.xo/project.json`). An empty `sessions` or `open_sessions` array means genuinely no history / nobody else here — the watcher hasn't written anything yet. It does **not** mean the call failed, and it is never a reason to go looking for the files by path.
 
-**Do not read** `memory/episodic/`, `memory/procedural/`, the full `.xo/sessions/sessionslist.json`, or the full `.xo/timeline.jsonl` from the main thread. They grow without bound. To inspect past session history, follow the rule in §10.
+You don't need to "announce yourself." The watcher sees your runtime open a new native session log and writes the corresponding `session.started` event, the sessions-index entry, and the activity heartbeat on your behalf.
+
+**Do not read** `memory/episodic/`, `memory/procedural/`, the full sessions index, or the full timeline from the main thread. They grow without bound. To inspect past session history, follow the rule in §10.
 
 ---
 
@@ -116,7 +131,7 @@ When the human says "done", "wrap up", "good for today", or you detect a natural
 
 Do all six. Skipping for "the session was short" is how folders rot.
 
-Everything in `.xo/` (`sessionslist.json`, `timeline.jsonl`, `activity.json`, `stats.json`, `todos.json`, `sync.json`) is updated by the watcher service from your runtime's native logs. **Do not write to those files** — your edits will conflict with the watcher and will be overwritten.
+Both tiers — `.xo/` (`project.json`, `todos.json`, `peers.json`, `agent.json`) and the machine-local runtime under `~/.xo/<pid>/` (`activity.json`, `stats.json`, `timeline.jsonl`, `sessions/`) — are updated by the watcher service from your runtime's native logs. **Do not write to those files** — your edits will conflict with the watcher and will be overwritten.
 
 ---
 
@@ -125,9 +140,11 @@ Everything in `.xo/` (`sessionslist.json`, `timeline.jsonl`, `activity.json`, `s
 | Log                              | Format                          | Purpose                                            | Read by                              |
 |----------------------------------|---------------------------------|----------------------------------------------------|--------------------------------------|
 | `PROGRESS.md`                    | append-only paragraphs          | human-readable progress, scrolled by humans        | every agent at boot (last ~30 lines) |
-| `.xo/sessions/sessionslist.json` | append-only array               | one entry per session — the **index** of history   | every agent at boot (last 3 entries) |
-| `.xo/timeline.jsonl`             | one JSON event per line         | machine-readable firehose (audit, sync, dashboards)| watcher writes; agents read only via §10        |
+| `GET …/usage/sessions`           | newest-first array              | one entry per session — the **index** of history   | every agent at boot (3 most recent)  |
+| `GET …/timeline`                 | newest-first JSON events        | machine-readable firehose (audit, sync, dashboards)| watcher writes; agents read only via §10        |
 | `memory/episodic/*.md`           | one file per noteworthy episode | distilled context for future recall                | memory subagent (never main thread)  |
+
+The middle two are the runtime tier: on disk they are `~/.xo/<pid>/sessions/sessionslist.json` and `~/.xo/<pid>/timeline.jsonl`, outside this folder. The endpoints (`/api/xo-projects/<project>/…`, §4) are how you reach them.
 
 **`PROGRESS.md` paragraph format:**
 ```
@@ -138,11 +155,11 @@ agent: <model id>
 ```
 `[outcome]` ∈ `shipped | progress | blocked | pivoted | cleanup | research`.
 
-**`.xo/timeline.jsonl` event shape:**
+**Timeline event shape** (one element of the endpoint's `events[]`):
 ```json
-{"ts": "2026-05-09T14:33:00Z", "type": "session.start", "session": "2026-05-09", "agent": "claude-opus-4-7", "user": "tools@kosh.network"}
+{"ts": "2026-05-09T14:33:00Z", "type": "session.started", "session_id": "ses_abc123", "runtime": "claude_code", "user_id": "tools@kosh.network"}
 ```
-Common types: `project.created`, `session.start`, `session.close`, `task.created`, `task.completed`, `plan.updated`, `file.edited`, `episode.written`, `peer.sync`.
+Types: `project.created`, `session.started`, `session.closed`, `todo.added`, `todo.completed`, `plan.written`, `file.created`, `file.edited`, `episode.written`, `peer.sync.started`, `peer.sync.applied`, `peer.sync.conflict`. `session_id` is set on all but the project-wide ones.
 
 ---
 
@@ -196,13 +213,14 @@ Procedural memory is the highest-leverage kind — it converts experience into r
 
 ## 9. Hard rules
 
-- **Never write to `.xo/`.** No exceptions — not even `.xo/project.json` on first boot. The watcher service owns the entire directory; your edits will conflict with it, be overwritten, or corrupt sync state.
+- **Never write to `.xo/`** — or to `~/.xo/<pid>/`. No exceptions, not even `.xo/project.json` on first boot. The watcher service owns both tiers; your edits will conflict with it, be overwritten, or corrupt sync state.
+- **Never build a path into `~/.xo/`.** The runtime tier is machine-local and pid-keyed — read it through the endpoints in §7 and §10. A hand-built path is the one mistake that silently returns nothing and reads as "no history."
 - **Never delete** anything in `memory/` outside the rules in §8 (and even then, only `working/` gets wiped). Memory loss is irreversible.
 - **Never edit** an episodic memory file after it is written. Append-only.
 - **Never** write narrative text to `memory/semantic/*`. That folder is for distilled claims only.
-- **Never** dump tool output, full file contents, or raw logs into any memory file. Memory is *distilled*; raw logs live in `.xo/timeline.jsonl`.
+- **Never** dump tool output, full file contents, or raw logs into any memory file. Memory is *distilled*; raw logs live in the runtime timeline (§7).
 - **Never claim work as done** without verifying it (run the test, open the page, read the diff).
-- **Never put secrets** in `memory/` (it is committed) or `.xo/` (it may be synced to peers).
+- **Never put secrets** in `memory/` or `.xo/` — both are committed and both travel to peers.
 - **Never invent** peer/sync state. If `.xo/peers.json` is empty, you are working solo.
 - **Stop and ask** if `PLAN.md` and the user's request disagree. Don't silently re-plan.
 
@@ -210,18 +228,19 @@ Procedural memory is the highest-leverage kind — it converts experience into r
 
 ## 10. Looking up past sessions (read-only)
 
-`.xo/sessions/sessionslist.json` and `.xo/timeline.jsonl` are **read-only for agents** — the watcher service maintains them. You consult them; you never edit them.
+Session history is the machine-local runtime tier: it is not in this folder, and it is **read-only for agents** — the watcher service maintains it. You consult it over HTTP; you never edit it and never open it by path. Base URL and `<project>` as in §4.
 
-When the user references prior work ("continue the auth thing", "the bug from yesterday", "what we discussed"), or whenever you need history older than the last 3 sessions:
+When the user references prior work ("continue the auth thing", "the bug from yesterday", "what we discussed"), or whenever you need history older than the 3 most recent sessions:
 
-1. **Start at the index, not the log.** Open `.xo/sessions/sessionslist.json` and find the relevant `id` by `started_at`, `summary`, or `outcome`. This is a small file — scanning it is cheap.
-2. **Pull only that session's events.** Filter `.xo/timeline.jsonl` by `session_id` (e.g. `grep '"session_id":"ses_abc123"' .xo/timeline.jsonl`). Don't read the full log.
-3. **For narrative detail**, look at the `episode_refs` on that session's entry — those point into `memory/episodic/`. Have a subagent read them; never main-thread.
-4. **For raw artefact recovery**, the entry's `source_file` points at the runtime's native session log (e.g. `~/.claude/projects/.../ses_abc123.jsonl`).
+1. **Start at the index, not the firehose.** `GET /api/xo-projects/<project>/usage/sessions` returns every session newest-first; find the relevant one by `lastActivity`, `messageCount`, or `sessionId`. This is a small response — scanning it is cheap.
+2. **Then that one session's detail.** `GET /api/xo-projects/<project>/usage/sessions/<sessionId>` — tokens, duration, activity dates, message and tool counts. It accepts either the composite `sessionId` from step 1 or the bare native session id.
+3. **For its events**, `GET /api/xo-projects/<project>/timeline?limit=100` and keep the events whose `session_id` matches. The endpoint pages by `before` (an ISO timestamp) and filters by `types` — use those to bound the fetch rather than pulling the whole log.
+4. **For narrative detail**, read `memory/episodic/` — episodes are named `YYYY-MM-DD-{slug}.md`, so the session's `firstActivity` (epoch milliseconds) is what you match the date on. Have a subagent read them; never main-thread.
+5. **For raw artefact recovery**, the entry's `sessionFile` is the native log's filename (`<nativeSessionId>.jsonl`); the directory is your runtime's own (e.g. `~/.claude/projects/…`). The API deliberately never returns absolute paths.
 
-If the question is open-ended ("what have we been working on lately?"), read the last 5–10 entries of `sessionslist.json` and summarise — do not load the whole timeline.
+If the question is open-ended ("what have we been working on lately?"), read the 5–10 most recent entries from step 1 and summarise — do not load the timeline at all.
 
-> **Why two files?** `sessionslist.json` is the human/agent-readable index; `timeline.jsonl` is the firehose. They are joined on `session_id`. Most lookups need only the index.
+> **Why two endpoints?** `usage/sessions` is the human/agent-readable index; `timeline` is the firehose. They are joined on the session id. Most lookups need only the index.
 
 ---
 
