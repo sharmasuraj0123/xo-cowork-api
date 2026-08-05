@@ -12,7 +12,15 @@ Endpoints:
   POST /api/connectors/magicpath/logout     — `magicpath-ai logout` (idempotent)
   GET  /callback                            — auto-login landing for the MagicPath redirect (dispatcher)
 
-/callback ordering invariant: MagicPath's web flow always redirects the browser
+Login flow: login-url deliberately omits MagicPath's ``?port=`` parameter, so
+after the user approves, MagicPath's page displays the authorization code with
+a copy button instead of redirecting to ``http://localhost:<port>/callback`` —
+that redirect only works when the user's browser can reach this API's port,
+which a remote workspace without port forwarding cannot offer. The user pastes
+the code into POST /login. /callback is retained for setups that do forward
+the port (the redirect then auto-completes login).
+
+/callback ordering invariant: when MagicPath's web flow does redirect, it goes
 to ``http://localhost:<port>/callback?code=<JWT>`` — the same path as the Vercel
 OAuth callback (connectors/vercel.py). This router must be mounted BEFORE
 ``vercel_router`` (see routers/cowork_agent/__init__.py): the dispatcher below
@@ -42,6 +50,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from services.cowork_agent import skill_installer
 from utils.commands import CommandResult, run
 
 from .vercel import vercel_oauth_callback
@@ -58,15 +67,17 @@ def _int_env(name: str, fallback: int) -> int:
 
 
 WEB_URL = (os.getenv("MAGICPATH_WEB_URL") or "https://www.magicpath.ai").rstrip("/")
-# Port baked into the login redirect — must be the browser-reachable forwarded
-# port of THIS API, because MagicPath redirects to localhost:<port>/callback.
+# Informational only since login-url dropped ?port= (manual-code flow). Kept in
+# the login-url response shape and relevant to /callback when a user forwards
+# this API's port themselves.
 LOGIN_PORT = _int_env("MAGICPATH_LOGIN_PORT", _int_env("PORT", 5002))
 MAGICPATH_CLI = (os.getenv("MAGICPATH_CLI_PATH") or "magicpath-ai").strip()
 
 SKILL_SOURCE = "magicpathai/agent-skills"
 SKILL_NAME = "magicpath"
-# Universal (agent-agnostic) install target of `npx skills add -g`; per-agent
-# symlinks into each agent's own skills dir are the skills CLI's job.
+# Universal (agent-agnostic) install target of `npx skills add -g`. The skills
+# CLI only symlinks agents it can auto-detect (e.g. ~/.claude); setup then runs
+# skill_installer.link_global_skill so every installed registry agent gets it.
 SKILL_MD = Path.home() / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
 
 SETUP_TIMEOUT_SECONDS = 300
@@ -189,19 +200,28 @@ def _step_error(result: CommandResult, failure_slug: str) -> str:
 
 async def _install_skill() -> dict:
     if SKILL_MD.is_file():
-        return {"ok": True, "skipped": True, "error": None}
-    result = await run(
-        ["npx", "-y", "skills", "add", SKILL_SOURCE, "--skill", SKILL_NAME, "-g", "-y"],
-        timeout=SETUP_TIMEOUT_SECONDS,
-        env={**os.environ, "CI": "1"},
-    )
-    if not result.ok or not SKILL_MD.is_file():
-        log.warning(
-            "magicpath: skill install failed (exit %s): %s",
-            result.returncode, result.output[:2000],
+        step = {"ok": True, "skipped": True, "error": None}
+    else:
+        result = await run(
+            ["npx", "-y", "skills", "add", SKILL_SOURCE, "--skill", SKILL_NAME, "-g", "-y"],
+            timeout=SETUP_TIMEOUT_SECONDS,
+            env={**os.environ, "CI": "1"},
         )
-        return {"ok": False, "skipped": False, "error": _step_error(result, "skill_install_failed")}
-    return {"ok": True, "skipped": False, "error": None}
+        if not result.ok or not SKILL_MD.is_file():
+            log.warning(
+                "magicpath: skill install failed (exit %s): %s",
+                result.returncode, result.output[:2000],
+            )
+            return {
+                "ok": False, "skipped": False,
+                "error": _step_error(result, "skill_install_failed"),
+                "agents": {},
+            }
+        step = {"ok": True, "skipped": False, "error": None}
+    # Runs on the skipped path too: an agent installed after the universal copy
+    # landed still needs its symlink on the next setup call.
+    step["agents"] = await asyncio.to_thread(skill_installer.link_global_skill, SKILL_NAME)
+    return step
 
 
 async def _install_cli() -> dict:
@@ -286,17 +306,21 @@ async def magicpath_setup() -> JSONResponse:
 
 @router.get("/api/connectors/magicpath/login-url")
 async def magicpath_login_url() -> JSONResponse:
-    login_url = f"{WEB_URL}/auth/cli?port={LOGIN_PORT}"
+    # No ?port= on purpose: without a valid port param MagicPath's auth page
+    # skips the http://localhost:<port>/callback redirect and instead displays
+    # the authorization code with a copy button — the only flow that works when
+    # this API runs on a remote workspace with no port forward. `port` stays in
+    # the response for shape compatibility; /callback still handles redirects
+    # for setups that do forward the port.
     return JSONResponse({
-        "login_url": login_url,
+        "login_url": f"{WEB_URL}/auth/cli",
         "port": LOGIN_PORT,
         "cli_installed": _cli_binary() is not None,
         "instructions": (
-            f"Open login_url in the browser that forwards port {LOGIN_PORT} to this "
-            "API. After you approve, MagicPath redirects to "
-            f"http://localhost:{LOGIN_PORT}/callback and login completes automatically. "
-            "If that page does not load, copy the full URL from the address bar and "
-            'POST it as {"code": "<url>"} to /api/connectors/magicpath/login.'
+            "Open login_url in any browser and approve the request. MagicPath "
+            "then displays an authorization code with a copy button. Paste that "
+            'code as {"code": "<code>"} to /api/connectors/magicpath/login. '
+            "No port forwarding is needed."
         ),
     })
 

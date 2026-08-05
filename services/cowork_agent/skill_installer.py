@@ -8,8 +8,14 @@ errors — matches the rclone/usage-sync bootstrap pattern in server.py.
 Install targets are resolved from each discovered agent manifest's ``home_dir``
 (no backend name is hardcoded here): a skill lands in ``<home_dir>/skills/<name>``
 for every agent whose home dir exists on the host.
+
+``link_global_skill()`` applies the same target rule to skills installed
+universally by ``npx skills add -g`` (under ``~/.agents/skills/``), symlinking
+them into every installed agent — including agents the skills CLI cannot
+auto-detect.
 """
 
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +23,7 @@ from services.cowork_agent.registry.agent_registry import all_agents, get_active
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_DIR = _REPO_ROOT / ".agents" / "skills"
+GLOBAL_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 # Skills to install globally so any agent in any project can invoke them.
 # Each entry must match a directory under `.agents/skills/` containing a
@@ -80,3 +87,48 @@ def install_xo_skills() -> None:
                 print(f"✅ {label} skill installed: {target}")
             except Exception as exc:
                 print(f"⚠️ {label} skill install failed ({target}): {exc}")
+
+
+def link_global_skill(skill_name: str) -> dict[str, str]:
+    """
+    Symlink a universally installed skill into every installed agent's skill dir.
+
+    ``npx skills add -g`` writes the canonical copy to ``~/.agents/skills/<name>``
+    but only symlinks the agent CLIs it can auto-detect; agents it has never
+    heard of get nothing. This walks every discovered manifest and creates
+    ``<home_dir>/skills/<name>`` → the canonical copy, for agents whose home
+    dir already exists — a missing home means that CLI isn't installed, and a
+    home is never created here. Idempotent: an existing entry — the skills
+    CLI's own symlink or a real directory — is left untouched; only a dangling
+    symlink is replaced. Symlinks are relative, matching the skills CLI's own
+    convention.
+
+    Returns per-agent outcomes:
+    ``{agent: "linked" | "already_installed" | "no_home" | "failed"}``.
+    """
+    source = GLOBAL_SKILLS_DIR / skill_name
+    outcomes: dict[str, str] = {}
+    if not (source / "SKILL.md").is_file():
+        print(f"⚠️ global skill source missing or invalid: {source}")
+        return outcomes
+
+    for manifest in all_agents():
+        label = manifest.name
+        if not manifest.home_dir.is_dir():
+            outcomes[label] = "no_home"
+            continue
+        target = manifest.home_dir / "skills" / skill_name
+        try:
+            if target.is_symlink() and not target.exists():
+                target.unlink()  # dangling link — the canonical copy moved; relink
+            if target.exists():
+                outcomes[label] = "already_installed"
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.path.relpath(source, target.parent), target_is_directory=True)
+            print(f"✅ {label} skill linked: {target} → {source}")
+            outcomes[label] = "linked"
+        except OSError as exc:
+            print(f"⚠️ {label} skill link failed ({target}): {exc}")
+            outcomes[label] = "failed"
+    return outcomes
