@@ -1,0 +1,20 @@
+# XO Cowork API — development / test dependencies
+#
+# Install into the project venv (system python3 lacks fastapi):
+#
+#     venv/bin/python -m pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Test runner. Python 3.14 support landed in pytest 8.4 and this box runs 3.14,
+# so 8.4 is the floor. The <9 ceiling keeps a major bump from silently changing
+# collection or fixture semantics under a suite that leans on autouse ordering.
+pytest>=8.4,<9
+
+# Deliberately NOT here:
+#
+# * pytest-asyncio — nothing in the suite needs an async test runner.
+#   `Watcher.tick()` is a plain sync method and is the whole payload; the async
+#   wrapper `Watcher.run()` is an unbounded poll loop and is never tested.
+# * httpx / anyio — already runtime deps in requirements.txt, which is
+#   everything `starlette.testclient` needs.
