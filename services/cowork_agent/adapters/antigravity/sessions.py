@@ -1,9 +1,14 @@
 """
 Antigravity (agy) sessions capability.
 
-agy tees its sessions into xo-projects (``.xo/sessions/sessionslist.json``, tagged
+agy tees its sessions into the project's ``sessionslist.json`` (tagged
 ``backend:"antigravity"``), so the generic project-tied scan applies —
-``USES_PROJECT_SESSIONS = True``. The native message store is the per-conversation
+``USES_PROJECT_SESSIONS = True``. That index lives in the **runtime tier**
+(``~/.xo/<pid>/sessions/sessionslist.json``), not inside the project tree: every
+path here resolves through ``project_layout.sessions_dir(<project-name>)``, which
+is the single place the synced-vs-runtime tier decision is made. Never hand-build
+``<project>/.xo/sessions`` — that is the pre-split location nothing writes any
+more. The native message store is the per-conversation
 transcript ``brain/<nativeSessionId>/.system_generated/logs/transcript_full.jsonl``
 (keyed by conversation uuid, not by an encoded cwd path like claude_code).
 
@@ -22,7 +27,10 @@ from services.cowork_agent.adapters.antigravity import transcript as _t
 from services.cowork_agent.adapters.antigravity.paths import transcript_path
 from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
 from services.cowork_agent.helpers import strip_workspace_preamble
-from services.cowork_agent.project_layout import xo_projects_root
+from services.cowork_agent.project_layout import (
+    sessions_dir as _xo_sessions_dir,
+    xo_projects_root,
+)
 
 USES_PROJECT_SESSIONS = True
 
@@ -280,7 +288,7 @@ def _persist_session_directory(session_id: str, directory: str) -> bool:
         for agent_dir in projects_root.iterdir():
             if not agent_dir.is_dir() or agent_dir.name.startswith("."):
                 continue
-            idx_path = _resolve_index_path(agent_dir / ".xo" / "sessions")
+            idx_path = _resolve_index_path(_xo_sessions_dir(agent_dir.name))
             if idx_path and _try_index(idx_path):
                 return True
     return False

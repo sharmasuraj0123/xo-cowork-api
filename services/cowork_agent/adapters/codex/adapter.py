@@ -180,7 +180,7 @@ def find_session_key_for_session_id(session_id: str) -> str | None:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("."):
             continue
-        sessions_base = entry / ".xo" / "sessions"
+        sessions_base = _xo_sessions_dir(entry.name)
         # Try new name first, then legacy
         for fname in ("sessionslist.json", "sessions.json"):
             index_path = sessions_base / fname
