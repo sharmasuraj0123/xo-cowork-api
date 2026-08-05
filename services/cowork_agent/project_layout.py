@@ -36,11 +36,15 @@ Concerns:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from services.cowork_agent.helpers import normalize_agent_id
+
+logger = logging.getLogger(__name__)
 
 # ── Template source ────────────────────────────────────────────────────────────
 
@@ -116,9 +120,69 @@ def xo_runtime_root() -> Path:
     return root
 
 
+# The runtime key is a single path segment joined straight into the runtime home,
+# and it comes from ``project.json`` — which is the SYNCED tier. That file is
+# designed to travel between machines and a restore drops a snapshot's copy into
+# place wholesale, so its ``pid`` is untrusted input. An absolute or traversing
+# value silently redirects every runtime write (``Path("~/.xo") / "/etc/cron.d"``
+# is just ``/etc/cron.d``), and the runtime writers ``mkdir(parents=True)`` before
+# writing — so a bad key is an attacker-chosen *write*, not a bad read. Keys are
+# minted as UUIDs, so a conservative charset costs nothing.
+
+_SAFE_RUNTIME_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _truncate(value: str, limit: int = 64) -> str:
+    """Shorten an untrusted value for log/error output (it may be huge)."""
+    return value if len(value) <= limit else value[:limit] + "...(truncated)"
+
+
+def _is_safe_runtime_key(value: str) -> bool:
+    """True iff ``value`` is safe to use as a single runtime path segment.
+
+    Accepts UUID-shaped pids (the minted form) and the same conservative
+    ``[A-Za-z0-9_-]{1,64}`` shape the fallback key — ``normalize_agent_id`` —
+    already produces. That charset excludes ``/``, ``\\``, ``.`` and NUL, so
+    absolute paths, ``..`` traversal and the ``.``/``..`` self-references cannot
+    survive it; the explicit checks first just make the intent unmissable.
+    """
+    if not value:
+        return False
+    if any(bad in value for bad in ("/", "\\", "\x00")):
+        return False
+    if "." in value:  # covers "." and ".." as well as any dotted segment
+        return False
+    return bool(_SAFE_RUNTIME_KEY.fullmatch(value))
+
+
 def runtime_dir(pid: str) -> Path:
-    """Per-project runtime directory ``~/.xo/<pid>/`` (pid-keyed)."""
-    return xo_runtime_root() / pid
+    """Per-project runtime directory ``~/.xo/<pid>/`` (pid-keyed).
+
+    ``pid`` must be a single safe segment (see :func:`_is_safe_runtime_key`).
+    Callers holding an untrusted value straight out of ``project.json`` should
+    resolve it through :func:`runtime_key` / :func:`project_runtime_dir`, which
+    sanitise and fall back; here an unusable key raises ``ValueError`` rather
+    than resolving to a path outside the runtime home.
+    """
+    root = xo_runtime_root()
+    key = str(pid)
+    if not _is_safe_runtime_key(key):
+        raise ValueError(
+            f"unsafe runtime key {_truncate(key)!r}: expected a single "
+            "[A-Za-z0-9_-]{1,64} path segment (resolve untrusted pids via runtime_key)"
+        )
+    target = (root / key).resolve()
+    # Belt and braces. The charset check above already makes escape impossible,
+    # but the clamp is what keeps a future caller honest — and it also catches a
+    # symlinked ``<root>/<key>`` pointing out of the runtime home, which the
+    # charset check cannot see.
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise ValueError(
+            f"runtime key {_truncate(key)!r} resolves outside the runtime home {root}"
+        ) from None
+    return target
 
 
 def runtime_sessions_dir(pid: str) -> Path:
@@ -147,12 +211,26 @@ def runtime_key(name: str) -> str:
     applies in the brief pre-mint window on a brand-new project, and the
     startup migration + per-tick registry reconcile it. Runtime is
     machine-local, so a short-lived folder-name key is harmless.
+
+    The pid is validated before it is handed to the path layer: ``project.json``
+    is synced, so a corrupt or hostile copy can arrive from another machine or a
+    snapshot restore. An unusable pid falls back to the same folder-name key —
+    wrong-but-contained beats redirecting every runtime write out of the runtime
+    home.
     """
     meta = load_project(name)
     if isinstance(meta, dict):
         pid = meta.get("pid")
         if pid and not meta.get("_template", False):
-            return str(pid)
+            key = str(pid)
+            if _is_safe_runtime_key(key):
+                return key
+            logger.warning(
+                "project %s: ignoring unsafe pid %r in .xo/project.json; "
+                "keying runtime by folder name instead",
+                name,
+                _truncate(key),
+            )
     return normalize_agent_id(name)
 
 
