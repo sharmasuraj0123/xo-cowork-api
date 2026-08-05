@@ -3,9 +3,9 @@ OpenClaw model listing (`/api/models`).
 
 One model row per agent entry under ``~/.openclaw/agents/`` so the UI can
 target ``<prefix>/<agentId>``. Rows are labelled with the *active* agent's
-model prefix and provider name, which is why ``claude_code`` (which has no
-native model store of its own) re-exports this listing — see
-``adapters/claude_code/models.py``.
+model prefix, provider name and model capabilities, which is why
+``claude_code`` (which has no native model store of its own) re-exports this
+listing — see ``adapters/claude_code/models.py``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 from services.cowork_agent.registry.agent_registry import get_active_agent
 from services.cowork_agent.helpers import normalize_agent_id
 from services.cowork_agent.adapters.openclaw.store import list_agent_entries, load_openclaw_config
-from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR, OPENCLAW_MODEL_CAPABILITIES
+from services.cowork_agent.adapters.openclaw.paths import AGENTS_DIR
 
 _AGENT = get_active_agent()
 
@@ -44,7 +44,10 @@ def list_models() -> list[dict]:
                     "id": f"{prefix}/{aid}",
                     "name": label,
                     "provider_id": _AGENT.name,
-                    "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
+                    # Capabilities come from the ACTIVE manifest, not openclaw's:
+                    # the re-exporting agents (claude_code/codex/antigravity) must
+                    # advertise their own context window and vision support.
+                    "capabilities": dict(_AGENT.model_capabilities),
                     "pricing": {"prompt": 0, "completion": 0},
                     "metadata": {"openclaw_agent_id": aid},
                 }
@@ -56,7 +59,7 @@ def list_models() -> list[dict]:
                 "id": f"{prefix}/main",
                 "name": "main",
                 "provider_id": _AGENT.name,
-                "capabilities": dict(OPENCLAW_MODEL_CAPABILITIES),
+                "capabilities": dict(_AGENT.model_capabilities),
                 "pricing": {"prompt": 0, "completion": 0},
                 "metadata": {"openclaw_agent_id": "main"},
             }

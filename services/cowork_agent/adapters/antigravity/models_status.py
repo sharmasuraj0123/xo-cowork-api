@@ -15,7 +15,10 @@ from typing import Any
 from services.cowork_agent.adapters.antigravity.auth import has_usable_login
 from services.cowork_agent.adapters.cli_status import CliStatusError  # re-exported for symmetry
 
-_MODEL_ID = "antigravity/gemini-3-5-flash-medium"
+# Agent-generic id, stable regardless of which model the box actually runs —
+# same convention as claude_code/models_status.py:48 and codex's. Naming a
+# concrete model here only ever goes stale against the manifest default.
+_MODEL_ID = "antigravity/antigravity"
 
 
 def build_status_view(logged_in: bool) -> dict[str, Any]:
