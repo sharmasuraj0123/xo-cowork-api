@@ -5,7 +5,10 @@
       "antigravity": { "enabled": true }
     },
     "api_keys": {
-      "enabled": false
+      "enabled": false,
+      "anthropic": { "enabled": false },
+      "openai": { "enabled": false },
+      "openrouter": { "enabled": false }
     }
   },
   "data": {
@@ -16,7 +19,9 @@
     "vercel": { "enabled": true }
   },
   "channels": {
-    "enabled": false
+    "enabled": false,
+    "telegram": { "enabled": false },
+    "slack": { "enabled": false }
   },
   "secrets": { "enabled": true },
   "remote_control": { "enabled": false }

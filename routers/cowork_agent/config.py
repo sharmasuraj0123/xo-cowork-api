@@ -229,9 +229,10 @@ def get_agent_config(name: str):
     """Unified per-agent config loader the FE Settings → Config tab calls.
 
     Returns ``{agent, config_file, config}`` where ``config`` is the parsed
-    config file (json for openclaw, yaml for hermes) with sensitive values
-    masked. The FE refresh button hits this route — without it both
-    backends 404 and the panel hangs at "Failed to load configuration".
+    config file (json, yaml or toml — whichever format the manifest's
+    ``config_file`` points at) with sensitive values masked. The FE refresh
+    button hits this route — without it the backend 404s and the panel hangs
+    at "Failed to load configuration".
 
     Dispatch by manifest name so we don't accidentally re-anchor to the
     active default agent (same rule that protects the hermes-named routes).
@@ -251,11 +252,18 @@ def get_agent_config(name: str):
             content={"detail": f"{config_path.name} not found at {config_path}"},
         )
 
+    # Dispatch on the file SUFFIX, never on the agent name — a new agent whose
+    # config happens to be toml must work without a core edit (§6 invariant).
     suffix = config_path.suffix.lower()
     try:
         if suffix in (".yaml", ".yml"):
             import yaml
             raw = yaml.safe_load(config_path.read_text()) or {}
+        elif suffix == ".toml":
+            # tomllib.TOMLDecodeError subclasses ValueError, so the handler
+            # below already covers a malformed file.
+            import tomllib
+            raw = tomllib.loads(config_path.read_text())
         else:
             import json as _json
             raw = _json.loads(config_path.read_text() or "{}")
