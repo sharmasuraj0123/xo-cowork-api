@@ -73,9 +73,9 @@ class Watcher:
     def __init__(self) -> None:
         # One source: whichever the active AGENT_NAME resolves to.
         # See services/cowork_agent/visualizer/source_loader.py for the
-        # dispatch. Agents without a visualizer_source.py module (today:
-        # hermes) produce an empty source list — the watcher still runs
-        # so sinks can serve whatever data is already on disk.
+        # dispatch. An agent that ships no visualizer_source.py produces an
+        # empty source list — the watcher still runs so the sinks keep
+        # serving what is already on disk.
         offsets = jsonl_tail.OffsetStore()
         active_name = get_active_agent().name
         mod = load_source_module()

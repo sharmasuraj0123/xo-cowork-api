@@ -89,9 +89,10 @@ class Source:
         # claude_code visualizer_source.py:317-324).
         self._last_user_ts: dict[str, str] = {}
         # Absolute rollout path → (native_session_id, cwd) parsed from its
-        # session_meta line, or None if unreadable. Cached so the auto-
-        # discovery walk reads line 1 at most once per file per process.
-        self._meta_cache: dict[str, Optional[tuple[str, str]]] = {}
+        # session_meta line. Successes only, so the auto-discovery walk reads
+        # line 1 at most once per resolved file per process; see
+        # _session_meta_for for why a failure is deliberately not cached.
+        self._meta_cache: dict[str, tuple[str, str]] = {}
 
     # ── Public protocol ─────────────────────────────────────────────────
 
@@ -166,7 +167,15 @@ class Source:
     def _session_meta_for(self, path: Path) -> Optional[tuple[str, str]]:
         """Return ``(native_session_id, cwd)`` from a rollout's session_meta
         (line 1), cached per path. ``None`` if unreadable / not a session_meta.
-        Falls back to the filename UUID when the payload lacks session_id."""
+        Falls back to the filename UUID when the payload lacks session_id.
+
+        Only a success is memoised. A rollout caught mid-creation has no
+        readable session_meta yet, and caching that ``None`` would hide the file
+        for the life of the process (a ``cd ~/xo-projects/foo && codex`` run
+        would never be discovered); the negative answer is therefore retried on
+        the next tick, exactly as the antigravity cwd cache does
+        (antigravity/visualizer_source.py:139-146). Cost is one re-read of line
+        1 per unresolved rollout per tick."""
         key = str(path)
         if key in self._meta_cache:
             return self._meta_cache[key]
@@ -175,7 +184,6 @@ class Source:
             with open(path, "r", encoding="utf-8", errors="replace") as fp:
                 first = fp.readline()
         except OSError:
-            self._meta_cache[key] = None
             return None
         try:
             raw = json.loads(first)
@@ -187,7 +195,8 @@ class Source:
             cwd = payload.get("cwd")
             native = sid if isinstance(sid, str) and sid else (_uuid_from_rollout(path) or "")
             result = (native, cwd if isinstance(cwd, str) else "")
-        self._meta_cache[key] = result
+        if result is not None:
+            self._meta_cache[key] = result
         return result
 
     # ── Per-rollout pipeline ─────────────────────────────────────────────

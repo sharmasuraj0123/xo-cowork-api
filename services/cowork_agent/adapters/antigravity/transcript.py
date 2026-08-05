@@ -260,10 +260,18 @@ def created_at_ms(step: dict) -> int | None:
 
 
 def created_at_iso(step: dict) -> str | None:
+    """``created_at`` normalised to the wire form the rest of the tree emits
+    (``…Z``, second resolution).
+
+    Both callers — the visualizer source's event ``ts`` and the sessions
+    capability's ``time_created`` — want that form, and agy's own ``created_at``
+    is already exactly it, so ``.isoformat()``'s ``+00:00`` would only be a
+    gratuitous re-encoding leaking a second timestamp dialect into the synced
+    tier."""
     ms = created_at_ms(step)
     if ms is None:
         return None
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ── Turn iteration (for message conversion + usage) ───────────────────────────

@@ -14,9 +14,10 @@ Sources:
   * **tokens** — ``conversations/<uuid>.db`` ``gen_metadata`` protobuf
     (:mod:`tokens`). ⚠️ These are **client-side ESTIMATES**, not billed usage;
     there is **no cache_read/cache_write** for agy, and cost is always ``0.0``.
-    Because per-call→per-turn attribution needs the packed ``f2`` field, we
-    attribute a conversation's whole token total to its **last** assistant entry
-    (documented approximation — totals are exact, per-turn split is not).
+    call→turn pairing is by **order, when the counts agree** (see
+    :func:`parse_file`); when they don't, a conversation's whole token total
+    falls back onto its **last** assistant entry — totals stay exact, the
+    per-turn split is then an approximation.
 """
 from __future__ import annotations
 
@@ -37,6 +38,15 @@ def _resolve_tz(tz: str) -> tzinfo:
 
 def _empty_tokens() -> dict:
     return {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+
+
+# Wire timestamp form the rest of the tree emits (second resolution, "Z"), which
+# is also how agy writes its own ``created_at`` — see ``transcript.created_at_iso``.
+_ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _iso_z(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(_ISO_Z)
 
 
 def _provider_for(model: str | None) -> str:
@@ -74,9 +84,18 @@ def parse_file(
 ) -> tuple[dict, list]:
     """Parse one agy conversation into ``(meta, entries)`` in the shared shape.
 
-    ``entries`` are normalized usage records (role=user|assistant). The whole
-    conversation's token total is placed on the last assistant entry; earlier
-    assistant entries carry a zero-usage dict (required by the shared views)."""
+    ``entries`` are normalized usage records (role=user|assistant). Token
+    attribution has two modes:
+
+    * **paired** — ``gen_metadata`` rows and assistant turns are both in step
+      order, so when their counts agree, row *k* is assistant turn *k*'s own
+      usage. Each entry then carries its own tokens and its own model, and the
+      ``start_ms``/``end_ms`` window filter alone is enough to make a windowed
+      total correct.
+    * **fallback** — when the counts differ (one agentic turn can make several
+      model calls) there is no attribution that isn't a guess, so the whole
+      conversation total goes on the LAST assistant entry, as it always has.
+      A window that excludes that turn therefore reports no tokens."""
     meta: dict = {"sessionId": conversation_id, "sessionFile": conversation_id}
     steps = _t.read_steps(conversation_id)
     if not steps:
@@ -91,13 +110,19 @@ def parse_file(
 
     tok = conversation_tokens(conversation_id)
     model = tok.get("model") or "Gemini 3.5 Flash"
-    provider = _provider_for(model)
+    calls = tok.get("calls") or []
 
-    # Index of the last assistant turn (carries the conversation's tokens).
-    last_assistant_idx = max(
-        (i for i, t in enumerate(turns) if t["role"] == "assistant"),
-        default=None,
+    # Pair the ordered per-call rows onto the assistant turns, but ONLY when
+    # there are exactly as many of each — see the docstring. Both sequences are
+    # in step order (``gen_metadata`` is read ORDER BY idx), so equal counts mean
+    # row k belongs to assistant turn k.
+    assistant_at = [i for i, t in enumerate(turns) if t["role"] == "assistant"]
+    per_turn: dict[int, tuple] = (
+        {pos: calls[k] for k, pos in enumerate(assistant_at)}
+        if len(calls) == len(assistant_at) else {}
     )
+    # Fallback attribution: the last assistant turn carries the whole total.
+    last_assistant_idx = assistant_at[-1] if assistant_at else None
 
     entries: list = []
     last_user_ts: Optional[int] = None
@@ -114,9 +139,15 @@ def parse_file(
             entries.append({"role": "user", "timestamp": ts})
             continue
 
-        is_last = i == last_assistant_idx
-        inp = int(tok.get("total_input", 0)) if is_last else 0
-        out = int(tok.get("total_output", 0)) if is_last else 0
+        row = per_turn.get(i)
+        if row is not None:
+            inp, out = int(row[2] or 0), int(row[3] or 0)
+            turn_model = row[1] or model
+        else:
+            is_last = i == last_assistant_idx
+            inp = int(tok.get("total_input", 0)) if is_last else 0
+            out = int(tok.get("total_output", 0)) if is_last else 0
+            turn_model = model
         duration_ms = (ts - last_user_ts) if (last_user_ts and ts) else None
         entries.append({
             "role": "assistant",
@@ -128,8 +159,8 @@ def parse_file(
                 "totalTokens": inp + out,
                 "cost": {"total": 0.0, "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0},
             },
-            "provider": provider,
-            "model": model,
+            "provider": _provider_for(turn_model),
+            "model": turn_model,
             "timestamp": ts,
             "stopReason": None,
             "toolNames": turn.get("tool_names", []),
@@ -161,11 +192,22 @@ def aggregate_for_dashboard(*, days: int = 30, tz: str = "local") -> dict:
     response_times: list[float] = []
 
     for cid in _discover():
+        # Empty-session mtime parity: any conversation whose transcript was
+        # touched inside the window contributes to total_sessions, even with no
+        # usage rows (an aborted run). Without it agy's avg_tokens_per_session
+        # is computed over a different denominator than every other backend's.
+        try:
+            if transcript_path(cid).stat().st_mtime * 1000 >= cutoff_ms:
+                session_ids.add(cid)
+        except OSError:
+            pass
+
         meta, entries = parse_file(cid, start_ms=cutoff_ms, end_ms=None)
         sid = meta.get("sessionId") or cid
         sess = session_stats.setdefault(sid, {
             "session_id": sid, "title": meta.get("title", ""),
-            "total_tokens": 0, "message_count": 0, "time_created": None,
+            "total_cost": 0.0, "total_tokens": 0, "message_count": 0,
+            "time_created": None,
         })
         first_user_ts = None
         for e in entries:
@@ -177,7 +219,9 @@ def aggregate_for_dashboard(*, days: int = 30, tz: str = "local") -> dict:
             dbucket = by_day.setdefault(day, {"date": day, "cost": 0.0, "tokens": 0, "messages": 0})
             if e["role"] == "user":
                 user_messages += 1
-                dbucket["messages"] += 1
+                # The day bucket counts usage-bearing assistant rows only (same
+                # as claude_code/codex/openclaw); ``total_messages`` below is
+                # what sums both roles.
                 if first_user_ts is None:
                     first_user_ts = ts
                 continue
@@ -191,19 +235,23 @@ def aggregate_for_dashboard(*, days: int = 30, tz: str = "local") -> dict:
             dbucket["messages"] += 1
             sess["total_tokens"] += flat
             sess["message_count"] += 1
-            mkey = (e.get("provider", ""), e.get("model", ""))
+            # Canonical by_model row (model_id/provider_id + a token sub-dict),
+            # identical to every other adapter's — see codex/usage.py:419-427.
+            # cache_read/cache_write stay 0: agy has no cache tier.
+            mkey = (e.get("model", ""), e.get("provider", ""))
             mstat = by_model_key.setdefault(mkey, {
-                "provider": mkey[0], "model": mkey[1],
-                "message_count": 0, "total_tokens": 0, "cost": 0.0,
+                "model_id": mkey[0], "provider_id": mkey[1],
+                "total_cost": 0.0, "total_tokens": _empty_tokens(), "message_count": 0,
             })
+            mstat["total_tokens"]["input"] += u["input"]
+            mstat["total_tokens"]["output"] += u["output"]
             mstat["message_count"] += 1
-            mstat["total_tokens"] += flat
             if e.get("durationMs"):
                 response_times.append(e["durationMs"] / 1000)
         if sess["message_count"] > 0 and sess["time_created"] is None:
             sess["time_created"] = (
-                datetime.fromtimestamp(first_user_ts / 1000, tz=timezone.utc).isoformat()
-                if first_user_ts else datetime.now(timezone.utc).isoformat()
+                _iso_z(first_user_ts) if first_user_ts
+                else datetime.now(timezone.utc).strftime(_ISO_Z)
             )
 
     daily = []

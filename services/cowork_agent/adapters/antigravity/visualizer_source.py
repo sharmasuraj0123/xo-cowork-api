@@ -19,17 +19,29 @@ session id rather than by cwd):
 Each new step maps to an :class:`Event`:
 
     USER_INPUT                          → MessageObserved(role="user")
-    PLANNER_RESPONSE (content, no tools)→ MessageObserved(role="assistant")
+    PLANNER_RESPONSE (content and/or tools) → MessageObserved(role="assistant")
     PLANNER_RESPONSE.tool_calls[]       → ToolUseObserved(tool=<name>)  (+ FileTouched for writes)
 
-A single :class:`SessionFirstSeen` is emitted per conversation. **UsageObserved
-is intentionally not emitted** — agy's tokens are client-side estimates stored in
-the SQLite DB, not per-turn in the transcript, so token telemetry is owned by the
-``usage`` capability, not the live feed (see docs/ANTIGRAVITY_ADAPTER.md §5).
+A single :class:`SessionFirstSeen` is emitted per conversation.
 
-Presence: agy runs as a short-lived subprocess per prompt (no persistent
-``<pid>.json`` presence file like claude_code), so ``poll_presence`` returns an
-empty snapshot — a valid "no live sessions" answer.
+:class:`UsageObserved` does not come from the transcript at all — agy keeps token
+counts in the per-conversation SQLite store (``tokens.py``), so after a tick that
+moved the transcript we read the new ``gen_metadata`` rows and emit one event per
+model call. Three properties of those numbers, all deliberate:
+
+* they are **client-side tokenizer ESTIMATES**, not the provider's billed usage
+  (same caveat ``usage.py`` carries, surfaced there as ``estimated_tokens``);
+* agy has **no cache tier**, so ``cache_read``/``cache_creation`` are always 0;
+* a call's ``input`` is the whole re-sent context, so Σinput is a billed-input
+  **upper bound**, not a per-turn delta like codex's ``last_token_usage``. That
+  is on purpose: it is the same number ``/api/usage`` reports for the same
+  conversation, so the two planes agree instead of disagreeing by construction.
+
+Presence: agy DOES write ``<agy-home>/presence/<conversation-uuid>.lock``, but it
+is a 0-byte flock sentinel — none of the fields ``sinks/activity.py:78-104``
+requires (no pid, cwd, startedAt/updatedAt), held only for the few seconds of a
+single prompt and never removed on exit. So ``poll_presence`` returns an empty
+snapshot — a valid "no live sessions" answer, and a truthful one.
 """
 from __future__ import annotations
 
@@ -42,8 +54,10 @@ from services.cowork_agent.adapters.antigravity import transcript as _t
 from services.cowork_agent.adapters.antigravity.paths import (
     BRAIN_DIR,
     LAST_CONVERSATIONS,
+    conversation_db,
     transcript_path,
 )
+from services.cowork_agent.adapters.antigravity.tokens import conversation_tokens
 from services.cowork_agent.visualizer.discovery import iter_sessionslist_rows
 from services.cowork_agent.visualizer.ingest import jsonl_tail
 from services.cowork_agent.visualizer.ingest.events import (
@@ -52,6 +66,7 @@ from services.cowork_agent.visualizer.ingest.events import (
     MessageObserved,
     SessionFirstSeen,
     ToolUseObserved,
+    UsageObserved,
 )
 from services.cowork_agent.visualizer.project_index import project_id_for_cwd
 from services.cowork_agent.project_layout import xo_projects_root
@@ -88,34 +103,44 @@ class Source:
         # both hits and misses; the answer is purely path-derived and stable for
         # the life of the process.
         self._project_by_cwd: dict[str, Optional[str]] = {}
+        # conversation uuid → the model of its newest gen_metadata row. agy names
+        # the model per CALL, not per session, so this is refreshed whenever the
+        # token store is read and attached to assistant messages (mirror codex's
+        # ``_model_by_native``, fed there by turn_context).
+        self._model_by_conversation: dict[str, str] = {}
 
     # ── Public protocol ─────────────────────────────────────────────────
 
     def poll_events(self) -> Iterator[Event]:
-        for project_id, native, path in self._discover():
-            yield from self._tail_one(project_id, native, path)
+        for project_id, native, cwd, path in self._discover():
+            yield from self._tail_one(project_id, native, cwd, path)
         try:
             self.offsets.flush()
         except Exception as exc:
             logger.warning("antigravity source: offset flush failed: %s", exc)
 
     def poll_presence(self) -> list[dict]:
-        # agy has no persistent per-process presence file; runs are ephemeral
-        # subprocesses. Empty list is a valid "no sessions open" snapshot.
+        # agy writes ``<agy-home>/presence/<conversation-uuid>.lock``, but it is a
+        # 0-byte flock sentinel: no pid, no cwd, no started/updated timestamps —
+        # none of the fields the activity sink requires — held only for the few
+        # seconds of one prompt and left behind on exit. Empty list is the honest
+        # "no sessions open" snapshot; synthesizing rows out of mtime would
+        # report finished prompts as open sessions.
         return []
 
     # ── Discovery ───────────────────────────────────────────────────────
 
-    def _discover(self) -> Iterator[tuple[str, str, Path]]:
-        """Yield ``(project_id, native_conversation_id, transcript_path)``.
+    def _discover(self) -> Iterator[tuple[str, str, str, Path]]:
+        """Yield ``(project_id, native_conversation_id, cwd, transcript_path)``.
 
         Path 1 — adapter rows: every ``backend=="antigravity"`` row in a
         project's sessionslist names a ``nativeSessionId`` (the conversation
         uuid, patched in by adapter.py once the run resolves it) → its
-        transcript. Path 2 — auto-discovery: any other conversation in agy's
-        ``brain/`` store whose launch cwd resolves under the workspace. Path 2 is
-        what keeps a project alive when the row is missing or never learned a
-        ``nativeSessionId`` (mirror ``codex/visualizer_source.py:150-164``).
+        transcript, with the row's ``directory`` as the cwd. Path 2 —
+        auto-discovery: any other conversation in agy's ``brain/`` store whose
+        launch cwd resolves under the workspace. Path 2 is what keeps a project
+        alive when the row is missing or never learned a ``nativeSessionId``
+        (mirror ``codex/visualizer_source.py:125-164``).
         """
         yielded: set[Path] = set()
 
@@ -127,7 +152,9 @@ class Source:
             path = transcript_path(native)
             if path.is_file() and path not in yielded:
                 yielded.add(path)
-                yield project_id, native, path
+                directory = row.get("directory")
+                cwd = directory if isinstance(directory, str) else ""
+                yield project_id, native, cwd, path
 
         # 2. Auto-discovery for conversations with no usable row. Built lazily:
         # the index is read at most once per tick, and only when the brain store
@@ -148,7 +175,7 @@ class Source:
             if not project_id:
                 continue  # outside the workspace — ignore this conversation
             yielded.add(path)
-            yield project_id, native, path
+            yield project_id, native, cwd, path
 
     def _iter_brain_transcripts(self) -> Iterator[tuple[str, Path]]:
         """Yield ``(conversation_id, transcript_path)`` for every conversation in
@@ -203,18 +230,99 @@ class Source:
 
     # ── Per-transcript pipeline ─────────────────────────────────────────
 
-    def _tail_one(self, project_id: str, native: str, path: Path) -> Iterator[Event]:
-        for line in jsonl_tail.read_new_lines(path, self.offsets):
-            import json
+    def _tail_one(
+        self, project_id: str, native: str, cwd: str, path: Path
+    ) -> Iterator[Event]:
+        lines = list(jsonl_tail.read_new_lines(path, self.offsets))
+        if not lines:
+            return  # idle conversation — never touch agy's live token store
+        # Read the token rows BEFORE converting the steps, so this tick's
+        # assistant messages already carry the model; the usage events
+        # themselves are emitted after the steps (they need the last step's ts).
+        pending = self._pending_calls(native)
+        last_ts = ""
+        for line in lines:
             try:
                 step = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if not isinstance(step, dict):
                 continue
-            yield from self._convert(step, project_id, native)
+            for event in self._convert(step, project_id, native, cwd):
+                last_ts = event.ts
+                yield event
+        # No convertible step this tick ⇒ no timestamp to stamp usage with. The
+        # cursor is untouched, so the rows are emitted on the next tick instead.
+        if pending and last_ts:
+            yield from self._usage_events(pending, project_id, native, ts=last_ts)
 
-    def _convert(self, step: dict, project_id: str, native: str) -> Iterator[Event]:
+    def _pending_calls(self, native: str) -> list[tuple]:
+        """``gen_metadata`` rows for this conversation we have not emitted yet.
+
+        Tokens are not in the transcript — they live in agy's per-conversation
+        SQLite store (``tokens.py``), so the live feed has to read it. Two rules
+        keep that safe: only on a tick where the transcript actually moved (the
+        caller's gate), and ``allow_checkpoint=False``, because the checkpointing
+        fallback WRITES (``PRAGMA wal_checkpoint(TRUNCATE)``) into a store agy
+        may still be using.
+
+        Also refreshes the per-conversation model (agy names it per call), which
+        the assistant :class:`MessageObserved` carries.
+        """
+        db = conversation_db(native)
+        if not db.is_file():
+            return []
+        calls = conversation_tokens(native, allow_checkpoint=False).get("calls") or []
+        if not calls:
+            return []
+        model = next((c[1] for c in reversed(calls) if c[1]), None)
+        if model:
+            self._model_by_conversation[native] = model
+        try:
+            inode = db.stat().st_ino
+        except OSError:
+            return []
+        saved = self.offsets.get(db)
+        # Inode mismatch ⇒ the store was replaced under the same uuid, so its
+        # idx sequence restarted; re-read from 0 (jsonl_tail's rotation rule).
+        cursor = saved[0] if saved and saved[1] == inode else 0
+        return [c for c in calls if isinstance(c[0], int) and c[0] >= cursor]
+
+    def _usage_events(
+        self, rows: list[tuple], project_id: str, native: str, *, ts: str
+    ) -> Iterator[Event]:
+        """One :class:`UsageObserved` per new ``gen_metadata`` row, stamped with
+        ``ts`` (the last converted step of this tick — agy's token rows carry no
+        timestamp of their own).
+
+        The cursor (next unseen ``idx``) is persisted in the shared offset store
+        under the conversation's ``.db`` path — a key ``jsonl_tail`` never uses,
+        since the transcript it tails is a different file. Persisting is not
+        optional: ``stats.json`` is CUMULATIVE on disk, so an in-memory-only
+        high-water mark would re-emit every call after a restart and double the
+        totals.
+        """
+        for idx, model, in_tokens, out_tokens in rows:
+            yield UsageObserved(
+                ts=ts, native_session_id=native, runtime=self.name,
+                project_id=project_id,
+                input_tokens=int(in_tokens or 0),
+                output_tokens=int(out_tokens or 0),
+                # agy reports no cached-token tier at all (tokens.py:12-18).
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+                model=model or None,
+            )
+        db = conversation_db(native)
+        try:
+            inode = db.stat().st_ino
+        except OSError:
+            inode = 0
+        self.offsets.set(db, offset=max(r[0] for r in rows) + 1, inode=inode)
+
+    def _convert(
+        self, step: dict, project_id: str, native: str, cwd: str
+    ) -> Iterator[Event]:
         ts = _t.created_at_iso(step) or ""
         if not ts:
             return
@@ -223,7 +331,7 @@ class Source:
             self._sessions_seen.add(native)
             yield SessionFirstSeen(
                 ts=ts, native_session_id=native, runtime=self.name,
-                project_id=project_id, cwd="",
+                project_id=project_id, cwd=cwd or "",
             )
 
         stype = step.get("type")
@@ -235,10 +343,16 @@ class Source:
         elif stype == "PLANNER_RESPONSE":
             tool_calls = step.get("tool_calls") or []
             content = step.get("content")
-            if isinstance(content, str) and content.strip() and not tool_calls:
+            # A turn that both speaks and calls a tool is still an assistant
+            # message — same rule this adapter's own ``transcript.iter_turns``
+            # applies ("content and/or tool_calls"), and the one codex and
+            # claude_code apply unconditionally. Counter only: no text is
+            # surfaced, here or anywhere else in this module.
+            if (isinstance(content, str) and content.strip()) or tool_calls:
                 yield MessageObserved(
                     ts=ts, native_session_id=native, runtime=self.name,
                     project_id=project_id, role="assistant",
+                    model=self._model_by_conversation.get(native),
                 )
             for call in tool_calls:
                 if not isinstance(call, dict):

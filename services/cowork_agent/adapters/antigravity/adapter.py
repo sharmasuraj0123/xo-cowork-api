@@ -530,12 +530,17 @@ class AntigravityAdapter(BaseAgentAdapter):
                 if isinstance(meta, dict):
                     if not meta.get("nativeSessionId"):
                         meta["nativeSessionId"] = cid
-                    existing = meta.get("usage") or {}
+                    # ASSIGN, don't accumulate: gen_metadata holds every call the
+                    # conversation ever made, so its total is already
+                    # conversation-cumulative (unlike codex's per-turn wire
+                    # delta — see the rule at ``codex/sessions.py:130-131``).
+                    # Adding it to the previous turn's roll-up would count turn 1
+                    # twice. agy has no cache tiers, so those stay 0.
                     meta["usage"] = {
-                        "input_tokens": existing.get("input_tokens", 0) + int(tok.get("total_input", 0)),
-                        "output_tokens": existing.get("output_tokens", 0) + int(tok.get("total_output", 0)),
-                        "cache_creation_input_tokens": existing.get("cache_creation_input_tokens", 0),
-                        "cache_read_input_tokens": existing.get("cache_read_input_tokens", 0),
+                        "input_tokens": int(tok.get("total_input", 0)),
+                        "output_tokens": int(tok.get("total_output", 0)),
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
                     }
                     meta["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
                     _write_index(index_path, index)

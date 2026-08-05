@@ -90,6 +90,15 @@ invariant enforced by the filesystem, not a convention:
   workspace/                    cross-project aggregation
 ```
 
+**`timeline.jsonl` is a lifecycle log, not a message log.** Its vocabulary is
+`session.started` / `todo.added` / `todo.completed` / `file.created` /
+`file.edited`; `sinks/timeline.py:15-20` deliberately drops `MessageObserved`,
+`UsageObserved` and `ToolUseObserved` for **every** agent (they live on as
+counters in `sessions_augment` and aggregates in `stats`). A project whose
+timeline holds only `session.started` lines next to a busy `stats.json` is
+therefore working as designed — including under `claude_code` — not evidence of
+an adapter that under-reports.
+
 **Why outside the tree rather than a `.gitignore` line.** The goal is
 agent-to-agent collaboration where git history is the only channel. The project
 template ships no `.gitignore`, and the backup tarball only honours one for git
@@ -161,23 +170,49 @@ name. A missing capability is normal — the router returns its empty/501 shape.
 
 Capabilities in use today:
 
-| capability | what it provides | openclaw | claude_code | hermes | antigravity |
-|---|---|:--:|:--:|:--:|:--:|
-| `adapter` | the `Adapter` class (run/stream dispatch) | ✓ | ✓ | ✓ | ✓ |
-| `usage` | `/api/usage` | ✓ | ✓ | ✓ | ✓ |
-| `models` | `/api/models` listing | ✓ | ✓ | ✓ | ✓ |
-| `models_status` | `/models/status` | ✓ | ✓ | ✓ | ✓ |
-| `channels_status` | `/channels/status` | ✓ | ✓ | ✓ | ✓ |
-| `providers_status` | `/providers/status` | ✓ | ✓ | ✓ | ✓ |
-| `sessions` | session read/convert | ✓ | ✓ | ✓ | ✓ |
-| `chat` | `resolve_agent_id` / `handle_prompt` (optional) | ✓ | — | ✓ | — |
-| `streaming` | SSE shaping | ✓ | ✓ | ✓ | — |
-| `visualizer_source` | visualizer feed | ✓ | ✓ | ✓ | ✓ |
-| `routes` | agent-owned `APIRouter` (active-only) | ✓ | — | ✓ | ✓ |
+| capability | what it provides | openclaw | claude_code | hermes | codex | antigravity |
+|---|---|:--:|:--:|:--:|:--:|:--:|
+| `adapter` | the `Adapter` class (run/stream dispatch) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `agents` | `/api/agents` CRUD (the sidebar) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `usage` | `/api/usage` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `models` | `/api/models` listing | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `models_status` | `/models/status` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `channels_status` | `/channels/status` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `providers_status` | `/providers/status` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `sessions` | session read/convert | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `chat` | `resolve_agent_id` / `handle_prompt` (optional) | ✓ | — | ✓ | — | — |
+| `visualizer_source` | visualizer feed | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `routes` | agent-owned `APIRouter` (active-only) | ✓ | ✓ | ✓ | — | ✓ |
 
-`claude_code` has no `chat` capability on purpose: `routers/cowork_agent/chat.py`
-falls through to the shared `AgentDispatcher` when `chat`/`handle_prompt` is
-absent. "Capability absent ⇒ graceful default" is the whole design.
+Every row except `visualizer_source` is reachable by
+`grep -rn 'load_capability("<row>"' routers/ services/` — that grep IS the
+definition of this table, and a module not in it is a private helper (below).
+`visualizer_source` is the one capability resolved elsewhere:
+`visualizer/source_loader.py` imports it by name, same seam, different loader.
+
+`claude_code`, `codex` and `antigravity` have no `chat` capability on purpose:
+`routers/cowork_agent/chat.py` falls through to the shared `AgentDispatcher`
+when `chat`/`handle_prompt` is absent (all three call sites are `getattr`-
+guarded). "Capability absent ⇒ graceful default" is the whole design.
+
+`codex` ships no `routes.py` for the same reason: it owns no endpoint that
+isn't already broker surface. Its login is the always-mounted core route
+`POST /connect/codex` and its config viewer is the generic
+`GET /api/config/agents/{name}`. An empty `routes.py` would be ceremony.
+(`claude_code`'s does earn its place — it mounts the three
+`/api/remote-control/*` endpoints over `adapters/claude_code/remote_control.py`.
+codex's CLI has an equivalent `codex remote-control` subcommand that is not
+wired up yet; the gap is declared honestly as `remote_control.enabled: false`
+in its `capabilities.json`.)
+
+**Not capabilities — private helpers.** A module under `adapters/<name>/` is
+only a capability if core asks for it by name. Everything else is that
+adapter's own business and may be named, split or deleted freely:
+`_project_encoding`, `paths`, `store`, `streaming`, `direct_stream`,
+`transcript`, `tokens`, `auth`, `remote_control`, `dump`, `gateway_pool`,
+`profile_env`, `sessionslist`, `state_db`. They are imported directly by the
+adapter that owns them, never through the loader — so "agent X is missing
+`paths.py`" is not a parity gap.
 
 ### 3.3 The dispatch adapter (`adapter` capability)
 
@@ -192,6 +227,16 @@ absent. "Capability absent ⇒ graceful default" is the whole design.
 `get_adapter(name, config)` and **auto-discovers** adapters by scanning for
 `adapters/<name>/adapter.py` (`list_adapters()`). There is **no** hand-maintained
 registry dict.
+
+> **`streaming.py` is not a capability.** Core never loads it — it is a private
+> helper each `adapter.py` imports directly to shape its CLI's output into the
+> normalized SSE events `stream()` yields (`claude_code/adapter.py:392`,
+> `codex/adapter.py:372,438`, `openclaw/adapter.py:110`,
+> `hermes/adapter.py:43,78`). An agent without one is not missing a feature, it
+> just parses inline: `agy -p` prints narrative markdown with no line-oriented
+> event stream to shape, so `antigravity` tails the transcript from inside
+> `adapter.py` instead (`antigravity/adapter.py:12-17`). The contract that
+> matters is `Adapter.stream()`, which all five implement.
 
 ### 3.4 Agent-owned routes
 

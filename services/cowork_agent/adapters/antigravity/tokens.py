@@ -24,7 +24,8 @@ mutate agy's store on the accounting path. Only if that read-only path can't
 surface the data — it raises, or returns no rows while a non-empty ``-wal``
 suggests uncheckpointed rows are hidden — do we fall back to a short read-write
 open that runs ``PRAGMA wal_checkpoint(TRUNCATE)`` and re-reads. The fallback is
-the exception, not the default.
+the exception, not the default, and ``allow_checkpoint=False`` removes it
+altogether for callers that poll a conversation agy is still writing.
 
 Stdlib-only. Best-effort throughout: any failure yields zeros, never raises.
 """
@@ -159,7 +160,7 @@ def _has_pending_wal(db_path: Path) -> bool:
         return False
 
 
-def extract_usage(db_path: str | Path) -> dict:
+def extract_usage(db_path: str | Path, *, allow_checkpoint: bool = True) -> dict:
     """One row per model call in ``gen_metadata``. Returns a summary dict:
 
         {"num_calls", "total_input", "total_output", "context_peak",
@@ -167,7 +168,14 @@ def extract_usage(db_path: str | Path) -> dict:
 
     Reads **read-only** by default (no mutation of agy's store); only falls back
     to a checkpointing read-write open when the read-only path can't surface the
-    data. Best-effort — missing DB / table / malformed blob → zeros."""
+    data. Best-effort — missing DB / table / malformed blob → zeros.
+
+    ``allow_checkpoint=False`` disables that fallback entirely: the read-only
+    view is the answer, zeros/partials included. Callers that run on a timer
+    against a LIVE conversation (the visualizer source's 1 s tick) must pass it
+    — the fallback runs ``PRAGMA wal_checkpoint(TRUNCATE)``, a write into agy's
+    store, and the state that triggers it (no visible rows + a non-empty -wal)
+    is exactly the state early in a live conversation."""
     empty = {"num_calls": 0, "total_input": 0, "total_output": 0,
              "context_peak": 0, "model": None, "calls": []}
     p = Path(db_path)
@@ -180,8 +188,10 @@ def extract_usage(db_path: str | Path) -> dict:
     # path genuinely failed to surface data: it raised (calls is None), or it
     # saw no rows while a non-empty -wal suggests uncheckpointed data is hidden
     # from a read-only connection. Genuinely-empty DBs are left untouched.
-    if calls is None or (not calls and _has_pending_wal(p)):
+    if allow_checkpoint and (calls is None or (not calls and _has_pending_wal(p))):
         calls = _read_checkpointed(p)
+    if calls is None:
+        return empty
 
     return {
         "num_calls": len(calls),
@@ -193,9 +203,12 @@ def extract_usage(db_path: str | Path) -> dict:
     }
 
 
-def conversation_tokens(conversation_id: str) -> dict:
-    """Token summary for one conversation (by uuid). Best-effort."""
-    return extract_usage(conversation_db(conversation_id))
+def conversation_tokens(conversation_id: str, *, allow_checkpoint: bool = True) -> dict:
+    """Token summary for one conversation (by uuid). Best-effort.
+
+    ``allow_checkpoint`` is forwarded to :func:`extract_usage` — pass False from
+    anything polling a live conversation, so the read never writes."""
+    return extract_usage(conversation_db(conversation_id), allow_checkpoint=allow_checkpoint)
 
 
 __all__ = ["extract_usage", "conversation_tokens"]
