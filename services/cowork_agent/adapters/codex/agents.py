@@ -49,6 +49,25 @@ def _load(agent_id: str) -> dict | None:
     return None
 
 
+def _load_owned(agent_id: str) -> dict | None:
+    """``_load`` restricted to records this backend owns.
+
+    Every project-tied adapter reads the SAME ``<project>/.xo/agent.json``, and
+    the ownership routes in ``routers/cowork_agent/agents.py`` take the first
+    non-None over ``list_adapters()`` — so without this filter a codex agent is
+    answered by whichever adapter sorts first. A record whose ``backend`` names
+    another backend is not ours; a missing/empty ``backend`` stays claimable
+    (legacy records written before the tag existed).
+    """
+    meta = _load(agent_id)
+    if meta is None:
+        return None
+    backend = meta.get("backend")
+    if isinstance(backend, str) and backend and backend != _BACKEND:
+        return None
+    return meta
+
+
 def _write(agent_id: str, data: dict) -> None:
     path = _meta_path(agent_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +141,7 @@ def create_agent(body) -> dict | JSONResponse:
 
 def get_detail(agent_id: str) -> dict | None:
     aid = normalize_agent_id(agent_id)
-    meta = _load(aid)
+    meta = _load_owned(aid)
     if meta is None:
         return None
     workspace_path = project_dir(aid)
@@ -155,12 +174,12 @@ def get_detail(agent_id: str) -> dict | None:
 
 def patch(agent_id: str, body) -> dict | JSONResponse | None:
     aid = normalize_agent_id(agent_id)
-    if _load(aid) is None:
+    if _load_owned(aid) is None:
         return None
     if not body.model_fields_set:
         detail = get_detail(aid)
         return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
-    meta = _load(aid) or {}
+    meta = _load_owned(aid) or {}
     if body.name is not None:
         meta["name"] = body.name.strip()
     if body.description is not None:

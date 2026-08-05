@@ -48,6 +48,23 @@ def _load(agent_id: str) -> dict | None:
     return None
 
 
+def _load_owned(agent_id: str) -> dict | None:
+    """:func:`_load`, but None when the record belongs to another backend.
+
+    The core router asks every adapter in turn and takes the first non-None, so
+    without this guard whichever adapter sorts first would answer for projects
+    created by another one (antigravity sorts first of all). A missing/empty
+    ``backend`` stays claimable — records written before the tag existed, and
+    projects scaffolded outside the agents contract, still resolve."""
+    meta = _load(agent_id)
+    if meta is None:
+        return None
+    backend = meta.get("backend")
+    if backend and backend != _BACKEND:
+        return None
+    return meta
+
+
 def _write(agent_id: str, data: dict) -> None:
     path = _meta_path(agent_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,8 +137,9 @@ def create_agent(body) -> dict | JSONResponse:
 
 
 def get_detail(agent_id: str) -> dict | None:
+    """Full agent snapshot if ``agent_id`` is an antigravity agent, else None."""
     aid = normalize_agent_id(agent_id)
-    meta = _load(aid)
+    meta = _load_owned(aid)
     if meta is None:
         return None
     workspace_path = project_dir(aid)
@@ -153,13 +171,14 @@ def get_detail(agent_id: str) -> dict | None:
 
 
 def patch(agent_id: str, body) -> dict | JSONResponse | None:
+    """Patch an antigravity agent's name/description; None if not ours."""
     aid = normalize_agent_id(agent_id)
-    if _load(aid) is None:
+    if _load_owned(aid) is None:
         return None
     if not body.model_fields_set:
         detail = get_detail(aid)
         return detail if detail else JSONResponse(status_code=404, content={"detail": "Not found"})
-    meta = _load(aid) or {}
+    meta = _load_owned(aid) or {}
     if body.name is not None:
         meta["name"] = body.name.strip()
     if body.description is not None:

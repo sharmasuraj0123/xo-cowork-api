@@ -57,7 +57,7 @@ def _sessions_capability(agent: str):
 
 
 def load_all_sessions() -> list[dict]:
-    """Scan sessions and build SessionResponse objects, filtered by active backend.
+    """Scan sessions and build SessionResponse objects.
 
     Two scan roots are considered, both resolved through the active backend's
     ``sessions`` capability (never by naming a backend here):
@@ -66,10 +66,15 @@ def load_all_sessions() -> list[dict]:
     - the backend's own native store — supplied by
       ``list_native_sessions()`` (e.g. a per-agent on-disk dir or a state db).
 
-    Only sessions belonging to the active backend (``AGENT_NAME`` env) are
-    returned: the other backends' stores aren't touched at all, so their
-    sessions never leak into the sidebar. ``AGENT_NAME`` decides which world
-    we're in; the other backends stay invisible.
+    The two roots are filtered differently, and deliberately so:
+
+    - **Project-tied rows are NOT filtered by the active backend.** A project's
+      ``sessionslist.json`` is shared, so every backend that has tee'd into that
+      project is listed — enrichment routes each row through its OWN ``backend``
+      tag (see the comment at the project scan below). A project the user drove
+      with two backends shows both conversations.
+    - **Native (non-project) stores are read only for the ACTIVE backend**, so
+      the other backends' private stores are never touched and can't leak in.
 
     De-duplicated via ``sessionId`` so a session that is both project-tee'd
     and natively present surfaces only once (project-tied wins).

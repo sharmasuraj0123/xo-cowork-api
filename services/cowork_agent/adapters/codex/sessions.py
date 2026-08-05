@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.cowork_agent.adapters.codex import paths as _paths
+from services.cowork_agent.adapters.codex.usage import _is_genuine_user
 from services.cowork_agent.engine.sessions_io import find_session_file, _resolve_index_path
 from services.cowork_agent.helpers import iso_now, strip_workspace_preamble
 from services.cowork_agent.project_layout import (
@@ -33,6 +34,10 @@ from services.cowork_agent.project_layout import (
 )
 
 USES_PROJECT_SESSIONS = True
+
+# The ``backend`` tag codex writes on every sessionslist row it publishes; used
+# to tell our rows apart from the other project-tied backends' in a shared index.
+_BACKEND = "codex"
 
 
 # ── Rollout reader ────────────────────────────────────────────────────────────
@@ -80,9 +85,14 @@ def enrich_project_session(meta: dict, key: str, default_agent: str):
     """Return ``(time_created, title, effective_agent)`` by reading the rollout.
 
     ``time_created`` = the ``session_meta`` line's ``timestamp``; ``title`` =
-    first ``event_msg/user_message.message`` (raw prompt), preamble-stripped and
-    80-char truncated. Either override may be None (caller keeps its defaults,
-    sessions_io.py:114-117)."""
+    first genuine ``event_msg/user_message.message`` (raw prompt),
+    preamble-stripped and 80-char truncated with an ellipsis. Either override
+    may be None (caller keeps its defaults, sessions_io.py:114-117).
+
+    Title shape and the injected-frame filter are shared with ``usage._derive_title``
+    (via ``usage._is_genuine_user``) so the sidebar and the Usage tab never show
+    two different titles for the same session; the ellipsis matches the
+    workspace-wide convention in ``helpers.derive_title_native_claude``."""
     time_created = None
     title = None
     native = (meta or {}).get("nativeSessionId") or ""
@@ -97,8 +107,8 @@ def enrich_project_session(meta: dict, key: str, default_agent: str):
                 elif top == "event_msg" and payload.get("type") == "user_message":
                     raw = payload.get("message")
                     text = strip_workspace_preamble(raw if isinstance(raw, str) else "").strip()
-                    if text and not text.startswith("<environment_context>"):
-                        title = text[:80]
+                    if _is_genuine_user(text):
+                        title = text[:80] + ("..." if len(text) > 80 else "")
                         break
     return time_created, title, default_agent
 
@@ -330,7 +340,7 @@ def get_messages(session_id: str) -> list:
     return _convert(session_id, path)
 
 
-# ── Directory update (verbatim from antigravity/sessions.py) ───────────────────
+# ── Directory update (shape shared with antigravity/sessions.py) ───────────────
 
 
 def _persist_session_directory(session_id: str, directory: str) -> bool:
@@ -346,6 +356,14 @@ def _persist_session_directory(session_id: str, directory: str) -> bool:
             return False
         for meta in index_data.values():
             if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
+                continue
+            # Same-index rows from the other project-tied backends are not ours:
+            # the PATCH route loops adapters and takes the first non-None, so
+            # without this we would service (and rewrite) an antigravity row.
+            # Untagged legacy rows stay claimable — mirrors the ``backend``
+            # filter in visualizer/discovery.py:63.
+            backend = meta.get("backend")
+            if isinstance(backend, str) and backend and backend != _BACKEND:
                 continue
             history = meta.get("directoryHistory") or []
             history.append({"directory": directory, "selectedAt": now_ms})

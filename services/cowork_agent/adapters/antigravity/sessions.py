@@ -34,6 +34,10 @@ from services.cowork_agent.project_layout import (
 
 USES_PROJECT_SESSIONS = True
 
+# The ``backend`` tag agy writes on every sessionslist row it publishes; used to
+# tell our rows apart from the other project-tied backends' in a shared index.
+_BACKEND = "antigravity"
+
 
 # ── Listing hooks ─────────────────────────────────────────────────────────────
 
@@ -61,7 +65,10 @@ def enrich_project_session(meta: dict, key: str, default_agent: str):
             time_created = _t.created_at_iso(steps[0])
             for turn in _t.iter_turns(steps):
                 if turn["role"] == "user" and turn["text"]:
-                    title = turn["text"][:80]
+                    text = turn["text"]
+                    # Same truncation the shared title helpers use
+                    # (helpers.py:115,142) — an elided title says so.
+                    title = text[:80] + ("..." if len(text) > 80 else "")
                     break
     return time_created, title, default_agent
 
@@ -271,6 +278,14 @@ def _persist_session_directory(session_id: str, directory: str) -> bool:
             return False
         for meta in index_data.values():
             if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
+                continue
+            # Same-index rows from the other project-tied backends are not ours:
+            # the PATCH route loops adapters and takes the first non-None, so
+            # without this we would service (and rewrite) a codex row. Untagged
+            # legacy rows stay claimable — mirrors the ``backend`` filter in
+            # visualizer/discovery.py:63.
+            backend = meta.get("backend")
+            if isinstance(backend, str) and backend and backend != _BACKEND:
                 continue
             history = meta.get("directoryHistory") or []
             history.append({"directory": directory, "selectedAt": now_ms})

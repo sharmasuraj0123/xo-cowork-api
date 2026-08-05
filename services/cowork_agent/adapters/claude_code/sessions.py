@@ -29,6 +29,11 @@ from services.cowork_agent.project_layout import (
 # so the generic project-tied scan applies to it.
 USES_PROJECT_SESSIONS = True
 
+# The ``backend`` tag claude_code writes on every sessionslist row it publishes;
+# used to tell our rows apart from the other project-tied backends' in a shared
+# index.
+_BACKEND = "claude_code"
+
 
 def _native_file(native_session_id: str, directory: str) -> Path | None:
     """Path to a Claude Code native JSONL, or None if absent.
@@ -103,6 +108,14 @@ def _persist_session_directory(session_id: str, directory: str) -> bool:
             return False
         for meta in index_data.values():
             if not isinstance(meta, dict) or meta.get("sessionId") != session_id:
+                continue
+            # Same-index rows from the other project-tied backends are not ours:
+            # the PATCH route loops adapters and takes the first non-None, so
+            # without this we would service (and rewrite) a codex/antigravity row.
+            # Untagged legacy rows stay claimable — mirrors the ``backend``
+            # filter in visualizer/discovery.py:63.
+            backend = meta.get("backend")
+            if isinstance(backend, str) and backend and backend != _BACKEND:
                 continue
             history = meta.get("directoryHistory") or []
             history.append({"directory": directory, "selectedAt": now_ms})
