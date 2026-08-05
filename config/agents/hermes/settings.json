@@ -1,4 +1,5 @@
 {
   "gateway_token_env": "API_SERVER_KEY",
-  "timeout": 120
+  "timeout": 120,
+  "startup_skills": ["okx"]
 }

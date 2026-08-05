@@ -1,0 +1,20 @@
+{
+  "_shape": {
+    "name": "required, unique",
+    "description": "optional",
+    "command": "single shell command (use this OR commands, not both)",
+    "commands": ["step 1", "step 2 — run sequentially, stop at first failure"],
+    "timeout_seconds": "optional, default 300, applies per command",
+    "cwd": "optional working directory for every command",
+    "success_message": "optional human-authored line shown on success; plain text or with placeholders; a default is used if omitted. Failure is always a generic 'Failed to install <name>.'",
+    "_placeholders": "in any command or success_message: {skills_dir} → active agent's <home_dir>/skills, {home_dir}, {agent_name}. Unknown {..} pass through. Path placeholders expand to raw paths — double-quote them in commands (--dir \"{skills_dir}\") so spaces survive."
+  },
+  "skills": [
+    {
+      "name": "okx",
+      "description": "okx/onchainos-skills — OKX OnchainOS skills, installed globally via npx",
+      "command": "npx skills add okx/onchainos-skills --yes -g",
+      "success_message": "OKX OnchainOS skills installed."
+    }
+  ]
+}

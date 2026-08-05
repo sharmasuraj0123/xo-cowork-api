@@ -8,6 +8,7 @@ import os
 import json
 import datetime
 import subprocess
+import sys
 import uuid
 import shutil
 from pathlib import Path
@@ -426,11 +427,20 @@ def _install_shared_deps() -> None:
     try:
         # 10-minute ceiling covers a cold first-time install (rclone download +
         # gh .deb + apt). Steady-state re-runs finish in seconds.
+        #
+        # The server is typically launched as venv/bin/python WITHOUT venv
+        # activation, so venv/bin is not on PATH — but console scripts pip
+        # installs for us (e.g. `argus`) live exactly there, next to the
+        # interpreter. Prepend it so the script sees them.
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join(
+            [os.path.dirname(sys.executable), env.get("PATH", "")])
         result = subprocess.run(
             ["bash", script],
             cwd=repo_root,
             check=False,
             timeout=600,
+            env=env,
         )
         if result.returncode == 0:
             print("✅ Shared dep check completed")
@@ -514,6 +524,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ Skill install failed (non-fatal): {exc}")
 
+    # Install the active agent's declared boot-time skills — catalog names listed
+    # under "startup_skills" in config/agents/<AGENT_NAME>/settings.json. Agents
+    # that declare none install nothing. Backgrounded because these shell out to
+    # the network (npx/git); boot must not wait on them.
+    _startup_skills_task = None
+    try:
+        from services.cowork_agent.skill_catalog import install_startup_skills
+        _startup_skills_task = asyncio.create_task(install_startup_skills())
+        print("   Startup skills: background install scheduled")
+    except Exception as exc:
+        print(f"⚠️ Startup skill install failed to schedule (non-fatal): {exc}")
+
     # Write ~/xo-projects/.xo/xo.json (static defaults) and seed live status
     # in the background. The dispatcher inside seed_agent_status() picks the
     # right adapter for the current AGENT_NAME (no-op for agents without a
@@ -574,6 +596,13 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    if _startup_skills_task and not _startup_skills_task.done():
+        _startup_skills_task.cancel()
+        try:
+            await _startup_skills_task
+        except asyncio.CancelledError:
+            pass
+
     if _xo_status_task and not _xo_status_task.done():
         _xo_status_task.cancel()
         try:
@@ -615,6 +644,11 @@ app.include_router(providers_router)
 from routers.cowork_agent import all_routers as cowork_agent_routers
 for _r in cowork_agent_routers:
     app.include_router(_r)
+
+# Space: local workspace knowledge graph (static UI + server control widget).
+from routers.space import router as space_router, mount_space
+app.include_router(space_router)
+mount_space(app)
 
 # =============================================================================
 # Endpoints
@@ -711,6 +745,9 @@ async def gateway_restart():
 async def app_restart():
     """Restart the XO Cowork API app process via cowork-api.sh."""
     import subprocess
+    # Timestamped marker: a restart kills every in-flight subprocess (e.g. a
+    # pending auth login) — correlate this line with mid-flow failures.
+    print(f"[app] restart requested at {datetime.datetime.now().isoformat()} — killing process tree")
     script = (Path(__file__).resolve().parent / "cowork-api.sh").resolve()
     if not script.exists() or not script.is_file():
         raise HTTPException(status_code=404, detail="App restart script not found")

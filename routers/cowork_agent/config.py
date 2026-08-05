@@ -22,6 +22,10 @@ from fastapi.responses import JSONResponse
 from services.cowork_agent.registry.agent_registry import get_agent, get_active_agent
 from services.cowork_agent.helpers import _mask_sensitive
 from services.cowork_agent.registry.agent_env import upsert_env_entry
+from services.cowork_agent.registry.agent_settings import (
+    clear_settings_env,
+    merge_settings_env,
+)
 from services.cowork_agent.project_layout import xo_projects_root
 from services.cowork_agent.adapters.loader import try_load_capability
 
@@ -66,6 +70,23 @@ async def _run_provider_provisioning(provider_id: str, argvs: list[list[str]]) -
         log.write("[chain ok]\n")
 
 
+def _render_settings_env(template: dict, api_key: str) -> dict[str, str]:
+    """Substitute the user's key into a ``settings_env`` recipe template.
+
+    Values are treated as plain strings; the only placeholder is ``{api_key}``
+    (replaced literally, so base URLs with no braces pass through untouched and
+    there's no ``str.format`` brace-escaping to worry about). The rendered dict
+    is written to the agent's config file via ``json.dump``, so the key is JSON-
+    escaped at write time — no injection surface.
+    """
+    rendered: dict[str, str] = {}
+    for key, value in template.items():
+        if not isinstance(value, str):
+            raise ValueError(f"settings_env value for '{key}' must be a string")
+        rendered[key] = value.replace("{api_key}", api_key)
+    return rendered
+
+
 @router.post("/api/config/providers/{provider_id}/key")
 async def save_provider_key(provider_id: str, request: Request):
     """Persist a provider API key and kick off the agent's CLI chain.
@@ -90,6 +111,18 @@ async def save_provider_key(provider_id: str, request: Request):
     if not api_key:
         return JSONResponse(status_code=400, content={"detail": "api_key is required"})
 
+    # Settings-env recipes (gateway-style providers, e.g. OpenRouter) configure
+    # the agent by merging an `env` block into its JSON config_file, which the
+    # CLI reads at launch — not by writing `.env` + running a CLI verb. Presence
+    # of `settings_env` selects this path; no agent name is branched on here.
+    settings_env = recipe.get("settings_env")
+    if settings_env:
+        try:
+            merge_settings_env(_AGENT.config_file, _render_settings_env(settings_env, api_key))
+        except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
+            return JSONResponse(status_code=500, content={"detail": f"Failed to save key: {e}"})
+        return {"ok": True, "provider": provider_id}
+
     try:
         upsert_env_entry(recipe["env_key"], api_key)
     except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
@@ -106,6 +139,38 @@ async def save_provider_key(provider_id: str, request: Request):
     asyncio.create_task(_run_provider_provisioning(provider_id, argvs))
 
     return {"ok": True, "provider": provider_id, "provisioning": "started"}
+
+
+@router.delete("/api/config/providers/{provider_id}/key")
+async def disconnect_provider_key(provider_id: str):
+    """Remove a settings-env provider's keys from the agent's config file.
+
+    Only defined for `settings_env` recipes (gateway-style providers), which
+    write into the agent's JSON config and would otherwise stay active — e.g.
+    an OpenRouter `ANTHROPIC_AUTH_TOKEN` outranks a native Claude login, so a
+    user needs a way to fall back. The legacy `.env` + CLI-verb providers have
+    no defined teardown, so disconnect isn't offered for them.
+    """
+    recipe = _AGENT.providers.get(provider_id)
+    if recipe is None:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Unsupported provider: {provider_id}"},
+        )
+
+    settings_env = recipe.get("settings_env")
+    if not settings_env:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Disconnect not supported for provider: {provider_id}"},
+        )
+
+    try:
+        clear_settings_env(_AGENT.config_file, list(settings_env.keys()))
+    except Exception as e:  # noqa: BLE001 — surface the real reason to the UI
+        return JSONResponse(status_code=500, content={"detail": f"Failed to disconnect: {e}"})
+
+    return {"ok": True, "provider": provider_id, "disconnected": True}
 
 
 # ── Model listing ────────────────────────────────────────────────────────────

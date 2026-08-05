@@ -3,7 +3,7 @@
     "enabled": true,
     "oauth": {
       "claude_code": { "enabled": false },
-      "codex": { "enabled": false }
+      "codex": { "enabled": true }
     },
     "api_keys": {
       "enabled": true,
@@ -24,5 +24,6 @@
     "telegram": { "enabled": true },
     "slack": { "enabled": true }
   },
-  "secrets": { "enabled": true }
+  "secrets": { "enabled": true },
+  "remote_control": { "enabled": false }
 }

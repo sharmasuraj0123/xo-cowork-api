@@ -262,10 +262,63 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        # Drop empty / placeholder auth vars so the CLI falls back cleanly.
         for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if env.get(key) in (None, "", "sk-ant-none"):
                 env.pop(key, None)
+        # An OAuth token (sk-ant-oat...) is not a valid API key; if one leaked into
+        # ANTHROPIC_API_KEY the CLI would pick API-key auth and fail. Strip it.
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY"):
+            if (env.get(key) or "").startswith("sk-ant-oat"):
+                env.pop(key, None)
+        # Auth precedence for the spawned `claude`:
+        #   1. A native login (~/.claude/.credentials.json) — written by the
+        #      "Connect Claude" (`claude auth login`) flow. The CLI auto-refreshes
+        #      it via its refresh token, so it is the durable, self-healing source.
+        #   2. An explicit ANTHROPIC_API_KEY — a deliberate API-billing alternative.
+        # Both ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN outrank the subscription
+        # login in the CLI's precedence chain, so when a usable native login is
+        # present we drop them from the subprocess env — otherwise a leftover/fanned
+        # token (prod fans the API key into CLAUDE_CODE_OAUTH_TOKEN) would override
+        # the fresh login and silently bill the API or fail auth. With no native
+        # login we leave these intact so explicit API-key mode still works.
+        if self._has_usable_native_login():
+            for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+                env.pop(key, None)
         return env
+
+    def _agent_home_dir(self) -> Path:
+        """The active agent's home (``~/.claude``), from the manifest ``home_dir``."""
+        return Path(os.path.expanduser(self.commands.get("home_dir") or "~/.claude"))
+
+    def _has_usable_native_login(self) -> bool:
+        """True when ``~/.claude/(.)credentials.json`` holds a login the CLI can
+        use: a refresh token (so the CLI renews the access token itself), or an
+        access token that has not yet expired. Such a login self-refreshes, so we
+        let the CLI use it rather than injecting a static env token."""
+        home = self._agent_home_dir()
+        for name in (".credentials.json", "credentials.json"):
+            path = home / name
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+            if not isinstance(oauth, dict):
+                oauth = data if isinstance(data, dict) else {}
+            if oauth.get("refreshToken"):
+                return True
+            access = oauth.get("accessToken")
+            expires_at = oauth.get("expiresAt")
+            if access and isinstance(expires_at, (int, float)):
+                # expiresAt is epoch milliseconds.
+                if expires_at / 1000 > datetime.now(timezone.utc).timestamp():
+                    return True
+            elif access and expires_at is None:
+                return True
+        return False
 
     # ── Convenience wrappers ───────────────────────────────────────────────────
 

@@ -265,11 +265,23 @@ install_env() {
 # ==============================================================
 # Setup: Install Hermes CLI
 # ==============================================================
+# True only when the REAL hermes CLI is installed. The base image ships a
+# placeholder shim at /usr/local/bin/hermes that satisfies `command -v hermes`
+# but exits 127 ("setup pending"); checking the two real install paths (the
+# same ones the shim execs) avoids being fooled by it.
+hermes_installed() {
+    local b
+    for b in "$HERMES_REPO/venv/bin/hermes" "$HOME/.local/bin/hermes"; do
+        [ -x "$b" ] && return 0
+    done
+    return 1
+}
+
 install_cli() {
     log "Installing Hermes Agent..."
     export PATH="$HOME/.local/bin:$HERMES_DIR/hermes-agent/venv/bin:$PATH"
 
-    if command -v hermes &>/dev/null; then
+    if hermes_installed; then
         log_success "Hermes CLI already installed: $(which hermes)"
         return 0
     fi
@@ -357,7 +369,7 @@ install_cli() {
     export PATH="$bin_dir:$HERMES_REPO/venv/bin:$PATH"
     cd "$HOME"
 
-    if command -v hermes &>/dev/null; then
+    if hermes_installed; then
         log_success "Hermes CLI available: $(which hermes)"
     else
         log_error "Hermes CLI not found in PATH after install"
@@ -377,7 +389,7 @@ configure_hermes() {
     # Provider is determined by whichever API key is present.
     # Anthropic wins if multiple are set.
     _configure_model() {
-        local provider="$1" key_var="$2" default_model="$3" base_url="$4"
+        local provider="$1" key_var="$2" default_model="$3" base_url="$4" api_mode="${5:-}"
         local api_key="${!key_var:-}"
         [ -z "$api_key" ] && return 1
         log "Configuring model: $provider / $default_model"
@@ -385,15 +397,16 @@ configure_hermes() {
         hermes config set model.provider "$provider"
         hermes config set model.default "$default_model"
         [ -n "$base_url" ] && hermes config set model.base_url "$base_url"
+        [ -n "$api_mode" ] && hermes config set model.api_mode "$api_mode"
         log_success "Model: $provider / $default_model"
     }
 
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-6 https://api.anthropic.com
+        _configure_model anthropic ANTHROPIC_API_KEY claude-opus-4-8 https://api.anthropic.com
     elif [ -n "${OPENAI_API_KEY:-}" ]; then
-        _configure_model custom OPENAI_API_KEY gpt-5.4 https://api.openai.com/v1
+        _configure_model custom OPENAI_API_KEY gpt-5.5 https://api.openai.com/v1
     elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-sonnet-4 ""
+        _configure_model openrouter OPENROUTER_API_KEY anthropic/claude-opus-4.8 https://openrouter.ai/api/v1 chat_completions
     else
         log_warn "No model provider key — model not configured"
     fi
@@ -429,6 +442,23 @@ configure_hermes() {
         log_success "Slack configured"
     fi
 
+    # ── Dashboard ──────────────────────────────────────────────────────────────
+    # Theme + analytics are always set; basic_auth is gated on the workspace
+    # name being present so we never write empty credentials. Username and
+    # password both default to $CODER_WORKSPACE_NAME (injected by the Coder pod).
+    log "Configuring dashboard..."
+    hermes config set dashboard.theme default
+    hermes config set dashboard.show_token_analytics false
+
+    local ws_name="${CODER_WORKSPACE_NAME:-}"
+    if [ -n "$ws_name" ]; then
+        hermes config set dashboard.basic_auth.username "$ws_name"
+        hermes config set dashboard.basic_auth.password "$ws_name"
+        log_success "Dashboard basic_auth set (user=$ws_name)"
+    else
+        log_warn "CODER_WORKSPACE_NAME unset — skipping dashboard basic_auth"
+    fi
+
     # WhatsApp — these must live in env (not config.yaml), so persist them to $ENV_FILE
     if [ "$whatsapp_enabled" = "true" ] || [ -n "${WHATSAPP_CREDS:-}" ]; then
         log "Configuring WhatsApp..."
@@ -461,7 +491,7 @@ configure_hermes() {
     fi
 
     # ── Skills ────────────────────────────────────────────────────────────────
-    if [ -d "$HERMES_REPO/skills" ] && command -v hermes &>/dev/null; then
+    if [ -d "$HERMES_REPO/skills" ] && hermes_installed; then
         hermes skills sync 2>/dev/null || {
             rsync -a --ignore-existing "$HERMES_REPO/skills/" "$HERMES_DIR/skills/" 2>/dev/null || \
             cp -rn "$HERMES_REPO/skills/"* "$HERMES_DIR/skills/" 2>/dev/null || true
@@ -834,7 +864,7 @@ status_all() {
     fi
 
     # Check hermes doctor if available
-    if command -v hermes &>/dev/null; then
+    if hermes_installed; then
         echo ""
         hermes gateway status 2>/dev/null || true
     fi
@@ -901,7 +931,7 @@ run_setup() {
 
     # Run hermes doctor for health check
     log "Running health check..."
-    if command -v hermes &>/dev/null; then
+    if hermes_installed; then
         hermes doctor 2>/dev/null && log_success "Health check passed" || \
             log_warn "hermes doctor reported issues (may need manual review)"
     fi

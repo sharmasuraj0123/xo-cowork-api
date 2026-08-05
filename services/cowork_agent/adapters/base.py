@@ -5,6 +5,15 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
 
+# Repo root, resolved from this file so manifest lookups are independent of the
+# process CWD. The workspace-boot launcher starts ``server.py`` from ``$HOME``
+# (not the project dir), so a CWD-relative ``config/agents`` path silently
+# resolved to nothing and every adapter loaded an empty manifest — dropping
+# skills, flags, and the agent ``env_file`` used for auth. Anchoring to
+# ``__file__`` (adapters → cowork_agent → services → repo root) fixes it.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
 class BaseAgentAdapter(ABC):
     """
     All agent adapters must subclass this.
@@ -55,7 +64,7 @@ class BaseAgentAdapter(ABC):
     def load_commands(self) -> dict[str, Any]:
         """Read config/agents/{adapter_name}/manifest.json (legacy name
         commands.json read as a one-cycle fallback). Returns {} if absent."""
-        base = pathlib.Path("config/agents") / self.adapter_name
+        base = _REPO_ROOT / "config" / "agents" / self.adapter_name
         for fname in ("manifest.json", "commands.json"):
             p = base / fname
             if p.exists():

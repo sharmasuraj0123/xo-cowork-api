@@ -1,0 +1,7 @@
+  /* ---------------- stage + views ---------------- */
+  #stage{position:relative;overflow:hidden}
+  .view{position:absolute;inset:0;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .3s var(--ease)}
+  .view.is-active{opacity:1;visibility:visible;pointer-events:auto}
+  canvas{display:block;position:absolute;inset:0;transition:opacity .9s var(--ease)}
+  #view-graph.intro-dim canvas{opacity:.32}
+
