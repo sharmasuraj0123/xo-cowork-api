@@ -7,18 +7,19 @@ workspace user's MagicPath session (login / logout / status).
 Endpoints:
   GET  /api/connectors/magicpath/status     — skill/CLI install state + live auth identity
   POST /api/connectors/magicpath/setup      — install skill (npx skills add) + CLI (npm -g); idempotent
-  GET  /api/connectors/magicpath/login-url  — browser URL that starts the MagicPath auth flow
-  POST /api/connectors/magicpath/login      — exchange a pasted code / callback URL via `login --code`
+  POST /api/connectors/magicpath/login      — no code: returns the browser login URL (bootstrap);
+                                              with code: exchange it via `login --code`
   POST /api/connectors/magicpath/logout     — `magicpath-ai logout` (idempotent)
   GET  /callback                            — auto-login landing for the MagicPath redirect (dispatcher)
 
-Login flow: login-url deliberately omits MagicPath's ``?port=`` parameter, so
-after the user approves, MagicPath's page displays the authorization code with
-a copy button instead of redirecting to ``http://localhost:<port>/callback`` —
-that redirect only works when the user's browser can reach this API's port,
-which a remote workspace without port forwarding cannot offer. The user pastes
-the code into POST /login. /callback is retained for setups that do forward
-the port (the redirect then auto-completes login).
+Login flow: the login bootstrap (POST /login with no code) deliberately omits
+MagicPath's ``?port=`` parameter, so after the user approves, MagicPath's page
+displays the authorization code with a copy button instead of redirecting to
+``http://localhost:<port>/callback`` — that redirect only works when the
+user's browser can reach this API's port, which a remote workspace without
+port forwarding cannot offer. The user pastes the code back into the same
+endpoint. /callback is retained for setups that do forward the port (the
+redirect then auto-completes login).
 
 /callback ordering invariant: when MagicPath's web flow does redirect, it goes
 to ``http://localhost:<port>/callback?code=<JWT>`` — the same path as the Vercel
@@ -67,9 +68,9 @@ def _int_env(name: str, fallback: int) -> int:
 
 
 WEB_URL = (os.getenv("MAGICPATH_WEB_URL") or "https://www.magicpath.ai").rstrip("/")
-# Informational only since login-url dropped ?port= (manual-code flow). Kept in
-# the login-url response shape and relevant to /callback when a user forwards
-# this API's port themselves.
+# Informational only since the login bootstrap dropped ?port= (manual-code
+# flow). Kept in the no-code login response shape and relevant to /callback
+# when a user forwards this API's port themselves.
 LOGIN_PORT = _int_env("MAGICPATH_LOGIN_PORT", _int_env("PORT", 5002))
 MAGICPATH_CLI = (os.getenv("MAGICPATH_CLI_PATH") or "magicpath-ai").strip()
 
@@ -93,7 +94,8 @@ _JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
 class LoginBody(BaseModel):
     # Raw authorization code, or the full callback URL pasted from the browser.
-    code: str = Field(min_length=1, max_length=16384)
+    # None/blank selects the login-URL bootstrap response instead of an exchange.
+    code: str | None = Field(default=None, max_length=16384)
 
 
 # ---------------------------------------------------------------------------
@@ -304,31 +306,35 @@ async def magicpath_setup() -> JSONResponse:
     })
 
 
-@router.get("/api/connectors/magicpath/login-url")
-async def magicpath_login_url() -> JSONResponse:
-    # No ?port= on purpose: without a valid port param MagicPath's auth page
-    # skips the http://localhost:<port>/callback redirect and instead displays
-    # the authorization code with a copy button — the only flow that works when
-    # this API runs on a remote workspace with no port forward. `port` stays in
-    # the response for shape compatibility; /callback still handles redirects
-    # for setups that do forward the port.
-    return JSONResponse({
-        "login_url": f"{WEB_URL}/auth/cli",
-        "port": LOGIN_PORT,
-        "cli_installed": _cli_binary() is not None,
-        "instructions": (
-            "Open login_url in any browser and approve the request. MagicPath "
-            "then displays an authorization code with a copy button. Paste that "
-            'code as {"code": "<code>"} to /api/connectors/magicpath/login. '
-            "No port forwarding is needed."
-        ),
-    })
-
-
 @router.post("/api/connectors/magicpath/login")
-async def magicpath_login(body: LoginBody) -> JSONResponse:
-    """Exchange an authorization code (or pasted callback URL) for a session."""
-    code = _extract_code(body.code)
+async def magicpath_login(body: LoginBody | None = None) -> JSONResponse:
+    """Login bootstrap + code exchange.
+
+    No code (missing body, {}, or blank code) → returns the browser login URL;
+    the user approves there and MagicPath displays an authorization code. With
+    a code → exchanges it for a CLI session. The two 200 shapes are disjoint:
+    `login_url` presence marks the bootstrap response.
+    """
+    raw = (body.code if body is not None else None) or ""
+    if not raw.strip():
+        # No ?port= on purpose: without a valid port param MagicPath's auth
+        # page skips the http://localhost:<port>/callback redirect and instead
+        # displays the authorization code with a copy button — the only flow
+        # that works when this API runs on a remote workspace with no port
+        # forward. `port` stays in the response for shape compatibility;
+        # /callback still handles redirects for setups that do forward the port.
+        return JSONResponse({
+            "login_url": f"{WEB_URL}/auth/cli",
+            "port": LOGIN_PORT,
+            "cli_installed": _cli_binary() is not None,
+            "instructions": (
+                "Open login_url in any browser and approve the request. "
+                "MagicPath then displays an authorization code with a copy "
+                "button. POST that code back to this same endpoint as "
+                '{"code": "<code>"}. No port forwarding is needed.'
+            ),
+        })
+    code = _extract_code(raw)
     if code is None:
         raise HTTPException(400, detail={
             "error": "invalid_code_format",
@@ -360,7 +366,7 @@ async def magicpath_login(body: LoginBody) -> JSONResponse:
             raise HTTPException(400, detail={
                 "error": "exchange_failed",
                 "detail": "MagicPath rejected the authorization code (it may be expired or already used).",
-                "suggestion": "Get a fresh login link from /api/connectors/magicpath/login-url and try again.",
+                "suggestion": "POST this endpoint again with no code to get a fresh login link, then retry.",
             })
         user = await _whoami(cli)
     return JSONResponse({"ok": True, "user": user})
@@ -418,8 +424,8 @@ async def magicpath_or_vercel_callback(
         return _callback_page(
             "MagicPath login failed",
             "The magicpath-ai CLI is not installed on the workspace. "
-            "POST /api/connectors/magicpath/setup, then start again from "
-            "/api/connectors/magicpath/login-url.",
+            "POST /api/connectors/magicpath/setup, then start again by POSTing "
+            "/api/connectors/magicpath/login with no code.",
             status_code=400,
         )
     if _session_lock.locked():
@@ -438,7 +444,7 @@ async def magicpath_or_vercel_callback(
             return _callback_page(
                 "MagicPath login failed",
                 "The authorization code was rejected (it may be expired or already used). "
-                "Get a fresh link from /api/connectors/magicpath/login-url and try again.",
+                "Get a fresh link by POSTing /api/connectors/magicpath/login with no code and try again.",
                 status_code=400,
             )
         user = await _whoami(cli)
