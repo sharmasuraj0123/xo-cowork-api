@@ -19,6 +19,7 @@ from .files import router as files_router
 from .fts import router as fts_router
 from .connectors.gdrive import router as gdrive_router
 from .connectors.github import router as github_router
+from .connectors.magicpath import router as magicpath_router
 from .connectors.manus import router as manus_router
 from .misc import router as misc_router
 from .onboarding import router as onboarding_router
@@ -64,6 +65,9 @@ all_routers: list[APIRouter] = [
     gdrive_router,
     onedrive_router,
     github_router,
+    # magicpath before vercel: its GET /callback dispatcher must match first;
+    # it delegates vercel-shaped requests to vercel_oauth_callback unchanged.
+    magicpath_router,
     vercel_router,
     manus_router,
     *bff_routers,
