@@ -50,12 +50,34 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # rclone config file — stored inside the project directory, shared by every
-# connector (gdrive, onedrive, …).
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RCLONE_CONFIG_PATH = os.getenv(
-    "RCLONE_CONFIG",
-    os.path.join(_PROJECT_ROOT, "rclone.conf"),
+# connector (gdrive, onedrive, …). Four parents up from
+# services/cowork_agent/connectors/rclone_connector.py.
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+
+def _resolve_rclone_config_path() -> str:
+    """Where rclone.conf lives.
+
+    Earlier versions were one dirname short and wrote into services/. That file
+    holds every configured remote, so prefer it when the corrected location has
+    nothing yet — moving it would silently drop the user's Drive and OneDrive
+    remotes. A fresh install has neither and gets the corrected path.
+    """
+    override = os.getenv("RCLONE_CONFIG")
+    if override:
+        return override
+
+    correct = os.path.join(_PROJECT_ROOT, "rclone.conf")
+    legacy = os.path.join(_PROJECT_ROOT, "services", "rclone.conf")
+    if not os.path.exists(correct) and os.path.exists(legacy):
+        log.info("Using legacy rclone config at %s", legacy)
+        return legacy
+    return correct
+
+
+RCLONE_CONFIG_PATH = _resolve_rclone_config_path()
 
 # rclone's OAuth callback port — hardcoded by the providers' OAuth client
 # registration (embedded in rclone's bundled credentials).

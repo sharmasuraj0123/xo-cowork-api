@@ -30,6 +30,13 @@ delegates everything else to ``vercel_oauth_callback`` unchanged, so Vercel's
 observable contract is preserved. Vercel codes always arrive with a PKCE
 ``state`` and can never be mistaken for MagicPath's.
 
+Do not move MagicPath's redirect onto the frontend origin. The frontend ships
+its own /callback page, but that page unconditionally POSTs code+state to the
+Vercel exchange endpoint — a MagicPath code landing there fails with "Missing
+authorization code or state". Vercel's redirect now resolves to this API's
+own proxy origin (see vercel.py ``_resolve_redirect_uri``), so both flows land
+on this dispatcher and the split above stays the only thing telling them apart.
+
 Session custody: ``~/.magicpath/session.json`` is written and deleted by the
 CLI only — this module never reads, stores, or logs tokens. Authorization codes
 are single-use secrets: they must never appear in log lines or response bodies,

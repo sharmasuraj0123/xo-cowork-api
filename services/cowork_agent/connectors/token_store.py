@@ -17,20 +17,44 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# <project_root>/mcp-tokens.json — three dirnames up from services/cowork_agent/.
-_PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# <project_root>/mcp-tokens.json — four parents up from
+# services/cowork_agent/connectors/token_store.py.
+_PROJECT_ROOT = Path(os.path.abspath(__file__)).parents[3]
 TOKEN_FILE = _PROJECT_ROOT / "mcp-tokens.json"
+
+# Earlier versions were one dirname short and wrote into services/. Existing
+# installs still hold live credentials there, so read from it when the correct
+# location has nothing yet. Writes always go to TOKEN_FILE, which migrates the
+# file on the first change while leaving the old copy intact for rollback.
+_LEGACY_TOKEN_FILE = _PROJECT_ROOT / "services" / "mcp-tokens.json"
+
+
+def _read_file(path: Path) -> dict[str, Any] | None:
+    """Parse one token file, or None if it is missing or unreadable."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Could not read %s: %s", path, exc)
+        return None
 
 
 def read_all() -> dict[str, Any]:
-    """Read the full mcp-tokens.json. Tolerant of a missing or corrupt file."""
-    if not TOKEN_FILE.exists():
-        return {}
-    try:
-        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Could not read %s: %s", TOKEN_FILE, exc)
-        return {}
+    """Read the full mcp-tokens.json. Tolerant of a missing or corrupt file.
+
+    Falls back to the legacy services/ location so an install predating the
+    path fix keeps its stored credentials.
+    """
+    data = _read_file(TOKEN_FILE)
+    if data is not None:
+        return data
+
+    legacy = _read_file(_LEGACY_TOKEN_FILE)
+    if legacy is not None:
+        log.info("Reading credentials from legacy %s", _LEGACY_TOKEN_FILE)
+        return legacy
+    return {}
 
 
 def write_all(data: dict[str, Any]) -> None:

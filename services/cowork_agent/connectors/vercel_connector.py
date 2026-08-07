@@ -5,6 +5,11 @@ API-token flow: user generates a token at https://vercel.com/account/tokens and 
 OAuth 2.1 flow: initiated via /api/connectors/vercel/oauth/start; Vercel redirects back
   to /callback where the authorization code is exchanged for tokens (with PKCE).
 
+The redirect_uri is not fixed — the router resolves one the user's browser can
+actually reach (see routers/cowork_agent/connectors/vercel.py) and passes it in.
+This module's job is to keep the registered client's redirect_uris a superset of
+whatever gets used, without rotating client_id out from under a stored token.
+
 Token file: <project_root>/mcp-tokens.json  (.gitignored)
 """
 
@@ -14,7 +19,7 @@ import logging
 import secrets
 import time
 from typing import Any, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 
@@ -27,8 +32,39 @@ VERCEL_OAUTH_AUTHORIZE_URL = "https://vercel.com/oauth/authorize"
 VERCEL_OAUTH_TOKEN_URL = "https://api.vercel.com/login/oauth/token"
 VERCEL_OAUTH_REGISTER_URL = "https://api.vercel.com/login/oauth/register"
 
-# In-memory store for pending OAuth flows: state → {code_verifier, redirect_uri}
-_pending_oauth: dict[str, dict[str, str]] = {}
+# Historical default redirect_uri. Port 80 on the *user's* machine, where
+# nothing listens — kept only so clients registered before redirect resolution
+# existed keep validating, never chosen as a live target.
+LEGACY_REDIRECT_URI = "http://127.0.0.1/callback"
+
+# Always registered alongside the resolved URI, so switching between a local
+# port-forward and a proxy hostname does not force a re-registration.
+BASELINE_REDIRECT_URIS = (
+    "http://localhost:3000/callback",
+    "http://127.0.0.1:3000/callback",
+    LEGACY_REDIRECT_URI,
+)
+
+# How long a started-but-uncompleted OAuth flow stays valid, and how many may
+# be in flight at once. Both bound _pending_oauth, which would otherwise grow
+# without limit as users abandon flows.
+PENDING_OAUTH_TTL = 600      # 10 min
+PENDING_OAUTH_MAX = 32
+
+# In-memory store for pending OAuth flows:
+#   state → {code_verifier, redirect_uri, created_at}
+# Deliberately not persisted: a restart between /oauth/start and the exchange
+# invalidates in-flight states, surfacing as "Invalid or expired OAuth state
+# parameter". With UVICORN_RELOAD on, editing this file has the same effect.
+_pending_oauth: dict[str, dict[str, Any]] = {}
+
+
+class RedirectUriLockedError(RuntimeError):
+    """A new redirect_uri was requested while a user token is already stored.
+
+    Re-registering would rotate client_id and silently invalidate the stored
+    refresh_token, so the caller must disconnect first.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +81,44 @@ def _generate_code_challenge(verifier: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pending-flow bookkeeping
+# ---------------------------------------------------------------------------
+
+def _evict_stale_pending() -> None:
+    """Drop expired pending flows, then the oldest ones if still over cap."""
+    cutoff = time.time() - PENDING_OAUTH_TTL
+    for state in [s for s, p in _pending_oauth.items() if p.get("created_at", 0) < cutoff]:
+        _pending_oauth.pop(state, None)
+
+    if len(_pending_oauth) > PENDING_OAUTH_MAX:
+        oldest = sorted(_pending_oauth.items(), key=lambda kv: kv[1].get("created_at", 0))
+        for state, _ in oldest[: len(_pending_oauth) - PENDING_OAUTH_MAX]:
+            _pending_oauth.pop(state, None)
+
+
+# ---------------------------------------------------------------------------
+# redirect_uri comparison
+# ---------------------------------------------------------------------------
+
+def normalize_redirect_uri(value: str) -> str:
+    """Canonical form for comparing redirect URIs.
+
+    Lowercases scheme and host, drops the default port, and strips a trailing
+    slash. Without this, a provider that echoes back a normalized variant of
+    what we sent would look like a permanent mismatch and re-register on every
+    single /oauth/start call.
+    """
+    parts = urlsplit(value.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    port = parts.port
+    if port is not None and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    return f"{scheme}://{host}{path}"
+
+
+# ---------------------------------------------------------------------------
 # Token storage (provider keys "vercel" + "vercel_client", owned by token_store)
 # ---------------------------------------------------------------------------
 
@@ -53,17 +127,31 @@ def get_oauth_client() -> dict[str, Any] | None:
     return get_entry("vercel_client")
 
 
-async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
+async def register_oauth_client(redirect_uri: str | list[str]) -> dict[str, Any]:
     """
     Dynamically register a new OAuth 2.1 client with Vercel (RFC 7591).
 
     POSTs the client metadata to Vercel's registration endpoint and persists
     the returned client_id (plus client_secret if any) under `vercel_client`
     in mcp-tokens.json. Subsequent calls to get_oauth_client() will return it.
+
+    Accepts several redirect URIs; RFC 7591 allows a client to register more
+    than one, which lets a single client serve both a local port-forward and a
+    proxy hostname without re-registering.
     """
+    requested = [redirect_uri] if isinstance(redirect_uri, str) else list(redirect_uri)
+    # Preserve caller order (the resolved URI first) while dropping duplicates.
+    seen: set[str] = set()
+    redirect_uris: list[str] = []
+    for uri in requested:
+        key = normalize_redirect_uri(uri)
+        if key not in seen:
+            seen.add(key)
+            redirect_uris.append(uri)
+
     metadata = {
         "client_name": "xo-cowork",
-        "redirect_uris": [redirect_uri],
+        "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -101,25 +189,60 @@ async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
         "grant_types": metadata["grant_types"],
         "response_types": metadata["response_types"],
         "client_name": metadata["client_name"],
-        "redirect_uris": metadata["redirect_uris"],
+        # Trust what Vercel echoed back over what we asked for — it may have
+        # normalized the URIs, and a stale local copy would look like a
+        # mismatch forever.
+        "redirect_uris": registered.get("redirect_uris") or metadata["redirect_uris"],
     }
     if registered.get("client_secret"):
         entry["client_secret"] = registered["client_secret"]
+    # RFC 7592 management credentials, if Vercel issued any. Keeping them makes
+    # a future in-place update possible — that would add a redirect_uri without
+    # rotating client_id, which is what invalidates stored refresh tokens.
+    for field in ("registration_access_token", "registration_client_uri"):
+        if registered.get(field):
+            entry[field] = registered[field]
 
     set_entry("vercel_client", entry)
-    log.info("Registered new Vercel OAuth client (client_id=%s)", client_id)
+    log.info(
+        "Registered new Vercel OAuth client (client_id=%s, %d redirect_uri(s))",
+        client_id, len(entry["redirect_uris"]),
+    )
     return entry
 
 
 async def ensure_oauth_client(redirect_uri: str) -> dict[str, Any]:
     """
-    Return the existing OAuth client, or register a new one via DCR if absent.
-    Idempotent: only one registration round-trip per fresh checkout.
+    Return an OAuth client whose registration covers *redirect_uri*.
+
+    Registers via DCR when absent, and re-registers with the accumulated URI
+    set when a genuinely new one appears — replacing rather than accumulating
+    would re-register endlessly for a user who alternates between, say, a
+    localhost port-forward and a proxy hostname.
+
+    Raises RedirectUriLockedError when a user token is already stored and the
+    URI is new: re-registering rotates client_id, which leaves the stored
+    refresh_token unusable and silently flips status to needs_auth up to an
+    hour later. Disconnecting first makes that an explicit action.
     """
     existing = get_oauth_client()
-    if existing and existing.get("client_id"):
+    if not existing or not existing.get("client_id"):
+        return await register_oauth_client([redirect_uri, *BASELINE_REDIRECT_URIS])
+
+    known = {normalize_redirect_uri(u) for u in existing.get("redirect_uris") or []}
+    if normalize_redirect_uri(redirect_uri) in known:
         return existing
-    return await register_oauth_client(redirect_uri)
+
+    if get_entry("vercel"):
+        raise RedirectUriLockedError(
+            f"Vercel is already connected using a different callback URL, and "
+            f"registering {redirect_uri} would invalidate the stored token."
+        )
+
+    log.info("Vercel redirect_uri %s not registered — re-registering client", redirect_uri)
+    return await register_oauth_client([
+        redirect_uri, *(existing.get("redirect_uris") or []), *BASELINE_REDIRECT_URIS,
+    ])
 
 
 def get_vercel_token() -> str | None:
@@ -188,9 +311,11 @@ def start_oauth_flow(redirect_uri: str) -> dict[str, str]:
     code_verifier = _generate_code_verifier()
     code_challenge = _generate_code_challenge(code_verifier)
 
+    _evict_stale_pending()
     _pending_oauth[state] = {
         "code_verifier": code_verifier,
         "redirect_uri": redirect_uri,
+        "created_at": time.time(),
     }
 
     params = {
@@ -215,6 +340,7 @@ async def exchange_code_for_tokens(code: str, state: str) -> dict[str, Any]:
     {"valid": True, "status": "connected", "username": ..., "name": ..., "auth_method": "oauth"}.
     On failure, returns {"valid": False, "error": "..."}.
     """
+    _evict_stale_pending()
     pending = _pending_oauth.pop(state, None)
     if pending is None:
         return {"valid": False, "error": "Invalid or expired OAuth state parameter."}
