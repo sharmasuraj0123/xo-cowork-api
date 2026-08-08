@@ -511,7 +511,7 @@ async def lifespan(app: FastAPI):
 
     # Composio identity is strictly per-request: the UI carries a session id,
     # and each agent config carries that user's opaque MCP proxy token. There is
-    # no process-wide "instance user" to prime. See services/composio/identity.py.
+    # no process-wide "instance user" to prime. See services/cowork_agent/composio/identity.py.
 
     # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
     try:

@@ -10,7 +10,7 @@ from services.cowork_agent.visualizer.reader import read_json
 
 log = logging.getLogger(__name__)
 
-_PREFS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "composio_action_prefs.json"
+_PREFS_PATH = Path(__file__).resolve().parents[3] / "data" / "composio_action_prefs.json"
 
 
 def _store_path() -> Path:

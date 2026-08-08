@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from services.composio import service as composio_service
-from services.composio.identity import get_composio_user
+from services.cowork_agent.composio import service as composio_service
+from services.cowork_agent.composio.identity import get_composio_user
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,7 +42,7 @@ class DisconnectBody(BaseModel):
 async def list_toolkits(
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    from services.composio import categories as composio_categories
+    from services.cowork_agent.composio import categories as composio_categories
     status_by_slug = _toolkit_status_map(user_id)
     classified = composio_categories.classified_toolkits()
 
@@ -78,7 +78,7 @@ async def connect(
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    composio_service.invalidate_session(user_id)
+    composio_service.sync_session(user_id)
     return JSONResponse(result)
 
 
@@ -90,7 +90,7 @@ async def connect_status(
 ) -> JSONResponse:
     result = composio_service.check_connection(connection_request_id)
     if (result.get("status") or "").upper() == "ACTIVE":
-        composio_service.invalidate_session(user_id)
+        composio_service.sync_session(user_id)
     return JSONResponse(result)
 
 
@@ -116,7 +116,7 @@ async def disconnect(
         r.get("connected_account_id") == body.connected_account_id and r.get("status") == "ACTIVE"
         for r in rows
     )
-    composio_service.invalidate_session(user_id)
+    composio_service.sync_session(user_id)
     return JSONResponse({"status": "needs_auth" if not still_connected else "connected"})
 
 
@@ -141,7 +141,7 @@ async def get_toolkit_prefs(
     toolkit: str,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    from services.composio import action_prefs as composio_action_prefs
+    from services.cowork_agent.composio import action_prefs as composio_action_prefs
     return JSONResponse(
         {"actions": composio_action_prefs.get_toolkit_prefs(toolkit, user_id)}
     )
@@ -153,14 +153,15 @@ async def put_toolkit_prefs(
     body: PrefsBody,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    from services.composio import action_prefs as composio_action_prefs
-    from services.composio import categories as composio_categories
+    from services.cowork_agent.composio import action_prefs as composio_action_prefs
+    from services.cowork_agent.composio import categories as composio_categories
     if toolkit not in composio_categories.classified_toolkits():
         raise HTTPException(
             status_code=404,
             detail=f"Per-action prefs are not configurable for toolkit '{toolkit}' yet.",
         )
     updated = composio_action_prefs.bulk_set(toolkit, body.actions, user_id)
+    composio_service.sync_session(user_id)
     return JSONResponse({"actions": updated})
 
 

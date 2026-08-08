@@ -68,7 +68,7 @@ async def resolve_user_from_bearer(request: Request) -> Optional[str]:
     token = _extract_bearer(request)
     if not token:
         return None
-    from services.composio.session_identity import resolve as resolve_session
+    from services.cowork_agent.composio.session_identity import resolve as resolve_session
     uid = resolve_session(token)
     if uid:
         return uid

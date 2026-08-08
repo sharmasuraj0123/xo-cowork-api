@@ -48,14 +48,14 @@ def write_session_mcp_config(user_id: Optional[str], session_key: Optional[str])
         return None
 
     try:
-        from services.composio import service as composio_service
+        from services.cowork_agent.composio import service as composio_service
     except Exception as exc:
         log.debug("mcp_config: composio_service not importable: %s", exc)
         return None
 
     # Loopback proxy URL — no headers, no Composio credentials on disk. The
     # proxy resolves this session's user from the opaque token and injects
-    # x-api-key server-side. See services/composio/mcp_proxy.py.
+    # x-api-key server-side. See services/cowork_agent/composio/mcp_proxy.py.
     try:
         proxy_url = composio_service._cowork_proxy_url(user_id)
     except Exception as exc:

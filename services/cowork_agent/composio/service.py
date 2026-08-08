@@ -148,13 +148,7 @@ def initiate_connection(
 def check_connection(connection_request_id: str) -> dict[str, Any]:
     client = _composio()
     try:
-        get_fn = (
-            getattr(client.connected_accounts, "get", None)
-            or getattr(client.connected_accounts, "retrieve", None)
-        )
-        if get_fn is None:
-            raise RuntimeError("Composio SDK has no connected_accounts.get/retrieve method.")
-        record = get_fn(connection_request_id)
+        record = client.connected_accounts.get(connection_request_id)
     except Exception as exc:
         log.warning("composio: check_connection failed: %s", exc)
         return {"status": "FAILED", "connected_account_id": None, "error": str(exc)}
@@ -165,10 +159,15 @@ def check_connection(connection_request_id: str) -> dict[str, Any]:
     }
 
 
-def list_connections(user_id: str) -> list[dict[str, Any]]:
+def list_connections(
+    user_id: str, *, statuses: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
     client = _composio()
+    list_kwargs: dict[str, Any] = {"user_ids": [user_id]}
+    if statuses:
+        list_kwargs["statuses"] = statuses
     try:
-        page = client.connected_accounts.list(user_ids=[user_id])
+        page = client.connected_accounts.list(**list_kwargs)
     except Exception as exc:
         log.warning("composio: list_connections failed for user=%s: %s", user_id, exc)
         return []
@@ -193,13 +192,7 @@ def list_connections(user_id: str) -> list[dict[str, Any]]:
 def disconnect(connected_account_id: str) -> bool:
     client = _composio()
     try:
-        delete_fn = (
-            getattr(client.connected_accounts, "delete", None)
-            or getattr(client.connected_accounts, "remove", None)
-        )
-        if delete_fn is None:
-            raise RuntimeError("Composio SDK has no connected_accounts.delete/remove method.")
-        delete_fn(connected_account_id)
+        client.connected_accounts.delete(connected_account_id)
         return True
     except Exception as exc:
         log.warning("composio: disconnect failed: %s", exc)
@@ -222,8 +215,8 @@ def list_tools(
         log.warning("composio: list_tools failed (toolkit=%s): %s", meta.slug, exc)
         return []
 
-    from services.composio import action_prefs as composio_action_prefs
-    from services.composio import categories as composio_categories
+    from services.cowork_agent.composio import action_prefs as composio_action_prefs
+    from services.cowork_agent.composio import categories as composio_categories
 
     out: list[dict[str, Any]] = []
     for t in tools:
@@ -256,7 +249,8 @@ def _toolkit_id_for_slug(slug: str) -> Optional[str]:
     return None
 
 
-_SESSIONS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "composio_sessions.json"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SESSIONS_PATH = _REPO_ROOT / "data" / "composio_sessions.json"
 
 _SESSION_IDS: dict[str, str] = {}
 _PROXY_TOKENS: dict[str, str] = {}
@@ -376,10 +370,30 @@ def _delete_remote_session(session_id: str, user_id: str) -> None:
         )
 
 
+def _disabled_tools_config(user_id: str) -> dict[str, dict[str, list[str]]]:
+    from services.cowork_agent.composio import action_prefs as composio_action_prefs
+
+    try:
+        prefs = composio_action_prefs.load_prefs(user_id)
+    except Exception as exc:
+        log.warning("composio: could not read action prefs for user=%s: %s", user_id, exc)
+        prefs = {}
+    return {
+        toolkit_id: {
+            "disable": sorted(
+                slug
+                for slug, enabled in prefs.get(toolkit_id, {}).items()
+                if enabled is False
+            )
+        }
+        for toolkit_id in TOOLKITS
+    }
+
+
 def _pinned_connected_accounts(user_id: str) -> dict[str, list[str]]:
     pinned: dict[str, list[str]] = {}
     try:
-        rows = list_connections(user_id)
+        rows = list_connections(user_id, statuses=["ACTIVE"])
     except Exception as exc:
         log.warning("composio: list_connections failed while building pin map for user=%s: %s", user_id, exc)
         return pinned
@@ -404,6 +418,28 @@ def invalidate_session(user_id: str) -> None:
         _delete_remote_session(session_id, user_id)
 
 
+def sync_session(user_id: str) -> None:
+    if not user_id:
+        return
+    _ensure_sessions_loaded()
+    sid = _SESSION_IDS.get(user_id)
+    if not sid:
+        return
+    try:
+        session = _composio().use(sid)
+        session.update(
+            connected_accounts=_pinned_connected_accounts(user_id),
+            tools=_disabled_tools_config(user_id),
+        )
+        log.info("composio: updated session %s for user=%s", sid, user_id)
+    except Exception as exc:
+        log.warning(
+            "composio: session update failed for user=%s, falling back to re-mint: %s",
+            user_id, exc,
+        )
+        invalidate_session(user_id)
+
+
 def get_session(user_id: str):
     user_id = _require_user_id(user_id, "get_session")
     _ensure_sessions_loaded()
@@ -415,7 +451,11 @@ def get_session(user_id: str):
             log.debug("composio: use(%s) failed for user=%s: %s", sid, user_id, exc)
             _SESSION_IDS.pop(user_id, None)
             _persist_session_id(user_id, None)
-    create_kwargs: dict[str, Any] = {"user_id": user_id}
+    create_kwargs: dict[str, Any] = {
+        "user_id": user_id,
+        "tools": _disabled_tools_config(user_id),
+        "mcp": True,
+    }
     pinned = _pinned_connected_accounts(user_id)
     if pinned:
         create_kwargs["connected_accounts"] = pinned

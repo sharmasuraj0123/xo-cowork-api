@@ -8,7 +8,7 @@ through the loader; the agent literal lives here, in the adapter tree, per the
 modularity invariant (DEVELOPING.md §6).
 
 The entry carries only the loopback proxy URL — no headers, no Composio API
-key. ``services/composio/mcp_proxy.py`` injects credentials server-side.
+key. ``services/cowork_agent/composio/mcp_proxy.py`` injects credentials server-side.
 """
 
 from __future__ import annotations
