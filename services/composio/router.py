@@ -1,28 +1,3 @@
-"""
-REST routes for Composio-backed integrations.
-
-Composio is the single source of truth — this router is a thin proxy. See
-services/composio/service.py and docs/composio-xo-swarm-api-migration.md.
-
-Every endpoint here resolves its caller through the ``get_composio_user``
-dependency: a valid ``Authorization: Bearer <session_id>`` or a 401. There is no
-shared/sentinel user — see services/composio/identity.py.
-
-Endpoints (all under /api/connectors/composio):
-  GET    /toolkits                       — catalog + per-user connection status
-  POST   /{toolkit}/connect              — start OAuth flow or submit an API key
-  GET    /{toolkit}/status               — poll a pending connection_request
-  POST   /{toolkit}/disconnect           — revoke a connection
-  GET    /{toolkit}/tools                — list actions available in a toolkit
-                                          (includes disabled rows + category tag)
-  GET    /{toolkit}/prefs                — per-action enable/disable map
-  PUT    /{toolkit}/prefs                — toggle one or more actions
-                                          (404 for toolkits not yet supported)
-  POST   /refresh-gateway                — rewrite the session-backed MCP entry
-                                          in ~/.openclaw or ~/.hermes config
-  GET    /callback                       — OAuth callback (HTML, postMessages opener)
-"""
-
 from __future__ import annotations
 
 import json
@@ -40,31 +15,18 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _toolkit_status_map(user_id: str) -> dict[str, dict[str, Any]]:
-    """{toolkit_slug_upper: {status, connected_account_id, scheme}} for fast lookups."""
     by_slug: dict[str, dict[str, Any]] = {}
     for row in composio_service.list_connections(user_id):
         slug = (row.get("toolkit") or "").upper()
         if not slug:
             continue
-        # Prefer the most-recent ACTIVE row per toolkit.
         prev = by_slug.get(slug)
         if prev and prev.get("status") == "ACTIVE" and row.get("status") != "ACTIVE":
             continue
         by_slug[slug] = row
     return by_slug
 
-
-# ---------------------------------------------------------------------------
-# Request bodies
-# ---------------------------------------------------------------------------
-
-# NOTE: neither body carries a ``user_id``. Identity comes only from the bearer
-# token, so a client cannot name the tenant it wants to act as.
 
 class ConnectBody(BaseModel):
     auth_scheme: str = "OAUTH2"
@@ -76,15 +38,11 @@ class DisconnectBody(BaseModel):
     connected_account_id: str
 
 
-# ---------------------------------------------------------------------------
-# Catalog + status
-# ---------------------------------------------------------------------------
-
 @router.get("/api/connectors/composio/toolkits")
 async def list_toolkits(
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    from services.composio import categories as composio_categories  # noqa: PLC0415
+    from services.composio import categories as composio_categories
     status_by_slug = _toolkit_status_map(user_id)
     classified = composio_categories.classified_toolkits()
 
@@ -104,10 +62,6 @@ async def list_toolkits(
     return JSONResponse({"toolkits": toolkits})
 
 
-# ---------------------------------------------------------------------------
-# Connect / status / disconnect
-# ---------------------------------------------------------------------------
-
 @router.post("/api/connectors/composio/{toolkit}/connect")
 async def connect(
     toolkit: str,
@@ -124,8 +78,6 @@ async def connect(
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    # Evict cached Tool Router session — the new Connected Account won't be
-    # pinned into a session minted before this point.
     composio_service.invalidate_session(user_id)
     return JSONResponse(result)
 
@@ -137,7 +89,6 @@ async def connect_status(
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
     result = composio_service.check_connection(connection_request_id)
-    # If the OAuth dance just finished, the user's pinned set changed.
     if (result.get("status") or "").upper() == "ACTIVE":
         composio_service.invalidate_session(user_id)
     return JSONResponse(result)
@@ -149,9 +100,6 @@ async def disconnect(
     body: DisconnectBody,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    # Ownership gate: only revoke a connected account that belongs to the
-    # caller. Composio's delete takes a bare account id, so without this a
-    # tenant could disconnect another tenant's account by guessing its id.
     owned = {
         r.get("connected_account_id") for r in composio_service.list_connections(user_id)
     }
@@ -163,7 +111,6 @@ async def disconnect(
     ok = composio_service.disconnect(body.connected_account_id)
     if not ok:
         raise HTTPException(status_code=502, detail="Composio disconnect failed.")
-    # Best-effort: re-fetch authoritative status from Composio for the response.
     rows = composio_service.list_connections(user_id)
     still_connected = any(
         r.get("connected_account_id") == body.connected_account_id and r.get("status") == "ACTIVE"
@@ -173,40 +120,16 @@ async def disconnect(
     return JSONResponse({"status": "needs_auth" if not still_connected else "connected"})
 
 
-# ---------------------------------------------------------------------------
-# Tools listing + direct execution
-# ---------------------------------------------------------------------------
-
 @router.get("/api/connectors/composio/{toolkit}/tools")
 async def list_toolkit_tools(
     toolkit: str,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    """Full action catalogue for a toolkit — including currently disabled
-    actions, each carrying `enabled` and (where supported) `category`.
-
-    `include_disabled=True` because this endpoint feeds the Connectors UI's
-    toggle list — the UI needs to render the OFF rows, not just the ON ones.
-    The agent path (`composio_list_tools` meta-tool) keeps the default
-    `include_disabled=False` so disabled actions never enter the prompt.
-    """
     try:
         tools = composio_service.list_tools(user_id, toolkit, include_disabled=True)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return JSONResponse({"tools": tools})
-
-
-# ---------------------------------------------------------------------------
-# Per-action enable/disable prefs (UI: Connectors → Composio → tile expand)
-# ---------------------------------------------------------------------------
-#
-# Toolkits whose actions are configurable via the Connectors UI. Derived from
-# `composio_categories.classified_toolkits()` — every toolkit with a category
-# map (exact or verb-heuristic) is automatically writable. Adding a new
-# toolkit's prefs panel is then a single edit in categories.py.
-# All toolkits accept reads (GET) and return an empty map by default — keeps
-# the UI's fetch logic free of toolkit-specific branches.
 
 
 class PrefsBody(BaseModel):
@@ -218,11 +141,7 @@ async def get_toolkit_prefs(
     toolkit: str,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    """Return the disabled-slug map for one toolkit. Absent slugs are enabled
-    by default; the response shape mirrors the on-disk store.
-    """
-    # Local import: keep router lazy-loaded, mirrors composio_service style.
-    from services.composio import action_prefs as composio_action_prefs  # noqa: PLC0415
+    from services.composio import action_prefs as composio_action_prefs
     return JSONResponse(
         {"actions": composio_action_prefs.get_toolkit_prefs(toolkit, user_id)}
     )
@@ -234,16 +153,8 @@ async def put_toolkit_prefs(
     body: PrefsBody,
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    """Toggle one or more actions for a toolkit.
-
-    Body: ``{"actions": {"GOOGLECALENDAR_DELETE_EVENT": false, ...}}``.
-    Slugs set to ``true`` are pruned from the store (enabled-by-default).
-
-    404 for any toolkit not yet wired into the Connectors UI — keeps the
-    surface honest about which toolkits actually have UI scaffolding.
-    """
-    from services.composio import action_prefs as composio_action_prefs  # noqa: PLC0415
-    from services.composio import categories as composio_categories  # noqa: PLC0415
+    from services.composio import action_prefs as composio_action_prefs
+    from services.composio import categories as composio_categories
     if toolkit not in composio_categories.classified_toolkits():
         raise HTTPException(
             status_code=404,
@@ -253,34 +164,11 @@ async def put_toolkit_prefs(
     return JSONResponse({"actions": updated})
 
 
-# ---------------------------------------------------------------------------
-# Gateway install — openclaw / hermes
-#
-# Unlike claude_code which gets per-session --mcp-config, openclaw and hermes
-# expose MCP via gateway-side config only. This endpoint writes the current
-# user's session-backed Composio MCP entry into the gateway's config file.
-# Idempotent — re-call to refresh.
-#
-# MULTI-TENANT LIMITATION: ~/.openclaw/openclaw.json and ~/.hermes/config.yaml
-# are machine-global — one file, one gateway process, all users. Whoever calls
-# this last owns the signed proxy URL in it, so every subsequent gateway tool
-# call attributes to that user regardless of who prompted. Claude Code is not
-# affected (its MCP config is per-session, written at spawn time). The response
-# carries a `multi_tenant_warning` so the UI can surface this rather than
-# implying isolation the file layout cannot provide.
-# ---------------------------------------------------------------------------
-
 @router.post("/api/connectors/composio/refresh-gateway")
 async def refresh_gateway(
     agent: str = Query(...),
     user_id: str = Depends(get_composio_user),
 ) -> JSONResponse:
-    """Install the caller's cowork MCP entry into ``agent``'s gateway config.
-
-    ``agent`` is validated against the adapters that actually expose an
-    ``mcp_install`` capability rather than a hardcoded list, so a new gateway
-    agent works by dropping in its adapter folder — no edit here.
-    """
     supported = composio_service.gateway_install_agents()
     if agent not in supported:
         raise HTTPException(
@@ -302,12 +190,6 @@ async def refresh_gateway(
     status = 200 if result.get("ok") else 422
     return JSONResponse(result, status_code=status)
 
-
-# ---------------------------------------------------------------------------
-# OAuth callback — Composio redirects here after the user authorizes.
-# Mirrors the Vercel /callback pattern: postMessage to opener, then close.
-# Frontend listens for {type: "connector-auth-complete"}.
-# ---------------------------------------------------------------------------
 
 @router.get("/api/connectors/composio/callback")
 async def composio_callback(

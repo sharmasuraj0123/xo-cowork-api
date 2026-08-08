@@ -1,36 +1,3 @@
-"""
-Per-toolkit "Write vs Read" classification for Composio actions.
-
-The Connectors UI groups action toggles into Write / Read sections. Composio's
-API doesn't expose this tag, so we maintain per-toolkit classification and
-merge it into the catalogue inside `composio_service.list_tools`.
-
-Coverage today (every toolkit surfaced as a Composio tile in the UI):
-
-- Exact slug maps  — figma, gmail, googlecalendar, googledocs, googlemeet,
-                     googlesheets, googleslides, notion
-
-`classify(toolkit_id, slug)` returns `"read"` / `"write"` for known slugs,
-`None` otherwise. The agent path ignores the category entirely and isn't
-affected. Unknown slugs (a new Composio action we haven't classified yet)
-return `None` so the UI buckets them as "Other" and we know to extend the
-relevant map.
-
-When adding a new toolkit:
-
-1. Pull the catalogue:
-       composio_service.list_tools("<your_xo_user_id>", "<toolkit_id>",
-                                   include_disabled=True)
-2. Add an exact map under `_CATEGORIES` (preferred for catalogues under ~200
-   actions) or implement a verb-heuristic dispatcher for larger ones.
-3. Register in `_CATEGORIES` below.
-
-Classification rule of thumb: anything that creates, mutates, deletes,
-imports, moves, sends, attaches/detaches, or sets up/down a notification
-channel (Watch / Stop) is a `write`. Pure reads (Get / List / Find / Search /
-Fetch / Retrieve / Download / Report) are `read`.
-"""
-
 from __future__ import annotations
 
 from typing import Literal, Optional
@@ -399,20 +366,8 @@ _CATEGORIES: dict[str, dict[str, Category]] = {
 
 
 def classified_toolkits() -> frozenset[str]:
-    """Toolkits with a category map.
-
-    Used by the router to gate PUT /prefs and by the UI to decide whether to
-    surface the "Configure tools" panel. Centralising this here keeps the
-    classifier and the writability allowlist from drifting.
-    """
     return frozenset(_CATEGORIES.keys())
 
 
 def classify(toolkit_id: str, slug: str) -> Optional[Category]:
-    """Return `"read"` / `"write"` for known slugs, `None` otherwise.
-
-    Unknown slugs return `None` so the UI can decide whether to omit them or
-    fall back to an "Other" bucket. The agent path ignores the category
-    entirely and isn't affected.
-    """
     return _CATEGORIES.get(toolkit_id, {}).get(slug)
