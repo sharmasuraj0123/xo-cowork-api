@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import logging
 from typing import Any, Optional
@@ -30,7 +31,6 @@ def _toolkit_status_map(user_id: str) -> dict[str, dict[str, Any]]:
 
 class ConnectBody(BaseModel):
     auth_scheme: str = "OAUTH2"
-    api_key: Optional[str] = None
     redirect_uri: Optional[str] = None
 
 
@@ -73,7 +73,6 @@ async def connect(
             user_id=user_id,
             toolkit_id=toolkit,
             auth_scheme=body.auth_scheme,
-            api_key=body.api_key,
             redirect_uri=body.redirect_uri,
         )
     except (ValueError, RuntimeError) as exc:
@@ -218,10 +217,16 @@ async def composio_callback(
 
 
 def _callback_html(payload: dict[str, Any], ok: bool) -> str:
-    title = "Connected" if ok else "Authorization failed"
-    heading = "You're connected." if ok else "Authorization failed"
-    sub = "You can close this window." if ok else payload.get("error", "")
-    payload_json = json.dumps(payload)
+    # Everything interpolated below can originate in a query parameter the
+    # provider redirect controls, so it is untrusted. HTML text is escaped, and
+    # `<` is escaped in the JSON so a payload cannot close the <script> element
+    # it is embedded in (JSON alone does not escape "</script>").
+    title = html.escape("Connected" if ok else "Authorization failed")
+    heading = html.escape("You're connected." if ok else "Authorization failed")
+    sub = html.escape(
+        "You can close this window." if ok else str(payload.get("error", ""))
+    )
+    payload_json = json.dumps(payload).replace("<", "\\u003c")
     return f"""<!DOCTYPE html>
 <html><head><title>{title}</title>
 <style>

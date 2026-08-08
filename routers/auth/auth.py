@@ -179,7 +179,7 @@ async def consume_auth_flow(auth_session_id: str, poll_token: str) -> Dict[str, 
         if user_id:
             from services.cowork_agent.composio import session_identity  # local import: avoid load cycle
             session_id = session_identity.register(
-                user_id, access_token, ttl_seconds=result.get("expires_in"),
+                user_id, ttl_seconds=result.get("expires_in"),
             )
         return {
             "success": True,

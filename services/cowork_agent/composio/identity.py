@@ -60,6 +60,11 @@ async def _validate_token(token: str) -> Optional[str]:
         return None
 
     user_id = str(user_id)
+    # Drop expired rows before inserting. The dict is keyed by the raw XO token,
+    # so without this it grows unbounded and retains credentials for the life of
+    # the process. Mirrors session_identity._prune.
+    for stale in [t for t, (_, exp) in _TOKEN_CACHE.items() if exp <= now]:
+        _TOKEN_CACHE.pop(stale, None)
     _TOKEN_CACHE[token] = (user_id, now + _TOKEN_TTL_SECONDS)
     return user_id
 

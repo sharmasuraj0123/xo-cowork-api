@@ -120,6 +120,12 @@ async def _proxy(
     )
 
 
+# The unscoped routes below carry no identity and therefore always 401. They are
+# deliberate: a stale agent config that predates the /u/<token> URLs gets a clear
+# error telling it to re-install, rather than silently reaching another tenant.
+# Do not delete them as dead code.
+
+
 @router.post("/mcp/cowork-proxy/")
 @router.post("/mcp/cowork-proxy")
 async def mcp_proxy_post(request: Request):

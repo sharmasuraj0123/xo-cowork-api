@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import secrets
@@ -113,32 +112,20 @@ def initiate_connection(
     user_id: str,
     toolkit_id: str,
     auth_scheme: str = "OAUTH2",
-    api_key: Optional[str] = None,
     redirect_uri: Optional[str] = None,
 ) -> dict[str, Any]:
-    meta = toolkit_meta(toolkit_id)
+    # Every toolkit in TOOLKITS is OAUTH2-only, so _auth_config_id_for raises
+    # for any other scheme before we get here. Re-add an API_KEY branch (via
+    # connected_accounts.initiate) if an API_KEY toolkit is ever registered.
     scheme = auth_scheme.upper()
     auth_config_id = _auth_config_id_for(toolkit_id, scheme)
     callback = redirect_uri or _callback_url()
-    client = _composio()
 
-    if scheme == "API_KEY":
-        if not api_key:
-            raise ValueError(
-                f"{meta.slug}: API_KEY scheme requires `api_key` in the request body."
-            )
-        request = client.connected_accounts.initiate(
-            user_id=user_id,
-            auth_config_id=auth_config_id,
-            callback_url=callback,
-            config={"auth_scheme": "API_KEY", "val": {"status": "ACTIVE", "api_key": api_key}},
-        )
-    else:
-        request = client.connected_accounts.link(
-            user_id=user_id,
-            auth_config_id=auth_config_id,
-            callback_url=callback,
-        )
+    request = _composio().connected_accounts.link(
+        user_id=user_id,
+        auth_config_id=auth_config_id,
+        callback_url=callback,
+    )
     return {
         "auth_url": _attr(request, "redirect_url"),
         "connection_request_id": _attr(request, "id"),
@@ -236,17 +223,6 @@ def list_tools(
             entry["category"] = category
         out.append(entry)
     return out
-
-
-def _toolkit_id_for_slug(slug: str) -> Optional[str]:
-    if not isinstance(slug, str):
-        return None
-    upper = slug.upper()
-    for toolkit_id, meta in TOOLKITS.items():
-        prefix = meta.slug + "_"
-        if upper.startswith(prefix) or upper == meta.slug:
-            return toolkit_id
-    return None
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -469,13 +445,15 @@ def get_session(user_id: str):
 
 def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
     session = get_session(user_id)
-    mcp = getattr(session, "mcp", None)
-    url = getattr(mcp, "url", None) if mcp is not None else None
-    headers = getattr(mcp, "headers", None) if mcp is not None else None
+    url = _attr(session, "mcp", "url")
+    headers = _attr(session, "mcp", "headers", default=None)
     if not url:
-        url = _attr(session, "mcp", "url") or _attr(session, "url")
-    if not headers:
-        headers = _attr(session, "mcp", "headers", default=None)
+        # Without this the entry would carry the literal string "None", which is
+        # truthy — it passes every downstream guard and fails much later as an
+        # opaque connection error.
+        raise RuntimeError(
+            f"composio: session for user={user_id} exposed no MCP url."
+        )
     entry: dict[str, Any] = {"type": "http", "url": str(url)}
     if headers:
         entry["headers"] = dict(headers)
@@ -486,7 +464,7 @@ def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
     return entry
 
 
-def _cowork_proxy_url(user_id: str | None = None) -> str:
+def _cowork_proxy_url(user_id: str) -> str:
     uid = _require_user_id(user_id, "_cowork_proxy_url")
     port = int(os.getenv("PORT", "5002"))
     return f"http://127.0.0.1:{port}/mcp/cowork-proxy/u/{proxy_token_for_user(uid)}"
