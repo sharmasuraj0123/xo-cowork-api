@@ -66,8 +66,6 @@ TOOLKITS: dict[str, ToolkitMeta] = {
     "googleslides":    ToolkitMeta("GOOGLESLIDES",    "Google Slides",    ("OAUTH2",),            {"OAUTH2": "COMPOSIO_AUTH_CONFIG_GOOGLESLIDES"}),
     "googlemeet":      ToolkitMeta("GOOGLEMEET",      "Google Meet",      ("OAUTH2",),            {"OAUTH2": "COMPOSIO_AUTH_CONFIG_GOOGLEMEET"}),
     "figma":           ToolkitMeta("FIGMA",           "Figma",            ("OAUTH2",),            {"OAUTH2": "COMPOSIO_AUTH_CONFIG_FIGMA"}),
-    "dropbox":         ToolkitMeta("DROPBOX",         "Dropbox",          ("OAUTH2",),            {"OAUTH2": "COMPOSIO_AUTH_CONFIG_DROPBOX"}),
-    "browserbase":     ToolkitMeta("BROWSERBASE_TOOL", "Browserbase",     ("API_KEY",),           {"API_KEY": "COMPOSIO_AUTH_CONFIG_BROWSERBASE"}),
 }
 
 
