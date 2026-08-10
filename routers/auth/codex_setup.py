@@ -81,7 +81,12 @@ def _upsert_env_key(env_path: str, key: str, value: str) -> None:
     """Insert or update a single KEY="value" in a .env file. Creates file if missing."""
     if not os.path.isfile(env_path):
         os.makedirs(os.path.dirname(env_path), exist_ok=True)
-        with open(env_path, "w") as f:
+        # 0600 on creation: the only keys written here are access tokens, and a
+        # plain open() would inherit the umask and leave the new file
+        # world-readable. An existing file keeps whatever mode its owner chose
+        # (setup.sh already creates both .env files 0600).
+        fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(f'{key}="{value}"\n')
         return
     lines: list[str] = []
