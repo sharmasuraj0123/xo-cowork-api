@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from services import tenancy
+
 log = logging.getLogger(__name__)
 
 
@@ -321,18 +323,34 @@ def proxy_token_for_user(user_id: str) -> str:
 
 
 def user_for_proxy_token(token: str) -> Optional[str]:
+    """Resolve an MCP proxy token to its owning principal.
+
+    Rows written before workspace scoping hold a bare account id. Honouring one
+    would let an agent whose MCP config predates the change keep reaching the
+    account-wide Composio bucket — a silent bypass of per-workspace isolation —
+    so unscoped rows are rejected rather than upgraded. The caller turns None
+    into a 401 that tells the agent to re-install its config, which re-mints the
+    token against the current principal.
+    """
     if not token:
         return None
     _ensure_sessions_loaded()
     user_id = _PROXY_TOKENS.get(token)
-    if user_id:
-        return user_id
-    try:
-        _, tokens = _load_store()
-    except Exception:
+    if not user_id:
+        try:
+            _, tokens = _load_store()
+        except Exception:
+            return None
+        _PROXY_TOKENS.update(tokens)
+        user_id = _PROXY_TOKENS.get(token)
+    if user_id and not tenancy.is_scoped(user_id):
+        log.warning(
+            "composio: proxy token maps to a pre-workspace-scoping principal; "
+            "rejecting it. Re-install the agent's MCP config via "
+            "POST /api/connectors/composio/refresh-gateway."
+        )
         return None
-    _PROXY_TOKENS.update(tokens)
-    return _PROXY_TOKENS.get(token)
+    return user_id
 
 
 def _delete_remote_session(session_id: str, user_id: str) -> None:

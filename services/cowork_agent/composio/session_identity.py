@@ -28,6 +28,12 @@ def _prune(now: float) -> None:
 
 
 def register(user_id: str, ttl_seconds: Optional[float] = None) -> Optional[str]:
+    # Stores the bare XO **account** id, not a workspace-scoped principal. That
+    # is deliberate: `_SESSIONS` is per-process and in-memory, so a session id
+    # minted in one workspace does not exist in another workspace's process and
+    # cannot be replayed across pods. Scoping happens once, at read, in
+    # composio.identity.resolve_user_from_bearer. Do not scope here too.
+    #
     # The caller's XO access token is deliberately NOT stored. Nothing reads it
     # back, and holding a live credential for the process lifetime is exposure
     # without a purpose. Add it back only alongside a real consumer.

@@ -305,6 +305,11 @@ async def xo_auth_session_self():
     changes and this endpoint simply stops being used.
 
     401 when the backend itself is unauthenticated or XO rejects its credential.
+
+    The returned ``user_id`` is the bare XO **account** id — it answers "which XO
+    user is this backend", not "which tenant". The workspace-scoped principal
+    used for Composio is composed per request in
+    ``services.cowork_agent.composio.identity.resolve_user_from_bearer``.
     """
     from services.cowork_agent.composio import session_identity  # local import: avoid load cycle
 

@@ -1,3 +1,21 @@
+"""
+Per-request identity for Composio.
+
+Two distinct things travel through this module, and conflating them is the bug
+this design exists to prevent:
+
+- an **account id** — what XO's ``/get-user-id`` returns. Every workspace an XO
+  account owns resolves to the same value.
+- a **principal** — the account id composed with the workspace id by
+  ``services.tenancy``. This is the Composio tenant key.
+
+The invariant: *stored and in-process state stays keyed by the bare account id;
+anything crossing the pod boundary is scoped.* So ``_TOKEN_CACHE`` below and
+``session_identity`` both hold account ids, and composition happens once, at
+read, in :func:`resolve_user_from_bearer`. Do not "fix" those to store
+principals — a single composition point is what makes double-scoping impossible.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -7,6 +25,8 @@ from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Request
+
+from services import tenancy
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +53,11 @@ def _extract_bearer(request: Request) -> Optional[str]:
 
 
 async def _validate_token(token: str) -> Optional[str]:
+    """Resolve an XO access token to its **account** id (not a principal).
+
+    The cache is keyed by the raw token and holds account ids; workspace scoping
+    is applied after the cache read, in :func:`resolve_user_from_bearer`.
+    """
     now = time.monotonic()
     cached = _TOKEN_CACHE.get(token)
     if cached and cached[1] > now:
@@ -70,14 +95,35 @@ async def _validate_token(token: str) -> Optional[str]:
 
 
 async def resolve_user_from_bearer(request: Request) -> Optional[str]:
+    """Resolve the request's bearer to a workspace-scoped Composio principal.
+
+    This is the single composition point: both resolution branches (an opaque
+    session id, or a raw XO token) yield an account id, and the workspace half is
+    attached here — so every downstream consumer receives an already-scoped
+    principal and none of them re-derive it.
+
+    Returns None when there is no valid identity *or* no workspace identity. The
+    latter is deliberate: without a workspace there is no tenant, and falling
+    back to the bare account id would put every workspace of the account into one
+    shared Composio bucket.
+    """
     token = _extract_bearer(request)
     if not token:
         return None
     from services.cowork_agent.composio.session_identity import resolve as resolve_session
-    uid = resolve_session(token)
-    if uid:
-        return uid
-    return await _validate_token(token)
+    account_id = resolve_session(token) or await _validate_token(token)
+    if not account_id:
+        return None
+    try:
+        return tenancy.scoped_principal(account_id)
+    except tenancy.WorkspaceIdentityUnavailable as exc:
+        log.error(
+            "composio_identity: %s — refusing to fall back to the account-wide "
+            "bucket, which would share one Composio tenant across every "
+            "workspace of this XO account. %s is injected by the Coder pod.",
+            exc, tenancy.WORKSPACE_ENV,
+        )
+        return None
 
 
 async def get_composio_user(request: Request) -> str:
@@ -89,6 +135,21 @@ async def get_composio_user(request: Request) -> str:
                 "(or 'Authorization: Bearer <session_id>'). Mint one with "
                 "POST /xo-auth/session, or GET /xo-auth/session/self when the "
                 "backend holds the XO credential."
+            ),
+        )
+    # Checked before resolution so a missing workspace identity reports itself,
+    # rather than surfacing as the misleading "invalid or expired bearer token"
+    # below. 401 (not 503) keeps this dependency's status-code surface unchanged.
+    try:
+        tenancy.workspace_id()
+    except tenancy.WorkspaceIdentityUnavailable as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"Workspace identity unavailable ({exc}). This backend scopes "
+                "connector state per workspace and will not fall back to the "
+                f"account-wide bucket. {tenancy.WORKSPACE_ENV} is injected by "
+                "the Coder pod."
             ),
         )
     user_id = await resolve_user_from_bearer(request)
