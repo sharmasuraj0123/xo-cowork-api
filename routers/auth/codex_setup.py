@@ -64,7 +64,10 @@ def _strip_ansi(line: str) -> str:
 
 
 def _project_env_path() -> str:
-    return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parent.parent / ".env")
+    # auth/ → routers/ → repo root. This module lives one level deeper than
+    # routers/space.py, so `.parent.parent` (which was correct before the file
+    # moved into routers/auth/) resolved to routers/.env — a file nothing loads.
+    return os.getenv("DOTENV_PATH") or str(Path(__file__).resolve().parents[2] / ".env")
 
 
 def _agent_env_path() -> str:
@@ -200,12 +203,13 @@ def _read_codex_credentials() -> Optional[dict]:
     return None
 
 
-# NOTE: codex is a legacy Plane-A model client (no adapter). The two writes
-# below target the openclaw gateway's own credential store — openclaw.json and
-# the main agent's auth-profiles.json — whose schemas are openclaw-specific.
-# They are intentionally NOT routed through the active-agent manifest (that
-# would write openclaw-shaped keys into another agent's config). Old but needed;
-# allowlisted in scripts/check_agent_modularity.py.
+# NOTE: the two writes below target the openclaw gateway's own credential store
+# — openclaw.json and the main agent's auth-profiles.json — whose schemas are
+# openclaw-specific. They are intentionally NOT routed through the active-agent
+# manifest (that would write openclaw-shaped keys into another agent's config),
+# and for the same reason they run ONLY when openclaw is the active agent; see
+# the dispatch in codex_setup(). Old but needed; covered by the documented
+# modularity allowlist (DEVELOPING.md §6).
 def _openclaw_config_path() -> str:
     return str(Path.home() / ".openclaw" / "openclaw.json")
 
@@ -343,10 +347,19 @@ def _upsert_agent_auth_profile(
 
     tmp_path = path + ".tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
+        # This file holds a live access + refresh token — write it 0600 like the
+        # hermes path does (_persist_token_to_hermes_auth). A plain open() here
+        # inherited the process umask and left it world-readable (0644).
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
         os.replace(tmp_path, path)
+        try:
+            os.chmod(path, 0o600)  # tighten a pre-existing 0644 file too
+        except OSError:
+            pass
         action = "created" if created else "updated"
         print(f"[codex-setup] agent auth-profiles.json {action}: profile={profile_key}")
     except OSError as e:
@@ -806,7 +819,11 @@ async def codex_setup():
                                         print(f"[codex-setup] hermes gateway restart rc={rc}")
                                     except Exception as e:  # noqa: BLE001
                                         print(f"[codex-setup] hermes gateway restart skipped ({e})")
-                            else:
+                            elif active_backend == "openclaw":
+                                # openclaw consumes codex as a model provider, so it
+                                # needs the credential mirrored into its own gateway
+                                # store. These writes are openclaw-shaped and belong
+                                # to openclaw alone — hence the explicit branch.
                                 _persist_token_to_env_files(token)
                                 print(f"[codex-setup] token persisted (len={len(token)})")
                                 if email:
@@ -821,6 +838,18 @@ async def codex_setup():
                                         )
                                 else:
                                     print("[codex-setup] no email claim found, skipping openclaw.json upsert")
+                            else:
+                                # codex / claude_code / antigravity / anything else:
+                                # the codex CLI's own ~/.codex/auth.json is the login,
+                                # and the token is mirrored only into the ACTIVE agent's
+                                # manifest env_file. Never write another agent's config
+                                # — that previously fabricated ~/.openclaw/ on boxes
+                                # where openclaw was not even installed.
+                                _persist_token_to_env_files(token)
+                                print(
+                                    f"[codex-setup] token persisted (len={len(token)}); "
+                                    f"backend={active_backend} — no foreign-agent credential writes"
+                                )
                         else:
                             print("[codex-setup] login succeeded but no token found in credential files")
                     yield f"data: {json.dumps({'type': 'done', 'returncode': value})}\n\n"
