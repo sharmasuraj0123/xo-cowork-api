@@ -26,6 +26,13 @@ Flow:
        For older frontends that detect success by scraping stdout, a recognized
        success line is also emitted as ``stdout``. On exit 1 we surface the CLI's
        "Login failed: …" line as an ``error``.
+  POST /connect/claude-code?force=1
+    Abandon any live session (kill the CLI, close the PTY, clear state) and
+    start a fresh one instead of attaching to it — the "Try again" escape
+    hatch for a wedged login.
+  DELETE /connect/claude-code
+    Explicitly cancel the active session, if any. Idempotent: 200 even when
+    nothing is active.
 
 On Unix the CLI is spawned with a pseudo-terminal (PTY). Set
 CLAUDE_SETUP_TOKEN_USE_PTY=0 to force the legacy pipe mode.
@@ -433,7 +440,7 @@ async def claude_setup_token_callback(body: ClaudeSetupTokenCallbackBody):
 
 @router.post("/connect/claude-code")
 @router.post("/claude/setup-token", include_in_schema=False)  # legacy alias
-async def claude_setup_token():
+async def claude_setup_token(force: bool = False):
     """
     Run ``claude auth login --claudeai`` and stream stdout/stderr via SSE.
 
@@ -444,10 +451,17 @@ async def claude_setup_token():
     ``~/.claude/.credentials.json``; we persist nothing.
 
     Uses a PTY on Unix by default so the CLI's manual-code prompt reads input.
+
+    ``force`` is a query param, never a body — this endpoint keeps accepting
+    requests that send none. When true and a session is already live, that
+    session is abandoned (CLI killed, PTY closed, globals cleared) before a
+    fresh one is spawned, instead of attaching to it. Absent/falsy, behaviour
+    is byte-identical to before: attach to a live session if one exists, else
+    spawn.
     """
     global _setup_token_process, _setup_token_stdin, _setup_token_pty_master
     cli_path = _resolve_claude_cli_path()
-    print(f"[setup-token] session start requested (cli_path={cli_path})")
+    print(f"[setup-token] session start requested (cli_path={cli_path}, force={force})")
 
     async def generate() -> AsyncGenerator[str, None]:
         global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
@@ -569,7 +583,11 @@ async def claude_setup_token():
 
         try:
             async with _setup_token_lock:
-                if _setup_token_process is not None and _setup_token_process.returncode is None:
+                if (
+                    _setup_token_process is not None
+                    and _setup_token_process.returncode is None
+                    and not force
+                ):
                     # A login is already in flight (dialog re-mount, double
                     # submit, or a retry after an SSE drop). ATTACH to it
                     # instead of orphaning it: same session_id, same CLI, same
@@ -599,13 +617,35 @@ async def claude_setup_token():
                                 break
                 else:
                     if _setup_token_process is not None:
-                        # A finished session that was never consumed/cleared —
-                        # take it over cleanly instead of leaking its PTY fd.
-                        print(
-                            f"[setup-token] taking over finished session "
-                            f"{_setup_token_session_id} "
-                            f"(returncode={_setup_token_process.returncode})"
-                        )
+                        if _setup_token_process.returncode is None:
+                            # force=1 ("Try again", D6): a login is live but the
+                            # caller wants to abandon it rather than attach.
+                            # Kill it here; the PTY-fd close just below (shared
+                            # with the "finished" branch) plus the fresh-spawn
+                            # assignments a few lines down overwrite every
+                            # remaining module global, so no separate
+                            # clear-globals helper is needed. The old session's
+                            # own wait_done() task still fires later and calls
+                            # clear_session(), but that closure's
+                            # "if _setup_token_process is process" guard
+                            # compares against THIS process object — which by
+                            # then no longer matches _setup_token_process (the
+                            # new session) — so it safely no-ops instead of
+                            # tearing down the session we're about to create.
+                            print(
+                                f"[setup-token] force=1: abandoning live session "
+                                f"{_setup_token_session_id} "
+                                f"(pid={_setup_token_process.pid})"
+                            )
+                            _setup_token_process.kill()
+                        else:
+                            # A finished session that was never consumed/cleared —
+                            # take it over cleanly instead of leaking its PTY fd.
+                            print(
+                                f"[setup-token] taking over finished session "
+                                f"{_setup_token_session_id} "
+                                f"(returncode={_setup_token_process.returncode})"
+                            )
                         _close_setup_token_pty_master()
                     env = os.environ.copy()
                     # The login must not be steered by ambient token env: the workspace pod
@@ -705,26 +745,54 @@ async def claude_setup_token():
 
             while True:
                 if _setup_token_queue is not queue:
-                    # A newer stream attached (last one wins) or the session was
-                    # cleared while this stream idled. End THIS stream with its
-                    # terminal event — the login session itself is untouched and
-                    # a paste against the same session_id still works.
-                    print(f"[setup-token] stream superseded (session_id={session_id})")
-                    yield f"data: {json.dumps({'type': 'error', 'error': 'This connection was superseded by a newer one; the login session is still active.'})}\n\n"
+                    # A newer stream attached (last one wins), or the session was
+                    # cleared/cancelled while this stream idled. End THIS stream with
+                    # its terminal event.
+                    #
+                    # Which of those happened matters to the message: an attach
+                    # takeover leaves the login alive (a paste against the same
+                    # session_id still works), but force=1 and DELETE kill the process
+                    # first — telling that user the session "is still active" would be
+                    # a lie. `_setup_token_process is None` distinguishes them, since
+                    # both teardown paths clear it before swapping the queue.
+                    still_live = _setup_token_process is not None
+                    reason = (
+                        "This connection was superseded by a newer one; the login "
+                        "session is still active."
+                        if still_live
+                        else "This login session was cancelled. Start a new one to "
+                        "get a fresh sign-in link."
+                    )
+                    print(
+                        f"[setup-token] stream superseded (session_id={session_id}, "
+                        f"session_still_live={still_live})"
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'error': reason})}\n\n"
+                    break
+                # Checked at the TOP of every iteration — not only inside the
+                # `except asyncio.TimeoutError` branch below — so a chatty CLI
+                # that keeps handing us events faster than SSE_HEARTBEAT_SECONDS
+                # can't defer this indefinitely (queue.get() would never time
+                # out, so the old in-except check would never run).
+                if time.monotonic() >= _deadline:
+                    if process and process.returncode is None:
+                        print("[setup-token] timed out; killing process")
+                        process.kill()
+                    clear_session()
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'Setup timed out'})}\n\n"
                     break
                 try:
                     item = await asyncio.wait_for(
                         queue.get(), timeout=SSE_HEARTBEAT_SECONDS
                     )
                 except asyncio.TimeoutError:
-                    if time.monotonic() >= _deadline:
-                        if process and process.returncode is None:
-                            print("[setup-token] timed out; killing process")
-                            process.kill()
-                        clear_session()
-                        yield f"data: {json.dumps({'type': 'error', 'error': 'Setup timed out'})}\n\n"
-                        break
                     yield ": heartbeat\n\n"
+                    # Additive keepalive alongside the SSE comment frame above:
+                    # a lossy intermediary proxy may not forward bare comment
+                    # frames, so a data-framed event gives it something to pass
+                    # through. New event type, so unmodified frontends (which
+                    # only handle the existing `type`s) simply ignore it.
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
                     continue
                 kind, value = item
                 if kind == "done":
@@ -834,3 +902,45 @@ async def claude_setup_token():
             "Connection": "keep-alive",
         },
     )
+
+
+@router.delete("/connect/claude-code")
+@router.delete("/claude/setup-token", include_in_schema=False)  # legacy alias
+async def claude_setup_token_cancel():
+    """
+    Explicitly cancel the active setup-token session, if any (the D6 escape
+    hatch for a wedged login, alongside ``force=1`` on the POST above).
+
+    Kills the CLI process, closes the PTY master fd, and clears all session
+    state. Idempotent: returns 200 even when nothing is active, so callers
+    (e.g. a dialog's unmount/close handler) can call this unconditionally
+    without special-casing "nothing to cancel".
+    """
+    global _setup_token_process, _setup_token_stdin, _setup_token_pty_master, _setup_token_session_id, _setup_token_ready
+    global _setup_token_queue, _setup_token_auth_url, _setup_token_started_at
+
+    async with _setup_token_lock:
+        process = _setup_token_process
+        session_id = _setup_token_session_id
+        if process is None:
+            print("[setup-token] cancel: no active session (idempotent no-op)")
+            return {"ok": True, "message": "No active session", "session_id": None}
+        if process.returncode is None:
+            print(f"[setup-token] cancel: killing active session {session_id} (pid={process.pid})")
+            process.kill()
+        else:
+            print(f"[setup-token] cancel: clearing already-finished session {session_id}")
+        # Full teardown here (not the guarded clear_session() closure from
+        # generate(), which is per-stream and out of scope here) — this is an
+        # explicit user-initiated cancel, not a background race we need to
+        # guard against, so it's safe to clear unconditionally under the lock.
+        _setup_token_process = None
+        _setup_token_stdin = None
+        _setup_token_session_id = None
+        _setup_token_ready = None
+        _setup_token_queue = None
+        _setup_token_auth_url = None
+        _setup_token_started_at = None
+        _close_setup_token_pty_master()
+
+    return {"ok": True, "message": "Session cancelled", "session_id": session_id}
