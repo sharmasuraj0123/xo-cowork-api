@@ -12,9 +12,24 @@
   "skills": [
     {
       "name": "okx",
-      "description": "okx/onchainos-skills — OKX OnchainOS skills, installed globally via npx",
-      "command": "npx skills add okx/onchainos-skills --yes -g",
-      "success_message": "OKX OnchainOS skills installed."
+      "description": "okx/onchainos-skills + @okxweb3/a2a-node — installed for every agent that declares okx",
+      "commands": [
+        "npx skills add okx/onchainos-skills --yes -g",
+        "npm install -g @okxweb3/a2a-node"
+      ],
+      "success_message": "OKX OnchainOS skills + a2a-node installed."
+    },
+    {
+      "name": "okx-a2a-openclaw",
+      "description": "@okxweb3/a2a-openclaw — OKX a2a connector for openclaw (declared only in openclaw settings)",
+      "command": "npm install -g @okxweb3/a2a-openclaw",
+      "success_message": "OKX a2a-openclaw installed."
+    },
+    {
+      "name": "okx-a2a-hermes",
+      "description": "@okxweb3/a2a-hermes — OKX a2a connector for hermes (declared only in hermes settings)",
+      "command": "npm install -g @okxweb3/a2a-hermes",
+      "success_message": "OKX a2a-hermes installed."
     }
   ]
 }

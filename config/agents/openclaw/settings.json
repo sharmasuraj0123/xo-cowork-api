@@ -3,5 +3,5 @@
   "gateway_token_env": "OPENCLAW_GATEWAY_TOKEN",
   "anthropic_api_key_env": "ANTHROPIC_API_KEY",
   "timeout": 120,
-  "startup_skills": ["okx"]
+  "startup_skills": ["okx", "okx-a2a-openclaw"]
 }

@@ -1,5 +1,5 @@
 {
   "gateway_token_env": "API_SERVER_KEY",
   "timeout": 120,
-  "startup_skills": ["okx"]
+  "startup_skills": ["okx", "okx-a2a-hermes"]
 }
