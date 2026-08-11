@@ -20,6 +20,9 @@ Flow:
     4. Normalize the pasted value to ``code#state`` and write it (plain bytes + CR)
        to the PTY master. An "Invalid code…" line is *retryable* — the CLI keeps
        waiting for another line, so we keep the session alive for another paste.
+       It is published as a structured ``code_rejected`` event (``retryable: true``)
+       as well as the raw stdout line, so a client never has to pattern-match the
+       CLI's prose to know the paste failed.
     5. On exit 0 (reached only after the CLI writes credentials and prints
        "Login successful.") we emit ``done`` directly — we do NOT gate it on an
        extra ``claude auth status --json`` spawn, which would delay the event.
@@ -844,9 +847,21 @@ async def claude_setup_token(force: bool = False):
                     last_failure_line = stripped[stripped.find("Login failed"):]
                 if "Invalid code" in stripped:
                     # Retryable: the CLI keeps waiting for another line, so we keep
-                    # the session alive (do NOT kill/clear). The line itself streams
-                    # to the UI below as a normal stdout/stderr event.
+                    # the session alive (do NOT kill/clear). The line itself also
+                    # streams to the UI below as a normal stdout/stderr event.
+                    #
+                    # Publish it as a STRUCTURED event too. We already recognise the
+                    # condition here; forwarding only the raw English line forced every
+                    # client to re-parse prose emitted by a CLI none of them own, and a
+                    # client that failed to match it sat on "verifying" until the
+                    # session deadline. This is the same reason auth_url exists rather
+                    # than each client scraping the "visit:" line.
+                    #
+                    # Deliberately NOT `error`: that type is terminal in the client
+                    # contract, and this state is recoverable — the session is still
+                    # live and another paste against the same session_id still works.
                     print("[setup-token] CLI reported invalid code (retryable; session kept alive)")
+                    yield f"data: {json.dumps({'type': 'code_rejected', 'retryable': True, 'message': stripped[stripped.find('Invalid code'):]})}\n\n"
                 if not compat_success_sent and "Login successful" in stripped:
                     # `claude auth login` prints "Login successful." right after the
                     # OAuth exchange, a beat BEFORE the process exits. The deployed
