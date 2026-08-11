@@ -550,6 +550,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"⚠️ Startup skill install failed to schedule (non-fatal): {exc}")
 
+    # Point every agent that supports it at this workspace's Composio MCP proxy.
+    # Backgrounded because resolving the workspace-scoped principal costs one XO
+    # /get-user-id round trip; boot must not wait on it. Installs nothing when the
+    # backend holds no XO credential or has no workspace identity. Non-fatal.
+    _mcp_gateway_task = None
+    try:
+        from services.cowork_agent.composio.gateway_bootstrap import install_gateways_at_startup
+        _mcp_gateway_task = asyncio.create_task(install_gateways_at_startup())
+        print("   Composio MCP: background gateway install scheduled")
+    except Exception as exc:
+        print(f"⚠️ Composio MCP gateway install failed to schedule (non-fatal): {exc}")
+
     # Write ~/xo-projects/.xo/xo.json (static defaults) and seed live status
     # in the background. The dispatcher inside seed_agent_status() picks the
     # right adapter for the current AGENT_NAME (no-op for agents without a
@@ -621,6 +633,13 @@ async def lifespan(app: FastAPI):
         _xo_status_task.cancel()
         try:
             await _xo_status_task
+        except asyncio.CancelledError:
+            pass
+
+    if _mcp_gateway_task and not _mcp_gateway_task.done():
+        _mcp_gateway_task.cancel()
+        try:
+            await _mcp_gateway_task
         except asyncio.CancelledError:
             pass
     print("👋 Shutting down XO Cowork API Server...")

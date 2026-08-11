@@ -31,9 +31,14 @@ def install(proxy_url: str) -> dict[str, Any]:
         return {"ok": False, "error": f"OpenClaw config not found at {CONFIG_PATH}"}
 
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read OpenClaw config: {exc}"}
+    # A config holding a bare JSON scalar (`null`, a list, a string) would make the
+    # setdefault calls below raise out of install() and surface as a 500. Refuse it
+    # instead — never silently replace a file we could not understand.
+    if not isinstance(data, dict):
+        return {"ok": False, "error": f"OpenClaw config at {CONFIG_PATH} is not a JSON object."}
 
     entry: dict[str, Any] = {
         "url": proxy_url,
