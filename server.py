@@ -455,6 +455,16 @@ def _install_shared_deps() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Boot sweep: drop any orphan Claude-Code mcp.json subdirs left behind
+    # by a crash or hard-kill of a previous run. Files there used to carry
+    # the Composio session URL + x-api-key; today they only carry the
+    # loopback-proxy URL, but stale per-session dirs still shouldn't
+    # accumulate. See docs/composio-credential-isolation.md §4 (Fix B).
+    tmp_root = Path(os.getenv("XO_MCP_TMP_ROOT", "/tmp/xo-cowork"))
+    if tmp_root.exists():
+        for child in tmp_root.iterdir():
+            shutil.rmtree(child, ignore_errors=True)
+
     # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
     # Done synchronously so the API doesn't accept requests until the
     # agent it's meant to drive is installed and configured.
@@ -498,6 +508,19 @@ async def lifespan(app: FastAPI):
         print(
             "⚠️ XO startup consume skipped: set both XO_AUTH_SESSION_ID and XO_POLL_TOKEN."
         )
+
+    # Resolve the real single-instance user from the XO credential so Composio
+    # calls attribute to the real account instead of the "default_user" sentinel.
+    # Gated by XO_RESOLVE_INSTANCE_USER; best-effort; touches only its own cache.
+    try:
+        from services import instance_identity
+        iid = await instance_identity.prime_instance_user_id()
+        if iid:
+            print(f"   Instance user: resolved {iid} (Composio attributes here, not default_user)")
+        elif instance_identity.enabled():
+            print("⚠️ Instance user: resolution failed — staying on default_user (see logs)")
+    except Exception as exc:
+        print(f"⚠️ Instance user resolution skipped (non-fatal): {exc}")
 
     # Start rclone daemon for the gdrive/onedrive connectors (non-fatal if rclone isn't installed)
     try:
