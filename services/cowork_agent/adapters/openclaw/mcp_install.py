@@ -48,8 +48,10 @@ def install(proxy_url: str) -> dict[str, Any]:
 
     mcp_section = data.setdefault("mcp", {})
     servers = mcp_section.setdefault("servers", {})
-    servers["cowork"] = entry
-    servers.pop("composio", None)
+    servers["composio"] = entry
+    # "cowork" was the previous server name; pop it so a rename doesn't leave two
+    # keys pointing at the same proxy (which would list every tool twice).
+    servers.pop("cowork", None)
     servers.pop("xo_composio", None)
 
     plugins = data.get("plugins") or {}

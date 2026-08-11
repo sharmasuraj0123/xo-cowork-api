@@ -482,10 +482,10 @@ def build_mcp_server_entry(user_id: str) -> dict[str, Any]:
     return entry
 
 
-def _cowork_proxy_url(user_id: str) -> str:
-    uid = _require_user_id(user_id, "_cowork_proxy_url")
+def _composio_proxy_url(user_id: str) -> str:
+    uid = _require_user_id(user_id, "_composio_proxy_url")
     port = int(os.getenv("PORT", "5002"))
-    return f"http://127.0.0.1:{port}/mcp/cowork-proxy/u/{proxy_token_for_user(uid)}"
+    return f"http://127.0.0.1:{port}/mcp/composio-proxy/u/{proxy_token_for_user(uid)}"
 
 
 def install_into_gateway(user_id: str, agent: str) -> dict[str, Any]:
@@ -501,7 +501,7 @@ def install_into_gateway(user_id: str, agent: str) -> dict[str, Any]:
             ),
         }
     try:
-        proxy_url = _cowork_proxy_url(user_id)
+        proxy_url = _composio_proxy_url(user_id)
     except Exception as exc:
         log.warning("composio: gateway install could not build proxy URL: %s", exc)
         return {"ok": False, "error": str(exc)}

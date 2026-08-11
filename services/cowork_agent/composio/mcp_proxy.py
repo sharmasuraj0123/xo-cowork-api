@@ -120,42 +120,60 @@ async def _proxy(
     )
 
 
-# The unscoped routes below carry no identity and therefore always 401. They are
+# Every handler below serves the canonical `/mcp/composio-proxy/...` path AND the
+# legacy `/mcp/cowork-proxy/...` one, which is what configs written before the
+# rename still point at. Both resolve the same token to the same principal, so old
+# and new configs work side by side and no already-running agent is stranded.
+# Retire the cowork-proxy decorators only once every config has been rewritten.
+#
+# The unscoped routes carry no identity and therefore always 401. They are
 # deliberate: a stale agent config that predates the /u/<token> URLs gets a clear
 # error telling it to re-install, rather than silently reaching another tenant.
 # Do not delete them as dead code.
 
 
+@router.post("/mcp/composio-proxy/")
+@router.post("/mcp/composio-proxy")
 @router.post("/mcp/cowork-proxy/")
 @router.post("/mcp/cowork-proxy")
 async def mcp_proxy_post(request: Request):
     return await _proxy(request, "POST")
 
 
+@router.get("/mcp/composio-proxy/")
+@router.get("/mcp/composio-proxy")
 @router.get("/mcp/cowork-proxy/")
 @router.get("/mcp/cowork-proxy")
 async def mcp_proxy_get(request: Request):
     return await _proxy(request, "GET")
 
 
+@router.delete("/mcp/composio-proxy/")
+@router.delete("/mcp/composio-proxy")
 @router.delete("/mcp/cowork-proxy/")
 @router.delete("/mcp/cowork-proxy")
 async def mcp_proxy_delete(request: Request):
     return await _proxy(request, "DELETE")
 
 
+@router.post("/mcp/composio-proxy/u/{token}/")
+@router.post("/mcp/composio-proxy/u/{token}")
 @router.post("/mcp/cowork-proxy/u/{token}/")
 @router.post("/mcp/cowork-proxy/u/{token}")
 async def mcp_proxy_post_scoped(request: Request, token: str):
     return await _proxy(request, "POST", token)
 
 
+@router.get("/mcp/composio-proxy/u/{token}/")
+@router.get("/mcp/composio-proxy/u/{token}")
 @router.get("/mcp/cowork-proxy/u/{token}/")
 @router.get("/mcp/cowork-proxy/u/{token}")
 async def mcp_proxy_get_scoped(request: Request, token: str):
     return await _proxy(request, "GET", token)
 
 
+@router.delete("/mcp/composio-proxy/u/{token}/")
+@router.delete("/mcp/composio-proxy/u/{token}")
 @router.delete("/mcp/cowork-proxy/u/{token}/")
 @router.delete("/mcp/cowork-proxy/u/{token}")
 async def mcp_proxy_delete_scoped(request: Request, token: str):

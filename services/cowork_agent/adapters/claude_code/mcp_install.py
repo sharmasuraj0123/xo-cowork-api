@@ -27,11 +27,13 @@ from typing import Any
 
 CONFIG_PATH = Path(os.path.expanduser("~/.claude.json"))
 
-SERVER_NAME = "cowork"
+SERVER_NAME = "composio"
 
 # Legacy names from earlier iterations, removed on write so a stale entry can't
-# shadow the current one. Mirrors the hermes/openclaw installers.
-_LEGACY_NAMES = ("composio", "xo_composio")
+# shadow the current one. Mirrors the hermes/openclaw installers. "cowork" is here
+# because it WAS the server name: without popping it a renamed install leaves both
+# keys pointing at the same proxy, and every tool is listed twice.
+_LEGACY_NAMES = ("cowork", "xo_composio")
 
 
 def install(proxy_url: str) -> dict[str, Any]:
