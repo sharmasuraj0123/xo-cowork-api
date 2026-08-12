@@ -108,27 +108,38 @@ def codex_oauth_connected() -> bool:
     return (Path(home) / "auth.json").is_file()
 
 
-async def claude_oauth_connected(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> bool:
-    """Run ``claude auth status --json`` and return its ``loggedIn`` flag.
+async def claude_auth_status(
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run ``claude auth status --json`` once and return the parsed payload.
 
-    Any failure path → False, on purpose. The frontend tile only cares
-    whether the user is authenticated *right now*; if the binary is missing
-    or the JSON is malformed we treat that as "not connected" rather than
-    bubbling an error.
+    Returns ``{}`` on any failure (binary missing, non-zero exit, timeout,
+    malformed JSON) so callers can key off ``loggedIn`` / ``authMethod`` /
+    ``apiKeySource`` without their own error handling. This drives a frontend
+    tile, not an operational alert, so every failure degrades to "empty".
+
+    ``env`` is the environment the probe subprocess runs with (``None`` inherits
+    the current process env). Pass the *same* env the chat subprocess uses so the
+    status reflects the auth the CLI will actually resolve to — e.g. an adapter
+    that strips a shadowed ``ANTHROPIC_API_KEY`` when a native login is present
+    must strip it here too, or the probe reports a key the CLI would never use.
     """
     binary = (os.getenv(CLAUDE_BIN_ENV, "") or "").strip() \
         or shutil.which(DEFAULT_CLAUDE_BIN) \
         or DEFAULT_CLAUDE_BIN
     if os.path.isabs(binary) and not os.path.isfile(binary):
-        return False
+        return {}
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "auth", "status", "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except (FileNotFoundError, PermissionError):
-        return False
+        return {}
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -137,14 +148,25 @@ async def claude_oauth_connected(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> bo
             await proc.communicate()
         except Exception:
             pass
-        return False
+        return {}
     if proc.returncode != 0:
-        return False
+        return {}
     try:
         payload = json.loads((stdout or b"").decode("utf-8", errors="replace") or "{}")
     except json.JSONDecodeError:
-        return False
-    return bool(isinstance(payload, dict) and payload.get("loggedIn"))
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def claude_oauth_connected(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> bool:
+    """Return the ``loggedIn`` flag from ``claude auth status --json``.
+
+    Any failure path → False, on purpose. The frontend tile only cares
+    whether the user is authenticated *right now*; if the binary is missing
+    or the JSON is malformed we treat that as "not connected" rather than
+    bubbling an error.
+    """
+    return bool((await claude_auth_status(timeout)).get("loggedIn"))
 
 
 # ── Composer ─────────────────────────────────────────────────────────────────
@@ -156,17 +178,25 @@ async def build_providers_status(
     anthropic_key_present: Callable[[], bool],
     openai_key_present: Callable[[], bool],
     openrouter_key_present: Callable[[], bool],
+    claude_oauth_present: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Compose the ``/providers/status`` response for `agent`.
 
     The ``*_key_present`` callables let each adapter resolve keys from its
     own env source without this module knowing where that source lives.
+
+    ``claude_oauth_present``, when supplied, overrides the ``oauth.claude_code``
+    verdict — letting an adapter that has already probed ``claude auth status``
+    reuse that single result (and reflect the *resolved* auth method) instead of
+    this module spawning the CLI again via ``claude_oauth_connected``.
     """
     models = _read_xo_models(agent)
 
     oauth: dict[str, dict] = {}
     if _leaf_enabled(models, "oauth", "claude_code"):
-        oauth["claude_code"] = {"connected": await claude_oauth_connected()}
+        connected = claude_oauth_present() if claude_oauth_present is not None \
+            else await claude_oauth_connected()
+        oauth["claude_code"] = {"connected": bool(connected)}
     if _leaf_enabled(models, "oauth", "codex"):
         oauth["codex"] = {"connected": codex_oauth_connected()}
 
@@ -183,6 +213,7 @@ async def build_providers_status(
 
 __all__ = [
     "build_providers_status",
+    "claude_auth_status",
     "claude_oauth_connected",
     "codex_oauth_connected",
     "parse_env_file",

@@ -260,6 +260,17 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         cmd += ["-p", prompt]
         return cmd
 
+    def cli_env(self) -> dict[str, str]:
+        """The environment every spawned ``claude`` invocation runs with — chat
+        subprocesses *and* the ``auth status`` probe behind ``/providers/status``.
+
+        Exposed so the status probe resolves auth through the identical rules the
+        chat path uses (notably dropping a shadowed ``ANTHROPIC_API_KEY`` when a
+        native login is present); otherwise the tile would advertise a key the
+        CLI will never actually use.
+        """
+        return self._subprocess_env()
+
     def _subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
         # Drop empty / placeholder auth vars so the CLI falls back cleanly.
