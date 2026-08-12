@@ -11,9 +11,13 @@ and route by the auth method the CLI actually resolved to:
 - logged in by any other method (``claude.ai`` login, oauth token) → the
   **Claude Code** oauth tile.
 
-A Claude subscription login wins over an ``ANTHROPIC_API_KEY`` in the env, so the
-tiles reflect what the CLI will *actually* use, not everything configured. This
-stays presence-not-validity: a logged-in-but-invalid key still reads connected.
+Crucially the probe runs with the **same environment the chat subprocess uses**
+(``Adapter.cli_env()``), not the raw process env. The chat path drops a shadowed
+``ANTHROPIC_API_KEY`` when a usable native login is present, so a subscription
+login wins; if we probed the raw env instead, the tile would advertise a key the
+CLI never actually uses. The tiles therefore reflect what chat will *actually*
+resolve to, not everything configured. This stays presence-not-validity: a
+logged-in-but-invalid credential still reads connected.
 
 OpenAI is read from the process environment. OpenRouter is different: it is
 configured by merging an ``env`` block into the CLI's own ``settings.json`` (see
@@ -27,6 +31,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from services.cowork_agent.adapters.claude_code.adapter import ClaudeCodeAdapter
 from services.cowork_agent.providers_status_lib import (
     build_providers_status,
     claude_auth_status,
@@ -44,7 +49,7 @@ def _openrouter_configured() -> bool:
 
 
 async def get_providers_status() -> dict[str, Any]:
-    auth = await claude_auth_status()
+    auth = await claude_auth_status(env=ClaudeCodeAdapter({}).cli_env())
     logged_in = bool(auth.get("loggedIn"))
     via_api_key = (auth.get("apiKeySource") or "") == "ANTHROPIC_API_KEY"
 

@@ -108,13 +108,23 @@ def codex_oauth_connected() -> bool:
     return (Path(home) / "auth.json").is_file()
 
 
-async def claude_auth_status(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+async def claude_auth_status(
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Run ``claude auth status --json`` once and return the parsed payload.
 
     Returns ``{}`` on any failure (binary missing, non-zero exit, timeout,
     malformed JSON) so callers can key off ``loggedIn`` / ``authMethod`` /
     ``apiKeySource`` without their own error handling. This drives a frontend
     tile, not an operational alert, so every failure degrades to "empty".
+
+    ``env`` is the environment the probe subprocess runs with (``None`` inherits
+    the current process env). Pass the *same* env the chat subprocess uses so the
+    status reflects the auth the CLI will actually resolve to — e.g. an adapter
+    that strips a shadowed ``ANTHROPIC_API_KEY`` when a native login is present
+    must strip it here too, or the probe reports a key the CLI would never use.
     """
     binary = (os.getenv(CLAUDE_BIN_ENV, "") or "").strip() \
         or shutil.which(DEFAULT_CLAUDE_BIN) \
@@ -126,6 +136,7 @@ async def claude_auth_status(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[s
             binary, "auth", "status", "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except (FileNotFoundError, PermissionError):
         return {}
