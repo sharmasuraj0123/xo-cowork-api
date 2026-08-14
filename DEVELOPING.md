@@ -60,7 +60,8 @@ services/
                                     routes.py paths.py models.py *_status.py store/state_db …
     engine/                       broker runtime: dispatcher messages sessions_io chat_state usage_loader
     registry/                     agent framework: agent_registry adapter_registry settings agent_env
-    connectors/                   external services: gdrive/onedrive/github/vercel/manus/rclone_*/token_store
+    connectors/                   one package per external service: gdrive/ onedrive/ github/
+                                    vercel/ manus/ + shared rclone/ engine and token_store.py
     visualizer/  xo_projects_sync/  project_template/   subsystems
     helpers.py project_layout.py scopes.py xo_cowork_state.py skill_installer.py providers_status_lib.py
 ```

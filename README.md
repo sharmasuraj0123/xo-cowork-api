@@ -206,6 +206,8 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 
 Each connector exposes `connect`, `status`, `disconnect`, `reconnect` plus per-service extras (`/sessions/{id}/submit` for rclone OAuth code paste; `/oauth/start` for Vercel; `/cli/{start,poll,cancel}` for GitHub device flow). The Drive connector additionally ships folder management (`mkdir`, `rmdir`, `folders`) and streaming uploads with no disk spool or RAM buffer.
 
+Connecting GitHub by either method also seeds the workspace's **global git identity** (`user.name` / `user.email`, taken from the authenticated account; the `<id>+<login>@users.noreply.github.com` form when the profile email is private) — without it a fresh workspace fails its first `git commit` with *"Author identity unknown"*, since the pod hostname yields no valid auto-detected address. An identity the user has already set is never overwritten. The device flow additionally runs `gh auth setup-git`, so HTTPS pushes authenticate through the `gh` session.
+
 A `:53682`-shared single-flight lock between Drive and OneDrive prevents concurrent rclone OAuth flows from colliding on the callback port. See the [Connectors guide](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Connectors-Api).
 
 ---
@@ -313,7 +315,8 @@ xo-cowork-api/
 │   │   │   └── <name>/            adapter.py usage.py sessions.py chat.py routes.py models.py …
 │   │   ├── engine/               dispatcher messages sessions_io chat_state usage_loader
 │   │   ├── registry/             agent_registry adapter_registry settings agent_env (auto-discovery)
-│   │   ├── connectors/           rclone, GitHub, Vercel, Manus, token_store glue
+│   │   ├── connectors/           one package per service: gdrive/ onedrive/ github/ vercel/
+│   │   │                           manus/ + shared rclone/ engine and token_store.py
 │   │   ├── visualizer/  xo_projects_sync/  project_template/
 │   │   └── helpers.py project_layout.py skill_installer.py providers_status_lib.py …
 │   ├── usage_sync.py             daily background → /usage/report on swarm
