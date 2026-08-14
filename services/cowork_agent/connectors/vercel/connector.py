@@ -24,14 +24,13 @@ log = logging.getLogger(__name__)
 
 PROVIDER_KEY = "vercel"
 CLIENT_KEY = "vercel_client"
+PENDING_KEY = "vercel_pending"
 
 PENDING_TTL_SECONDS = 30 * 60
 MAX_PENDING = 32
 
 AUTH_METHOD_TOKEN = "api_token"
 AUTH_METHOD_OAUTH = "oauth"
-
-_pending: dict[str, PendingAuth] = {}
 
 
 def _env(name: str) -> str:
@@ -141,12 +140,51 @@ async def connect_with_api_token(token: str) -> Connection:
     return Connection(status="connected", auth_method=AUTH_METHOD_TOKEN, identity=identity)
 
 
-def _prune_pending() -> None:
-    for state in [s for s, p in _pending.items() if p.expired(PENDING_TTL_SECONDS)]:
-        _pending.pop(state, None)
-    while len(_pending) >= MAX_PENDING:
-        oldest = min(_pending.values(), key=lambda p: p.started_at)
-        _pending.pop(oldest.state, None)
+def _remember_pending(auth: PendingAuth) -> None:
+    """Record an in-flight authorization so any instance can finish it.
+
+    Kept in the credential store rather than process memory: the callback is
+    routinely served by a different process than the one that started the flow
+    (a restart, a second instance, a forwarded port), and a code_verifier only
+    that first process holds is a flow nobody can complete.
+    """
+    pending = {
+        state: auth
+        for state, auth in (get_entry(PENDING_KEY) or {}).items()
+        if time.time() - float(auth.get("started_at") or 0) <= PENDING_TTL_SECONDS
+    }
+    while len(pending) >= MAX_PENDING:
+        oldest = min(pending, key=lambda s: float(pending[s].get("started_at") or 0))
+        pending.pop(oldest)
+
+    pending[auth.state] = {
+        "code_verifier": auth.code_verifier,
+        "redirect_uri": auth.redirect_uri,
+        "client_id": auth.client_id,
+        "started_at": auth.started_at,
+    }
+    set_entry(PENDING_KEY, pending)
+
+
+def _take_pending(state: str) -> PendingAuth | None:
+    """Consume an in-flight authorization by state, so a code is used once."""
+    pending = get_entry(PENDING_KEY) or {}
+    record = pending.pop(state, None)
+    if record is None:
+        return None
+
+    if pending:
+        set_entry(PENDING_KEY, pending)
+    else:
+        delete_entry(PENDING_KEY)
+
+    return PendingAuth(
+        state=state,
+        code_verifier=record.get("code_verifier", ""),
+        redirect_uri=record.get("redirect_uri", ""),
+        client_id=record.get("client_id", ""),
+        started_at=float(record.get("started_at") or 0),
+    )
 
 
 async def _client_for(redirect_uri: str) -> tuple[str, str | None]:
@@ -207,13 +245,12 @@ async def start_authorization(redirect_uri: str | None = None) -> Authorization:
     verifier, challenge = oauth.new_pkce_pair()
     state = oauth.new_state()
 
-    _prune_pending()
-    _pending[state] = PendingAuth(
+    _remember_pending(PendingAuth(
         state=state,
         code_verifier=verifier,
         redirect_uri=effective_redirect,
         client_id=client_id,
-    )
+    ))
 
     auth_url = oauth.build_authorize_url(
         client_id=client_id,
@@ -233,13 +270,14 @@ async def start_authorization(redirect_uri: str | None = None) -> Authorization:
 
 async def complete_authorization(code: str, state: str) -> Connection:
     """Finish an authorization with the code and state Vercel handed back."""
-    pending = _pending.pop(state.strip(), None)
+    pending = _take_pending(state.strip())
     if pending is None:
         return Connection(
             status="failed",
             error=(
                 "That authorization has expired or was already used. Start the "
-                "connection again."
+                "connection again from this workspace, so the sign-in and the "
+                "callback are handled by the same API."
             ),
         )
     if pending.expired(PENDING_TTL_SECONDS):
