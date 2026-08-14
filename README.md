@@ -201,7 +201,7 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 | **Google Drive** | `rclone authorize drive.file` + manual code paste; folder mgmt + 500 MiB streaming uploads | `rclone.conf` |
 | **OneDrive** | `rclone authorize` Microsoft Graph | `rclone.conf` |
 | **GitHub** | Personal Access Token paste **or** `gh auth login --web` device flow | `token.json` |
-| **Vercel** | API token paste **or** OAuth 2.1 PKCE (Dynamic Client Registration on first use) | `token.json` |
+| **Vercel** | API token paste **or** Sign in with Vercel (OAuth 2.1 + PKCE; dynamic client registration on first use, loopback callback, paste-the-URL finish on remote hosts) | `token.json` |
 | **Manus** | API key paste | `token.json` |
 
 Each connector exposes `connect`, `status`, `disconnect`, `reconnect` plus per-service extras (`/sessions/{id}/submit` for rclone OAuth code paste; `/oauth/start` for Vercel; `/cli/{start,poll,cancel}` for GitHub device flow). The Drive connector additionally ships folder management (`mkdir`, `rmdir`, `folders`) and streaming uploads with no disk spool or RAM buffer.

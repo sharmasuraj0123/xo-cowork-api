@@ -1,46 +1,51 @@
 """
-Vercel connector — OAuth (PKCE) with a pasted-token fallback.
+Vercel connector.
 
-Credentials land in token.json under the provider keys "vercel" and
-"vercel_client" (see the package-level ``token_store``).
+Layers, innermost first:
+
+    oauth.py      the Vercel authorization server: PKCE, registration, tokens
+    api.py        the Vercel REST API: who a token belongs to
+    connector.py  connection state, persistence, and the flows the routes call
+
+Callers should import from this package rather than reaching into a module.
+Credentials are persisted by the shared ``token_store`` under the provider keys
+"vercel" and "vercel_client".
 """
 
+from .api import TokenCheck, whoami
 from .connector import (
-    VERCEL_OAUTH_AUTHORIZE_URL,
-    VERCEL_OAUTH_REGISTER_URL,
-    VERCEL_OAUTH_TOKEN_URL,
-    VERCEL_USER_URL,
-    delete_vercel_token,
-    ensure_oauth_client,
-    exchange_code_for_tokens,
-    get_oauth_client,
+    AUTH_METHOD_OAUTH,
+    AUTH_METHOD_TOKEN,
+    Authorization,
+    Connection,
+    complete_authorization,
+    connect_with_api_token,
+    default_redirect_uri,
+    disconnect,
+    get_access_token,
     get_status,
-    get_valid_access_token,
-    get_vercel_token,
-    refresh_oauth_token,
-    register_oauth_client,
-    save_oauth_tokens,
-    save_vercel_token,
-    start_oauth_flow,
-    validate_token,
+    needs_auth,
+    start_authorization,
 )
+from .oauth import Identity, TokenSet, VercelOAuthError, fetch_discovery
 
 __all__ = [
-    "VERCEL_OAUTH_AUTHORIZE_URL",
-    "VERCEL_OAUTH_REGISTER_URL",
-    "VERCEL_OAUTH_TOKEN_URL",
-    "VERCEL_USER_URL",
-    "delete_vercel_token",
-    "ensure_oauth_client",
-    "exchange_code_for_tokens",
-    "get_oauth_client",
+    "AUTH_METHOD_OAUTH",
+    "AUTH_METHOD_TOKEN",
+    "Authorization",
+    "Connection",
+    "Identity",
+    "TokenCheck",
+    "TokenSet",
+    "VercelOAuthError",
+    "complete_authorization",
+    "connect_with_api_token",
+    "default_redirect_uri",
+    "disconnect",
+    "fetch_discovery",
+    "get_access_token",
     "get_status",
-    "get_valid_access_token",
-    "get_vercel_token",
-    "refresh_oauth_token",
-    "register_oauth_client",
-    "save_oauth_tokens",
-    "save_vercel_token",
-    "start_oauth_flow",
-    "validate_token",
+    "needs_auth",
+    "start_authorization",
+    "whoami",
 ]
