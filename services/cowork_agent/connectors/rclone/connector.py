@@ -37,7 +37,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional
 
 import httpx
 
-from .rclone_oauth_lock import (
+from .oauth_lock import (
     cancel_all_active_oauth,
     has_active_oauth,
     register_sessions,
@@ -51,7 +51,12 @@ log = logging.getLogger(__name__)
 
 # rclone config file — stored inside the project directory, shared by every
 # connector (gdrive, onedrive, …).
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Four dirnames up from connectors/rclone/connector.py lands on `services/` —
+# the same directory this resolved to before the move; do not shorten this
+# without moving an existing rclone.conf to match.
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 RCLONE_CONFIG_PATH = os.getenv(
     "RCLONE_CONFIG",
     os.path.join(_PROJECT_ROOT, "rclone.conf"),

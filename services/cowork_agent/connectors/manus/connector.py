@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import httpx
 
-from .token_store import TOKEN_FILE, delete_entry, get_entry, set_entry
+from ..token_store import TOKEN_FILE, delete_entry, get_entry, set_entry
 
 log = logging.getLogger(__name__)
 
