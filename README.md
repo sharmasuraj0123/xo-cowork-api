@@ -67,7 +67,7 @@ Every coding agent ships with its own session store, its own auth, its own todo 
 - 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code, OpenClaw, Hermes, and Antigravity are first-class; Codex is partial; new runtimes plug in without router changes.
 - 🗂️ **Sharing-safe project model** — chat content stays in the runtime's own storage (`~/.claude/`, `~/.openclaw/`). The project folder at `~/xo-projects/<id>/` is pure metadata + work files, structurally safe to share, fork, or rebase.
 - 📡 **SSE streaming with sane reconnects** — `event: text-delta` / `done` / `heartbeat` / `agent-error`, React-Strict-Mode-safe via a 600 s reconnect window, server-side single-flight on conflicts.
-- 🔌 **Connector hub** — Google Drive, OneDrive, GitHub (PAT + `gh` device flow), Vercel (OAuth 2.1 PKCE + Dynamic Client Registration), Manus. Each is dropped into `mcp-tokens.json` or `rclone.conf` and survives restarts.
+- 🔌 **Connector hub** — Google Drive, OneDrive, GitHub (PAT + `gh` device flow), Vercel (OAuth 2.1 PKCE + Dynamic Client Registration), Manus. Each is dropped into `token.json` or `rclone.conf` and survives restarts.
 - 🔐 **Clerk-backed identity** — browser poll-token flow with cowork-api as the trusted intermediary; tokens never reach the frontend.
 - 📈 **Unified usage** — `/api/usage` reads JSONL from every runtime, returns one normalised shape with tokens, cost, model breakdowns, and response-time percentiles.
 - 🛰️ **Local-first** — runs entirely on your machine. The only cloud call is to `xo-swarm-api` for identity verification and a daily usage sync. No telemetry, no exfiltration.
@@ -200,9 +200,9 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 |---|---|---|
 | **Google Drive** | `rclone authorize drive.file` + manual code paste; folder mgmt + 500 MiB streaming uploads | `rclone.conf` |
 | **OneDrive** | `rclone authorize` Microsoft Graph | `rclone.conf` |
-| **GitHub** | Personal Access Token paste **or** `gh auth login --web` device flow | `mcp-tokens.json` |
-| **Vercel** | API token paste **or** OAuth 2.1 PKCE (Dynamic Client Registration on first use) | `mcp-tokens.json` |
-| **Manus** | API key paste | `mcp-tokens.json` |
+| **GitHub** | Personal Access Token paste **or** `gh auth login --web` device flow | `token.json` |
+| **Vercel** | API token paste **or** Sign in with Vercel (OAuth 2.1 + PKCE; dynamic client registration on first use, loopback callback, paste-the-URL finish on remote hosts) | `token.json` |
+| **Manus** | API key paste | `token.json` |
 
 Each connector exposes `connect`, `status`, `disconnect`, `reconnect` plus per-service extras (`/sessions/{id}/submit` for rclone OAuth code paste; `/oauth/start` for Vercel; `/cli/{start,poll,cancel}` for GitHub device flow). The Drive connector additionally ships folder management (`mkdir`, `rmdir`, `folders`) and streaming uploads with no disk spool or RAM buffer.
 

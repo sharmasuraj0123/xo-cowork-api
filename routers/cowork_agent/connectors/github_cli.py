@@ -53,7 +53,7 @@ async def cli_login_poll(body: CliSessionBody) -> JSONResponse:
     """Check the status of an in-progress CLI login.
 
     On completion, the token is validated against /user, persisted to
-    mcp-tokens.json with `auth_method="cli"`, and the user profile is returned
+    token.json with `auth_method="cli"`, and the user profile is returned
     in the same shape as the PAT flow.
     """
     result = await github_cli_auth.connect(body.session_id)

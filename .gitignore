@@ -68,4 +68,5 @@ SECURITY-AUDIT.md
 
 # Connector secrets (created at runtime by gdrive/onedrive/vercel/github/manus)
 mcp-tokens.json
+token.json
 rclone.conf

@@ -4,7 +4,7 @@ GitHub connector — `gh auth login` (CLI device-flow) acquisition.
 Spawns `gh auth login --web` as a subprocess, parses the one-time device code
 from its output, and waits asynchronously for the user to authorize on
 github.com. Once `gh` exits successfully, the resulting token is read with
-`gh auth token` and exported into mcp-tokens.json by `connect()`.
+`gh auth token` and exported into token.json by `connect()`.
 
 This sits alongside the PAT flow (github_pat.py) — the two methods share the
 same storage and validation (common.py); only the *acquisition* differs.
@@ -238,7 +238,7 @@ async def start_login() -> dict[str, Any]:
 
         # `--insecure-storage` writes the token to a plain file under
         # ~/.config/gh — fine here because we immediately export it into
-        # mcp-tokens.json and never depend on gh's local store after that.
+        # token.json and never depend on gh's local store after that.
         proc = await asyncio.create_subprocess_exec(
             GH_BIN, "auth", "login",
             "--web",
