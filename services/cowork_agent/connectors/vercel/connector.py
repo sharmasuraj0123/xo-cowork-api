@@ -5,7 +5,7 @@ API-token flow: user generates a token at https://vercel.com/account/tokens and 
 OAuth 2.1 flow: initiated via /api/connectors/vercel/oauth/start; Vercel redirects back
   to /callback where the authorization code is exchanged for tokens (with PKCE).
 
-Token file: <project_root>/mcp-tokens.json  (.gitignored)
+Token file: ~/.config/token.json  (see connectors/token_store.py)
 """
 
 import base64
@@ -49,21 +49,30 @@ def _generate_code_challenge(verifier: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get_oauth_client() -> dict[str, Any] | None:
-    """Return the registered OAuth client credentials from mcp-tokens.json, or None."""
+    """Return the registered OAuth client credentials from token.json, or None."""
     return get_entry("vercel_client")
 
 
-async def register_oauth_client(redirect_uri: str) -> dict[str, Any]:
+async def register_oauth_client(
+    redirect_uri: str,
+    also_allow: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
     """
     Dynamically register a new OAuth 2.1 client with Vercel (RFC 7591).
 
     POSTs the client metadata to Vercel's registration endpoint and persists
     the returned client_id (plus client_secret if any) under `vercel_client`
-    in mcp-tokens.json. Subsequent calls to get_oauth_client() will return it.
+    in token.json. Subsequent calls to get_oauth_client() will return it.
+
+    `redirect_uri` is the one this flow will use; `also_allow` carries forward
+    redirect URIs a previous registration covered, so a workspace that reaches
+    the API by more than one origin doesn't re-register on every switch.
     """
+    redirect_uris = [redirect_uri] + [u for u in also_allow if u and u != redirect_uri]
+
     metadata = {
         "client_name": "xo-cowork",
-        "redirect_uris": [redirect_uri],
+        "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -115,10 +124,22 @@ async def ensure_oauth_client(redirect_uri: str) -> dict[str, Any]:
     """
     Return the existing OAuth client, or register a new one via DCR if absent.
     Idempotent: only one registration round-trip per fresh checkout.
+
+    A stored client is only reusable for redirect URIs it was registered with —
+    Vercel rejects the authorize request otherwise. When `redirect_uri` isn't
+    covered, re-register (carrying the old URIs along) so the flow can't be
+    started against a redirect that is guaranteed to fail.
     """
     existing = get_oauth_client()
     if existing and existing.get("client_id"):
-        return existing
+        registered = existing.get("redirect_uris") or []
+        if redirect_uri in registered:
+            return existing
+        log.info(
+            "Vercel OAuth client registered for %s; re-registering to cover %s",
+            registered, redirect_uri,
+        )
+        return await register_oauth_client(redirect_uri, also_allow=registered)
     return await register_oauth_client(redirect_uri)
 
 
@@ -182,7 +203,7 @@ def start_oauth_flow(redirect_uri: str) -> dict[str, str]:
     """
     client = get_oauth_client()
     if not client:
-        raise ValueError("No Vercel OAuth client registered in mcp-tokens.json.")
+        raise ValueError("No Vercel OAuth client registered in token.json.")
 
     state = secrets.token_urlsafe(32)
     code_verifier = _generate_code_verifier()
@@ -305,7 +326,7 @@ async def refresh_oauth_token() -> str | None:
     """
     Use the stored refresh_token to obtain a new access_token.
 
-    Updates mcp-tokens.json in-place on success.
+    Updates token.json in-place on success.
     Returns the new access_token, or None if refresh is not possible.
     """
     entry = get_entry("vercel") or {}

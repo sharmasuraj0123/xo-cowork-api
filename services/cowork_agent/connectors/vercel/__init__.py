@@ -1,7 +1,7 @@
 """
 Vercel connector — OAuth (PKCE) with a pasted-token fallback.
 
-Credentials land in mcp-tokens.json under the provider keys "vercel" and
+Credentials land in token.json under the provider keys "vercel" and
 "vercel_client" (see the package-level ``token_store``).
 """
 

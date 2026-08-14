@@ -1,7 +1,7 @@
 """
 Manus connector — API-key based.
 
-The key lands in mcp-tokens.json under the provider key "manus" (see the
+The key lands in token.json under the provider key "manus" (see the
 package-level ``token_store``).
 """
 

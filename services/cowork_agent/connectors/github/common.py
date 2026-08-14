@@ -6,7 +6,7 @@ Both acquisition methods (a pasted PAT via ``github_pat.py``, and the
 token for github.com. Everything *after* that point is identical, and lives
 here:
 
-  - persistence  — provider key "github" in mcp-tokens.json (owned by token_store)
+  - persistence  — provider key "github" in token.json (owned by token_store)
   - validation   — GET /user
   - status       — what the UI shows for the current connection
   - git identity — seed the workspace's global user.name / user.email
@@ -14,7 +14,7 @@ here:
 Nothing in this module knows how the token was obtained; the only trace of
 that is the ``auth_method`` field carried alongside it for display purposes.
 
-Token file: <project_root>/mcp-tokens.json  (.gitignored)
+Token file: ~/.config/token.json  (see connectors/token_store.py)
 """
 
 import asyncio
@@ -35,7 +35,7 @@ AuthMethod = Literal["pat", "cli"]
 
 
 # ---------------------------------------------------------------------------
-# Token storage (provider key "github" in mcp-tokens.json)
+# Token storage (provider key "github" in token.json)
 # ---------------------------------------------------------------------------
 
 def get_github_token() -> str | None:
@@ -56,7 +56,7 @@ def get_github_auth_method() -> str | None:
 
 
 def save_github_token(token: str, *, auth_method: str = "pat") -> None:
-    """Save a GitHub access token to mcp-tokens.json.
+    """Save a GitHub access token to token.json.
 
     auth_method is "pat" (user-pasted PAT) or "cli" (from `gh auth login`).
     """
@@ -72,7 +72,7 @@ def save_github_token(token: str, *, auth_method: str = "pat") -> None:
 
 
 def delete_github_token() -> None:
-    """Remove the GitHub entry from mcp-tokens.json."""
+    """Remove the GitHub entry from token.json."""
     delete_entry("github")
     log.info("GitHub token removed from %s", TOKEN_FILE)
 
