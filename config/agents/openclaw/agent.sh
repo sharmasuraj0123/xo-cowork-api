@@ -203,7 +203,12 @@ validate_env() {
 install_env() {
     log "Installing .env to ${OPENCLAW_DIR}/.env..."
     mkdir -p "$OPENCLAW_DIR"
-    if [ -f "$REPO_ROOT/.env" ]; then
+    # First-time-only copy: server.py runs setup on every boot, so an
+    # unconditional cp would clobber user-added keys in the agent .env each
+    # restart. Guard on the destination (same pattern as auth.json below).
+    if [ -f "$OPENCLAW_DIR/.env" ]; then
+        log ".env already exists at ${OPENCLAW_DIR}/.env — preserving manual edits"
+    elif [ -f "$REPO_ROOT/.env" ]; then
         cp "$REPO_ROOT/.env" "$OPENCLAW_DIR/.env"
         chmod 600 "$OPENCLAW_DIR/.env"
         log_success ".env copied to ${OPENCLAW_DIR}/.env (mode 600)"
