@@ -11,10 +11,11 @@ look when you need to know which on-disk location a frontend "noun"
 maps to.
 
 Visualizer scopes are read-only handles over ``<project>/.xo/`` (per
-project) and ``~/xo-projects/.xo/`` (workspace tier). They delegate
-all JSON reads to ``services/cowork_agent/visualizer/reader.py`` —
-the only module that opens visualizer state files. See
-docs/watcher-design.md §6.0.
+project), ``~/xo-projects/.xo/`` (workspace tier), and the watcher's
+machine-local activity snapshots under ``~/.quirq/watcher/``.
+They delegate all JSON reads to
+``services/cowork_agent/visualizer/reader.py`` — the only module that
+opens visualizer state files. See docs/watcher-design.md §6.0.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from services.cowork_agent import project_layout
 from services.cowork_agent.registry import agent_env
 from services.cowork_agent.helpers import normalize_agent_id
 from services.cowork_agent.visualizer import reader as visualizer_reader
+from services.cowork_agent.visualizer import state as watcher_state
 
 
 class ScopeNotFound(Exception):
@@ -71,18 +73,18 @@ class _XoReader:
     """Shared read helpers for both visualizer scopes.
 
     Concrete subclasses set ``_xo_root`` to the root of the ``.xo/``
-    directory they read from (per-project or workspace-tier).
+    directory they read from (per-project or workspace-tier) and
+    ``_activity_path`` to the machine-local presence snapshot.
     """
 
     _xo_root: Path
+    _activity_path: Path
 
-    # The five files the BFF endpoints read from. Closed set; any new
-    # endpoint that wants a different file must extend this list AND
-    # the corresponding reader. P4 / P6 — the route layer can't ask
-    # for an arbitrary path.
+    # Closed set of portable files the BFF endpoints read. Activity is
+    # also a closed path, but lives outside _xo_root in _activity_path.
+    # P4 / P6 — the route layer can't ask for an arbitrary path.
     _STATS:           str = "stats.json"
     _TODOS:           str = "todos.json"
-    _ACTIVITY:        str = "activity.json"
     _TIMELINE:        str = "timeline.jsonl"
     _SESSIONSLIST:    str = "sessions/sessionslist.json"
     _SESSIONS_AUG:    str = "sessions/sessions-augment.json"
@@ -94,7 +96,7 @@ class _XoReader:
         return visualizer_reader.read_json(self._xo_root / self._TODOS)
 
     def read_activity(self) -> Optional[dict]:
-        return visualizer_reader.read_json(self._xo_root / self._ACTIVITY)
+        return visualizer_reader.read_json(self._activity_path)
 
     def read_timeline(
         self,
@@ -169,6 +171,7 @@ class VisualizerScope(_XoReader):
     def __init__(self, project_id: str) -> None:
         self.project_id = normalize_agent_id(project_id)
         self._xo_root = project_layout.xo_dir(self.project_id)
+        self._activity_path = watcher_state.project_activity_path(self.project_id)
 
     def project_exists(self) -> bool:
         """Whether the project directory exists on disk.
@@ -215,6 +218,7 @@ class WorkspaceVisualizerScope(_XoReader):
 
     def __init__(self) -> None:
         self._xo_root = project_layout.workspace_xo_dir()
+        self._activity_path = watcher_state.workspace_activity_path()
 
     def read_workspace(self) -> Optional[dict]:
         """``~/xo-projects/.xo/workspace.json`` — discovered project list."""

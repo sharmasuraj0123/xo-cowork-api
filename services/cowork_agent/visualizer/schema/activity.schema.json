@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "xo/activity.schema.json",
   "title": "xo activity — live presence",
-  "description": "Which sessions are open right now and when they last did something. Heartbeat-style: refreshed on every meaningful action, stale entries pruned by the watcher.",
+  "description": "Machine-local presence under ~/.quirq/watcher/activity/: which sessions are open right now and when they last did something. Heartbeat-style: refreshed on every meaningful action, stale entries pruned by the watcher.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "open_sessions"],
@@ -23,7 +23,8 @@
           "user_id":          { "type": "string" },
           "opened_at":        { "type": "string", "format": "date-time" },
           "last_activity_at": { "type": "string", "format": "date-time" },
-          "host":             { "type": ["string", "null"], "description": "Machine the session is running on." }
+          "host":             { "type": ["string", "null"], "description": "Machine the session is running on." },
+          "project_id":       { "type": ["string", "null"], "description": "Present only in the workspace aggregate." }
         }
       }
     }

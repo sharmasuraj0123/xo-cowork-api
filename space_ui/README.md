@@ -1,8 +1,9 @@
 # Space — the workspace knowledge graph UI
 
-An explorable map of `~/xo-projects`: a force-directed **graph** (click to
-focus, double-click clusters, re-root on any node), a scrubbable **timeline**,
-and **six degrees** pathfinding between any two artifacts.
+An explorable map of `~/xo-projects`. Six top-level tabs — **Dashboard**,
+**Files** (List | Graph | Tree lenses under one tab), **Timeline**,
+**Sessions**, **Wiki**, and **Setup** — plus the **Quirq** state view, which
+has no tab of its own and opens from Setup's header.
 
 This folder is a bundled snapshot of the xo-atlas UI (originally a standalone
 folder with no remote), trimmed to the single endpoint-driven page and served
@@ -24,13 +25,20 @@ directly. Descended from the single-file xo-atlas `v3.html`.
 | `js/core/store.js` | Idempotency helpers: single-flight promises, slotted (non-stacking) intervals. |
 | `js/core/ui.js` | Shared UI helpers (toast). |
 | `js/core/server-widget.js` | Footer server pill (status poll + stop). |
-| `js/views/atlas.js` | Graph + Timeline + Six Degrees — three lenses over one dataset, one shared closure, three exported views. |
+| `js/core/preview.js` | File previewer drawer. Any view opens it with a `space:preview-file` event; markdown renders through `markdown.js`, HTML renders in an empty-`sandbox` iframe, everything else as escaped source. |
+| `js/views/atlas.js` | Dashboard + Graph + Timeline — three lenses over one dataset, one shared closure, three exported views. |
 | `js/views/sessions.js` | The Sessions (Argus telemetry) view. |
-| `js/views/projects.js` | The Projects view: xo-projects observability — project list with per-project drawers for live todos, open sessions, and recent timeline events (read-only v1). |
-| `js/views/chat.js` | The Chat view: Plane-B chat (`/api/chat/prompt` → SSE stream → transcript refetch) with session sidebar, project binding for new sessions, and mini-markdown rendering. Works across claude_code / hermes / openclaw. |
+| `js/views/projects.js` | The Files List lens: project list with per-project drawers (folder browser via `/tree`, todos, open sessions, recent events). Owns the `Files` tab; Graph and Tree are sibling lenses (`nav:false`, `parent:'projects'`). |
+| `js/views/tree.js` | The Files Tree lens: horizontal hierarchy over the same `space.json` dataset as Graph — folders as columns, files stacked beside their parent. Deep-link `#/tree`. |
+| `js/views/chat.js` | The Chat view: Plane-B chat (`/api/chat/prompt` → SSE stream → transcript refetch) with session sidebar, project binding for new sessions, and mini-markdown rendering. Works across claude_code / hermes / openclaw. Deliberately unregistered — no tab. |
+| `js/views/wiki.js` | The Wiki view: bundled, version-matched operating documentation. It includes storage architecture, watcher internals, complete `.xo` / `.quirq` data catalogs, and flow-building recipes. |
+| `js/views/quirq.js` | The Quirq view: machine-local `.quirq` watcher state beside portable project `.xo` output. No tab of its own — `nav:false, parent:'secrets'`, opened from Setup's header button (`#/quirq`). |
+| `js/views/secrets.js` | The Setup view: storage roots, agent runtime, watcher coverage, write-only credentials, git self-update, managed restart. |
 | `js/core/markdown.js` | Escape-first mini-markdown (fences, inline code, bold/italic, links, headings, lists). |
 
-See `AGENTS.md` in this folder for the view contract and working rules.
+The view contract (`id`/`label`/`order`/`nav`/`parent`/`section`, mount/show/hide)
+is documented in the header comment of `js/core/registry.js`; repo-wide working
+rules are in the root `AGENTS.md`.
 
 ## How it's served
 
@@ -56,8 +64,8 @@ spring stiffness makes the original explicit-Euler sim diverge (positions hit
 
 ## Sessions tab
 
-The fourth topbar tab (`Graph | Timeline | Six Degrees | Sessions`) is an
-Argus telemetry dashboard: Claude Code session stats rendered as cards,
+The fourth topbar tab (`Dashboard | Files | Timeline | Sessions | Wiki |
+Setup`) is an Argus telemetry dashboard: Claude Code session stats rendered as cards,
 tables, and hand-drawn canvas charts (no dependencies), re-skinned to the
 Space theme. It lives in its own module (`js/views/sessions.js`), independent
 of the atlas's `boot()` — either can fail without taking the other down, and
@@ -89,14 +97,22 @@ the registry keeps the tabs switchable regardless.
   "leaves":     [ { "id", "group", "shape", "tag", "label",
                     "date", "blurb", "path" } ],                // one per file
   "ties":       [ { "s", "t", "label" } ],      // derived cross-links (see below)
-  "milestones": [ { "d": "YYYY-MM-DD", "t": "caption" } ]       // first commits
+  "milestones": [ { "d": "YYYY-MM-DD", "t": "caption" } ],      // first commits
+  "gitHistory": { "p_<project>": [ { "d": "YYYY-MM-DD", "n": 3,
+                    "s": ["subject", "…"] } ] }  // commits/day per project (optional)
 }
 ```
 
+`gitHistory` feeds the Timeline's **By project** mode: one lane per project,
+one dot per commit day (`n` commits, up to 3 sampled subjects in `s`). The
+mode toggle only renders when at least one project carries history; the
+Dashboard projection and non-git projects have none.
+
 Shapes are semantic: `disc` = code, `ring` = document, `diamond` = everything
-else. Leaf `date` is the git first-added date when the project is a repo,
-else file mtime. Tree edges (leaf → cluster → project → root) are derived by
-the UI; only cross-ties are listed.
+else. Leaf `date` is the git first-added date, or `null` when git does not
+know the file (untracked, or a non-git project); undated leaves appear on the
+graph but sit out the timeline. Tree edges (leaf → cluster → project → root)
+are derived by the UI; only cross-ties are listed.
 
 Ties are derived facts, never editorial: files that repeatedly share commits
 ("changed together ×N", from the same git log that dates the leaves), docs

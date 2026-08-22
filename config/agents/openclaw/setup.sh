@@ -134,18 +134,23 @@ EOF
 }
 
 # ==============================================================
-# Step 3 — Materialise $REPO_ROOT/.env from environment vars if
-# the file isn't already present. openclaw.sh's install_env() and
-# load_env() both rely on this file.
-# Manual edits are preserved: never overwrites an existing .env.
+# Step 3 — Materialise $REPO_ROOT/.env from environment vars.
+# openclaw.sh's install_env() and load_env() both rely on this file.
+# Hosted workspace edits are preserved. A managed local Quirq container
+# refreshes the file on every boot because ~/.quirq/secrets.env is the
+# authoritative, write-only store controlled by the Setup tab.
 # ==============================================================
 write_env_file() {
-    if [ -f "$ENV_FILE" ]; then
+    if [ -f "$ENV_FILE" ] && [ "${QUIRQ_MANAGED_CONTAINER:-false}" != "true" ]; then
         log ".env already exists at $ENV_FILE — leaving it untouched"
         return 0
     fi
 
-    log "Writing .env from environment (first time)"
+    if [ "${QUIRQ_MANAGED_CONTAINER:-false}" = "true" ]; then
+        log "Refreshing .env from managed Quirq configuration"
+    else
+        log "Writing .env from environment (first time)"
+    fi
     umask 077
     # Values are single-quoted so openclaw.sh's `source .env` preserves
     # embedded characters like the JSON double-quotes in ENABLED_CHANNELS

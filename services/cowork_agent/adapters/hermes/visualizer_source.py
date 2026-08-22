@@ -42,12 +42,16 @@ from services.cowork_agent.visualizer.ingest.events import (
     SessionFirstSeen,
     ToolUseObserved,
 )
-from services.cowork_agent.visualizer.state import watcher_state_dir
+from services.cowork_agent.visualizer.state import (
+    legacy_watcher_state_dir,
+    watcher_state_dir,
+)
 
 logger = logging.getLogger(__name__)
 
 
 _OFFSETS_FILE = watcher_state_dir() / "hermes-offsets.json"
+_LEGACY_OFFSETS_FILE = legacy_watcher_state_dir() / "hermes-offsets.json"
 _DEFAULT_PROFILE = "default"
 _BATCH = 500  # messages per session per tick — safety cap on a single query
 
@@ -318,10 +322,11 @@ def _load_offsets() -> dict[str, int]:
     """Load the persisted per-session offsets. Missing/corrupt file →
     empty dict (we'll re-emit everything on next tick — events are
     idempotent at the sink level by ``(session_id, ts)`` keys)."""
-    if not _OFFSETS_FILE.is_file():
+    source_path = _OFFSETS_FILE if _OFFSETS_FILE.is_file() else _LEGACY_OFFSETS_FILE
+    if not source_path.is_file():
         return {}
     try:
-        data = json.loads(_OFFSETS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(source_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
@@ -330,6 +335,11 @@ def _load_offsets() -> dict[str, int]:
     for k, v in data.items():
         if isinstance(k, str) and isinstance(v, int):
             out[k] = v
+    if source_path == _LEGACY_OFFSETS_FILE:
+        try:
+            _save_offsets(out)
+        except OSError:
+            pass
     return out
 
 

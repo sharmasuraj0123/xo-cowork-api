@@ -226,17 +226,24 @@ class Source:
         # ``xo-projects/default``), is intentionally skipped here:
         # its sessions arrive only via the adapter-row path above.
         projects_root = xo_projects_root()
+        project_roots = [projects_root]
+        host_projects_root = (
+            os.getenv("QUIRQ_HOST_PROJECTS_ROOT", "") or ""
+        ).strip()
+        if host_projects_root:
+            project_roots.append(Path(host_projects_root).expanduser())
         for project_id in list_project_ids():
-            project_path = projects_root / project_id
-            encoded = str(project_path).replace("/", "-")
-            log_dir = _CLAUDE_PROJECTS_DIR / encoded
-            if not log_dir.is_dir():
-                continue
-            for jsonl in log_dir.glob("*.jsonl"):
-                if jsonl in yielded:
+            for project_root in project_roots:
+                project_path = project_root / project_id
+                encoded = str(project_path).replace("/", "-")
+                log_dir = _CLAUDE_PROJECTS_DIR / encoded
+                if not log_dir.is_dir():
                     continue
-                yielded.add(jsonl)
-                yield project_id, jsonl
+                for jsonl in log_dir.glob("*.jsonl"):
+                    if jsonl in yielded:
+                        continue
+                    yielded.add(jsonl)
+                    yield project_id, jsonl
 
     # ── Per-jsonl pipeline ──────────────────────────────────────────────
 

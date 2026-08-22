@@ -418,9 +418,9 @@ def _shape_activity(project_id: str, raw: Optional[dict]) -> ActivityResponse:
 def project_activity(project_id: str) -> ActivityResponse:
     """Live presence — which sessions are open in this project right now.
 
-    Empty ``{open_sessions: []}`` when the watcher hasn't written
-    ``activity.json`` yet. AGENTS.md (boot ritual) reads this file
-    to answer "is anyone else working here right now?".
+    Empty ``{open_sessions: []}`` when the watcher hasn't written the
+    machine-local presence snapshot yet. AGENTS.md's boot ritual calls
+    this endpoint to answer "is anyone else working here right now?".
     """
     scope = _require_project(project_id)
     try:
@@ -429,7 +429,7 @@ def project_activity(project_id: str) -> ActivityResponse:
         raise HTTPException(
             status_code=500,
             detail={"code": "scope_unavailable",
-                    "message": "activity.json is not readable."},
+                    "message": "activity state is not readable."},
         ) from exc
     return _shape_activity(project_id, raw)
 

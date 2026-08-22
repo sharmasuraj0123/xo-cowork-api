@@ -7,14 +7,18 @@ the path themselves. This keeps the watcher's filesystem layout an
 implementation detail the adapter doesn't need to know.
 
 The dir is also where ``ingest.jsonl_tail.OffsetStore`` keeps its
-file offsets (``offsets.json``), so adapter cursor files and the
-shared offset store live side by side — one ``~/.xo-cowork/watcher/``
-to clean if you ever want to fully reset watcher state.
+file offsets (``offsets.json``), so adapter cursor files, the shared
+offset store, and ephemeral live-presence snapshots live side by side
+— one ``~/.quirq/watcher/`` to clean if you ever want to fully reset
+watcher state.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+from services.cowork_agent.helpers import normalize_agent_id
+from services.cowork_agent.local_state import legacy_state_dir, quirq_state_dir
 
 
 def watcher_state_dir() -> Path:
@@ -22,4 +26,33 @@ def watcher_state_dir() -> Path:
     per-source cursors, etc.) persists its state. Created on first
     access by the callers that write into it; not pre-created here so
     a read-only deployment doesn't unnecessarily mkdir."""
-    return Path.home() / ".xo-cowork" / "watcher"
+    return quirq_state_dir() / "watcher"
+
+
+def legacy_watcher_state_dir() -> Path:
+    """Return the former watcher root for read-only cursor migration."""
+    return legacy_state_dir() / "watcher"
+
+
+def watcher_activity_dir() -> Path:
+    """Return the root for watcher-owned live-presence snapshots.
+
+    Activity is machine-local and ephemeral, so it deliberately lives
+    outside portable ``xo-projects/<id>/.xo/`` metadata.
+    """
+    return watcher_state_dir() / "activity"
+
+
+def project_activity_path(project_id: str) -> Path:
+    """Return the live-presence file for one project.
+
+    Normalising the id keeps an untrusted route/project value from
+    escaping the watcher state root.
+    """
+    safe_project_id = normalize_agent_id(project_id)
+    return watcher_activity_dir() / "projects" / f"{safe_project_id}.json"
+
+
+def workspace_activity_path() -> Path:
+    """Return the workspace-wide union of project presence snapshots."""
+    return watcher_activity_dir() / "workspace.json"

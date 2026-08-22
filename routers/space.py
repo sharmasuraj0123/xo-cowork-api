@@ -1,11 +1,11 @@
 """Space: the local workspace knowledge graph.
 
-Serves the Space folder (graph UI + its data/space.json) as static files under
-/space, plus a tiny control API the UI uses for its server on/off widget.
+Serves the Space UI folder as static files under /space, plus a tiny control
+API the UI uses for its server on/off widget and the Setup tab's self-update.
 
-The folder location comes from SPACE_DIR (env), defaulting to the xo-atlas
-folder in the ClaudeWorkspace. Data never leaves this machine: the UI reads
-data/space.json from this mount. See <SPACE_DIR>/README.md for the format.
+The folder location comes from SPACE_DIR (env), defaulting to space_ui/ in the
+repo. The UI's DATA comes from the workspace .xo directory via /xo/*.json
+(routers/xo_data.py), not from this mount.
 """
 
 import asyncio
@@ -15,11 +15,8 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from services.cowork_agent.visualizer.argus_index import build_argus_stats
-from services.cowork_agent.visualizer.space_index import build_space_data
 
 # Bundled UI (space_ui/ at the repo root); SPACE_DIR env var overrides, e.g.
 # to point at a live xo-atlas checkout during UI development.
@@ -59,70 +56,131 @@ async def space_server_stop(request: Request):
     return {"status": "stopping", "restart": "./cowork-api.sh start"}
 
 
+@router.get("/update/status")
+async def space_update_status():
+    """Version check for the Setup tab: how far HEAD is behind the remote.
+
+    Fetches the checkout's own remote via git; offline it still reports the
+    local version with fetch_ok false."""
+    from services.cowork_agent.self_update import check_update_status
+
+    try:
+        return await asyncio.to_thread(check_update_status)
+    except Exception as exc:
+        print(f"⚠️ update status failed ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "update_status_failed",
+                    "message": "Could not determine the checkout's version state."},
+        )
+
+
+@router.post("/update/apply")
+async def space_update_apply(request: Request):
+    """Fast-forward the checkout to the remote branch. Localhost only, like
+    /server/stop: it changes the code on disk. The running server keeps the
+    old version until restarted."""
+    if not _is_local(request):
+        raise HTTPException(status_code=403,
+                            detail="update is allowed from localhost only")
+    from services.cowork_agent.self_update import UpdateError, apply_update
+
+    try:
+        return await asyncio.to_thread(apply_update)
+    except UpdateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "update_failed", "message": str(exc)},
+        )
+    except Exception as exc:
+        print(f"⚠️ update apply failed ({exc})")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "update_failed",
+                    "message": "The update could not be applied."},
+        )
+
+
 SPACE_CACHE_TTL = float(os.getenv("SPACE_CACHE_TTL", "30"))
 
-# (built_at_monotonic, payload) — module-level; refreshed when older than TTL.
-_data_cache: tuple[float, dict] | None = None
+# The graph, dashboard and session-telemetry payloads used to be generated
+# here and served from /space/data/. They are files in the workspace .xo
+# directory now, served by routers/xo_data.py at /xo/*.json — one location on
+# disk, one URL that mirrors it. Only session_prompts stays: it is a
+# per-session lookup, not a workspace file.
+
+# Aggregate telemetry never contains prompt text. Session details request one
+# transcript lazily through its provider's optional capability.
+_session_prompts_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_SESSION_PROMPTS_CACHE_MAX = 32
 
 
-@router.get("/data/space.json")
-async def space_data():
-    """The Space graph, generated live from ~/xo-projects.
+@router.get("/data/session_prompts.json")
+async def session_prompts_data(agent: str, sid: str):
+    """Return user prompts for one session, grouped into human turns."""
+    from services.cowork_agent.adapters.loader import try_load_capability
 
-    Registered before the static mount (see server.py include order), so it
-    shadows <SPACE_DIR>/data/space.json. Falls back to that file when the
-    builder fails; 503 when there is no fallback either."""
-    global _data_cache
     now = time.monotonic()
-    if _data_cache is not None and now - _data_cache[0] < SPACE_CACHE_TTL:
-        return JSONResponse(_data_cache[1], headers={"Cache-Control": "no-store"})
+    hit = _session_prompts_cache.get((agent, sid))
+    if hit is not None and now - hit[0] < SPACE_CACHE_TTL:
+        return JSONResponse(hit[1], headers={"Cache-Control": "no-store"})
 
     try:
-        data = build_space_data()
-    except Exception as exc:
-        print(f"⚠️ space_index failed ({exc}); falling back to static space.json")
-        static = SPACE_DIR / "data" / "space.json"
-        if static.is_file():
-            return FileResponse(static, media_type="application/json",
-                                headers={"Cache-Control": "no-store"})
+        module = try_load_capability("session_prompts", agent=agent)
+    except ValueError:
         raise HTTPException(
-            status_code=503,
-            detail={"code": "projects_root_unavailable",
-                    "message": "Could not build the graph and no static fallback exists."},
+            status_code=400,
+            detail={
+                "code": "invalid_agent",
+                "message": f"Invalid telemetry source {agent!r}.",
+            },
+        )
+    collector = getattr(module, "collect_session_prompts", None) if module else None
+    if not callable(collector):
+        return JSONResponse(
+            {
+                "source": {"id": agent},
+                "session_id": sid,
+                "supported": False,
+                "total_prompts": 0,
+                "capped": False,
+                "prompts": [],
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
-    _data_cache = (now, data)
-    return JSONResponse(data, headers={"Cache-Control": "no-store"})
-
-
-# Argus telemetry graph — second Space dataset. Same TTL, separate cache slot.
-ARGUS_DB_DEFAULT = "~/.argus/argus.db"
-
-_argus_cache: tuple[float, dict] | None = None
-
-
-@router.get("/data/sessions.json")
-async def sessions_data():
-    """Argus session-telemetry stats for the Space UI's Sessions tab.
-
-    DB path from ARGUS_DB (env), default ~/.argus/argus.db, expanded at
-    request time. No static fallback: a truthful 503 (the tab shows its
-    error card) beats stale pretty numbers."""
-    global _argus_cache
-    now = time.monotonic()
-    if _argus_cache is not None and now - _argus_cache[0] < SPACE_CACHE_TTL:
-        return JSONResponse(_argus_cache[1], headers={"Cache-Control": "no-store"})
-
-    db_path = Path(os.getenv("ARGUS_DB", ARGUS_DB_DEFAULT)).expanduser()
     try:
-        data = build_argus_stats(db_path)
+        data = await asyncio.to_thread(collector, sid)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_session", "message": str(exc)},
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "session_transcript_not_found",
+                "message": "No transcript found for this session.",
+            },
+        )
     except Exception as exc:
-        print(f"⚠️ argus_index failed ({exc})")
+        print(f"⚠️ session prompts failed for {agent}:{sid} ({exc})")
         raise HTTPException(
             status_code=503,
-            detail={"code": "argus_db_unavailable", "message": str(exc)},
+            detail={
+                "code": "session_prompts_unavailable",
+                "message": "Could not read this session's prompts.",
+            },
         )
-    _argus_cache = (now, data)
+
+    if len(_session_prompts_cache) >= _SESSION_PROMPTS_CACHE_MAX:
+        oldest = min(
+            _session_prompts_cache,
+            key=lambda key: _session_prompts_cache[key][0],
+        )
+        _session_prompts_cache.pop(oldest, None)
+    _session_prompts_cache[(agent, sid)] = (now, data)
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 

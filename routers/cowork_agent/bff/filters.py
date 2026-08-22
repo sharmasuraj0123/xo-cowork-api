@@ -19,10 +19,15 @@ _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 # Characters that would break .env round-tripping if present in a value.
 _FORBIDDEN_VALUE_CHARS = ("\n", "\r", "\x00")
 
-# Keys never returned by GET /api/secrets and never accepted by writes.
-# Empty for v1; the filter pass exists so future denylist additions
-# require no route changes.
-HIDDEN_KEYS: frozenset[str] = frozenset()
+# Runtime controls have their own typed, validated API. Keeping them out of the
+# generic write-only secret store prevents an advanced variable from silently
+# overriding the setup panel on the next restart.
+HIDDEN_KEYS: frozenset[str] = frozenset({
+    "AGENT_NAME",
+    "QUIRQ_WATCHER_ENABLED",
+    "QUIRQ_WATCHER_INTERVAL_SECONDS",
+    "QUIRQ_WATCHER_SOURCE_MODE",
+})
 
 
 def is_valid_key(key: str) -> bool:
@@ -38,15 +43,12 @@ def is_hidden_key(key: str) -> bool:
 
 
 def preview_value(value: str) -> str | None:
-    """Length-stable masked preview, or None if the value is empty.
+    """Return a fixed mask, or None if the value is empty.
 
-    The mask is fixed-width regardless of original length so the wire
-    shape never leaks the value's true length.
+    Neither the value, its length, nor prefix/suffix fragments cross the wire.
     """
     if not value:
         return None
-    if len(value) >= 10:
-        return f"{value[:3]}•••••••{value[-3:]}"
     return "••••••"
 
 

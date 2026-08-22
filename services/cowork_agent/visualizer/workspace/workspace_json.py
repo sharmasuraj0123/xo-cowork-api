@@ -1,9 +1,9 @@
 """``~/xo-projects/.xo/workspace.json`` — workspace identity + project
 discovery list.
 
-Materialised by the watcher on every tick (cheap — small JSON,
-single iterdir of the workspace root). Shape matches
-``services/cowork_agent/project_template/.xo/schema/workspace.schema.json``.
+Materialised by the watcher on every tick (cheap — small JSON, single iterdir
+of the workspace root). The derived Space views live in their own files beside
+it; see ``views.py``.
 """
 
 from __future__ import annotations

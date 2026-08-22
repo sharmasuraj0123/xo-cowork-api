@@ -1,24 +1,21 @@
-"""``~/xo-projects/.xo/activity.json`` — union of every project's
-open sessions, tagged with ``project_id``.
+"""Machine-local union of every project's open sessions.
 
-Same schema as per-project ``activity.json``; each ``open_sessions``
-row carries an extra ``project_id`` field (the schema's
-``additionalProperties: false`` on the row would normally reject
-that, but the workspace schema is a thin extension — see
-docs/watcher-design.md §3.10).
-
-Strictly, the workspace activity schema needs ``project_id`` in
-``additionalProperties`` allowlist. For v1 we widen the activity
-schema to allow the field; the BFF route already declares it.
+Stored at ``~/.quirq/watcher/activity/workspace.json``. Same schema
+as each per-project presence snapshot; every ``open_sessions`` row
+carries the activity schema's optional ``project_id`` field so the BFF
+can group live sessions by project.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from services.cowork_agent.project_layout import workspace_xo_dir, xo_dir
 from services.cowork_agent.visualizer.atomic_write import write_json_atomic
 from services.cowork_agent.visualizer.reader import read_json
+from services.cowork_agent.visualizer.state import (
+    project_activity_path,
+    workspace_activity_path,
+)
 from services.cowork_agent.visualizer.workspace_index import list_project_ids
 
 
@@ -29,7 +26,7 @@ def _now_iso() -> str:
 def apply() -> bool:
     open_sessions: list[dict] = []
     for pid in list_project_ids():
-        act = read_json(xo_dir(pid) / "activity.json")
+        act = read_json(project_activity_path(pid))
         if not isinstance(act, dict):
             continue
         for s in act.get("open_sessions") or []:
@@ -43,5 +40,5 @@ def apply() -> bool:
         "updated_at": _now_iso(),
         "open_sessions": open_sessions,
     }
-    write_json_atomic(workspace_xo_dir() / "activity.json", payload)
+    write_json_atomic(workspace_activity_path(), payload)
     return True

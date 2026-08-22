@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "xo/stats.schema.json",
   "title": "xo stats — rolling project metrics",
-  "description": "Rolling 7d/30d activity stats plus per-session, per-runtime, and per-day breakdowns. Rebuilt periodically (≈60s) by the watcher from `.xo/timeline.jsonl` — never hand-edited. Schema 2 adds the optional `by_day` block (Phase 2 / Stage 1); schema 1 readers continue to work because `by_day` is optional and BFF helpers treat absent as zero-filled.",
+  "description": "Rolling 7d/30d activity stats plus per-session, per-runtime, and per-day breakdowns. Updated by the watcher from normalized runtime events and never hand-edited. Schema 2 adds the optional `by_day` block; schema 1 readers continue to work because `by_day` is optional and BFF helpers treat absence as zero-filled.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "rolling"],

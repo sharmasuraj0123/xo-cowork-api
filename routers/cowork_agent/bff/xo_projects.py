@@ -11,7 +11,9 @@ See docs/bff-endpoints-design.md §9.1 for the full contract.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -28,6 +30,7 @@ from services.cowork_agent.project_layout import (
     list_projects,
     list_unscaffolded_dirs,
     project_dir_exists,
+    read_project_file,
 )
 
 router = APIRouter()
@@ -56,13 +59,75 @@ def _to_iso_utc(ts: Optional[float]) -> Optional[str]:
     )
 
 
+# A project's own docs are the only place a human sentence about it exists —
+# .xo/project.json's description is empty for every project the API did not
+# create. Read the first real line of the usual suspects so the list can say
+# what a project IS, not just when it was created. Bounded: 3 files, 2 KB
+# each, first 40 lines.
+#
+# AGENTS.md is deliberately NOT in this list: it is the scaffold's operating
+# contract, so its opening line is identical in every project and would put
+# the same sentence on every row — the exact failure this replaces.
+_DESC_FILES = ("README.md", "PROJECT.md", "OBJECTIVES.md")
+_DESC_MAX = 160
+
+
+def _described(project_id: str) -> Optional[str]:
+    from services.cowork_agent.project_layout import project_dir
+
+    root = project_dir(project_id)
+    for candidate in _DESC_FILES:
+        path = root / candidate
+        try:
+            if not path.is_file():
+                continue
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(2048)
+        except OSError:
+            continue
+        # Take the whole first paragraph, not the first line: markdown wraps
+        # at ~80 columns, so one line ends mid-sentence ("…in the tradition
+        # of") and reads like a truncation bug.
+        para: list[str] = []
+        for line in head.splitlines()[:40]:
+            text = line.strip()
+            if not text:
+                if para:
+                    break
+                continue
+            # skip headings, badges, html, front matter, tables, quotes, code
+            if text.startswith(("#", "!", "<", "---", "|", ">", "```")):
+                if para:
+                    break
+                continue
+            if text.startswith(("- ", "* ", "+ ")):
+                if para:
+                    break
+                continue
+            para.append(text)
+        if not para:
+            continue
+        text = " ".join(" ".join(para).split())
+        # The row shows plain text, so strip the markdown that survives a
+        # raw paragraph grab: links, emphasis, code ticks.
+        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+        text = text.replace("**", "").replace("`", "").strip("*_ ")
+        if len(text) < 12:
+            continue
+        if len(text) > _DESC_MAX:
+            cut = text[:_DESC_MAX].rsplit(" ", 1)[0].rstrip(" ,;:.")
+            text = cut + "…"
+        return text
+    return None
+
+
 def _shape_scaffolded(entry: dict) -> Project:
     name = str(entry.get("name") or "")
     display = entry.get("display_name") or name
     return Project(
         id=name,
         display_name=str(display),
-        description=(entry.get("description") or None),
+        description=(entry.get("description") or _described(name) or None),
         created_at=(entry.get("created_at") or None),
         unscaffolded=False,
     )
@@ -126,8 +191,19 @@ def list_xo_projects() -> ListProjectsResponse:
 
 
 class TreeEntry(BaseModel):
+    """One row of a project's file explorer.
+
+    ``size_bytes`` is set for files, ``entries`` for directories, and both are
+    optional: a broken symlink or a file deleted mid-listing still gets a row
+    with a name, just without detail.
+    """
+
     name: str
     relative_path: str
+    is_dir: bool = False
+    size_bytes: Optional[int] = None
+    modified_at: Optional[str] = None
+    entries: Optional[int] = None
 
 
 class ProjectTreeResponse(BaseModel):
@@ -138,7 +214,12 @@ class ProjectTreeResponse(BaseModel):
     files: list[TreeEntry]
 
 
-def _filter_tree_entries(entries: list[dict], at_root: bool) -> list[TreeEntry]:
+def _filter_tree_entries(
+    entries: list[dict],
+    at_root: bool,
+    *,
+    is_dir: bool,
+) -> list[TreeEntry]:
     out: list[TreeEntry] = []
     for e in entries:
         name = e.get("name") or ""
@@ -146,7 +227,16 @@ def _filter_tree_entries(entries: list[dict], at_root: bool) -> list[TreeEntry]:
             continue
         if at_root and is_root_only_hidden(name):
             continue
-        out.append(TreeEntry(name=name, relative_path=e.get("relative_path") or ""))
+        out.append(
+            TreeEntry(
+                name=name,
+                relative_path=e.get("relative_path") or "",
+                is_dir=is_dir,
+                size_bytes=e.get("size_bytes"),
+                modified_at=_to_iso_utc(e.get("modified_at")),
+                entries=e.get("entries"),
+            )
+        )
     return out
 
 
@@ -188,6 +278,107 @@ def project_tree(project_id: str, relative_path: str = "") -> ProjectTreeRespons
         project_id=raw["project_id"],
         relative_path=raw["relative_path"],
         parent_relative_path=raw["parent_relative_path"],
-        dirs=_filter_tree_entries(raw["dirs"], at_root),
-        files=_filter_tree_entries(raw["files"], at_root),
+        dirs=_filter_tree_entries(raw["dirs"], at_root, is_dir=True),
+        files=_filter_tree_entries(raw["files"], at_root, is_dir=False),
+    )
+
+
+# ── /api/xo-projects/{id}/file ────────────────────────────────────────────────
+#
+# Preview one text file from inside a project. Deliberately NOT the older
+# POST /api/files/content: that takes an absolute host path, and the Space UI
+# never sees absolute paths (see the module docstring). Here the project id
+# plus a project-relative path is the whole address space, validated by the
+# same helper the tree listing uses.
+
+PREVIEW_MAX_BYTES = 256 * 1024
+# Text this UI can present honestly: rendered markdown, sandboxed HTML, and
+# plain text. Anything else (an image, a 40 MB parquet) gets a "no preview"
+# state from its metadata rather than a wall of replacement characters.
+PREVIEW_SUFFIXES = frozenset(
+    {
+        ".md", ".markdown", ".mdx",
+        ".html", ".htm",
+        ".txt", ".text", ".rst", ".log",
+        ".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".env.example",
+        ".py", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".css", ".sh", ".sql",
+        ".go", ".rs", ".java", ".c", ".h", ".cpp",
+    }
+)
+
+
+def _preview_kind(name: str) -> str:
+    lower = name.lower()
+    if lower.endswith((".md", ".markdown", ".mdx")):
+        return "markdown"
+    if lower.endswith((".html", ".htm")):
+        return "html"
+    return "text"
+
+
+class FilePreviewResponse(BaseModel):
+    project_id: str
+    relative_path: str
+    name: str
+    kind: str
+    size_bytes: int
+    modified_at: Optional[str] = None
+    truncated: bool
+    content: str
+
+
+@router.get(
+    "/api/xo-projects/{project_id}/file",
+    response_model=FilePreviewResponse,
+)
+def project_file(project_id: str, relative_path: str) -> FilePreviewResponse:
+    """Return one previewable text file's content."""
+    if not project_dir_exists(project_id):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "project_not_found", "message": "Project not found."},
+        )
+    suffix = PurePosixPath(relative_path or "").suffix.lower()
+    if suffix not in PREVIEW_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "preview_unsupported",
+                "message": f"No text preview for {suffix or 'this file type'}.",
+            },
+        )
+
+    try:
+        raw = read_project_file(
+            project_id, relative_path, max_bytes=PREVIEW_MAX_BYTES
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_relative_path",
+                "message": "relative_path is malformed or escapes the project root.",
+            },
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "scope_unavailable", "message": "File is not readable."},
+        ) from exc
+
+    if raw is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_not_found", "message": "File not found in project."},
+        )
+
+    return FilePreviewResponse(
+        project_id=raw["project_id"],
+        relative_path=raw["relative_path"],
+        name=raw["name"],
+        kind=_preview_kind(raw["name"]),
+        size_bytes=raw["size_bytes"],
+        modified_at=_to_iso_utc(raw["modified_at"]),
+        truncated=raw["truncated"],
+        content=raw["content"],
     )

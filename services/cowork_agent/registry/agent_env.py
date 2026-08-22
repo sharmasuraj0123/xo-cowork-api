@@ -20,12 +20,19 @@ agent's adapter, where ``get_active_agent()`` already resolves to that agent —
 so they share this one helper instead of duplicating the upsert logic.
 """
 
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from services.cowork_agent.registry.agent_registry import get_active_agent
 
-ENV_FILE: Path = get_active_agent().env_file
+_ENV_FILE_OVERRIDE = (os.getenv("QUIRQ_SECRETS_FILE", "") or "").strip()
+ENV_FILE: Path = (
+    Path(_ENV_FILE_OVERRIDE).expanduser()
+    if _ENV_FILE_OVERRIDE
+    else get_active_agent().env_file
+)
 
 
 def parse_env_file(text: str) -> list[dict]:
@@ -54,10 +61,55 @@ def load_env_entries() -> list[dict]:
     return parse_env_file(ENV_FILE.read_text(errors="replace"))
 
 
-def save_env_entries(entries: list[dict]) -> None:
-    """Overwrite the .env file with the provided entries (creates parent dirs)."""
+def _write_env_text(text: str) -> None:
+    """Atomically replace the store with owner-only permissions."""
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ENV_FILE.write_text(serialize_env_file(entries))
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{ENV_FILE.name}.",
+        dir=ENV_FILE.parent,
+        text=True,
+    )
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", newline="") as stream:
+            stream.write(text)
+        os.replace(temp_path, ENV_FILE)
+        ENV_FILE.chmod(0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _sync_process_environment(
+    previous: list[dict],
+    current: list[dict],
+) -> None:
+    """Make updates available to subprocesses launched after a write."""
+    previous_keys = {
+        (entry.get("key") or "").strip()
+        for entry in previous
+        if (entry.get("key") or "").strip()
+    }
+    current_values = {
+        (entry.get("key") or "").strip(): entry.get("value") or ""
+        for entry in current
+        if (entry.get("key") or "").strip()
+    }
+    for removed_key in previous_keys - current_values.keys():
+        os.environ.pop(removed_key, None)
+    os.environ.update(current_values)
+
+
+def save_env_entries(entries: list[dict]) -> None:
+    """Overwrite the store and update the current process environment."""
+    previous = load_env_entries()
+    _write_env_text(serialize_env_file(entries))
+    _sync_process_environment(previous, entries)
 
 
 def upsert_env_entry(key: str, value: str) -> None:
@@ -77,10 +129,10 @@ def upsert_env_entry(key: str, value: str) -> None:
         raise ValueError("env key cannot be empty")
 
     new_line = f"{key}={value}"
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     if not ENV_FILE.exists():
-        ENV_FILE.write_text(new_line + "\n")
+        _write_env_text(new_line + "\n")
+        os.environ[key] = value
         return
 
     # `newline=""` disables universal-newlines translation so CRLF/CR files
@@ -109,7 +161,8 @@ def upsert_env_entry(key: str, value: str) -> None:
             elif line.endswith("\r"):
                 trailing = "\r"
             lines[i] = new_line + trailing
-            ENV_FILE.write_text("".join(lines))
+            _write_env_text("".join(lines))
+            os.environ[key] = value
             return
 
     # Not found — append. Ensure the previous content ends with a newline
@@ -117,4 +170,5 @@ def upsert_env_entry(key: str, value: str) -> None:
     if lines and not lines[-1].endswith(("\n", "\r")):
         lines[-1] = lines[-1] + "\n"
     lines.append(new_line + "\n")
-    ENV_FILE.write_text("".join(lines))
+    _write_env_text("".join(lines))
+    os.environ[key] = value

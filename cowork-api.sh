@@ -1,16 +1,48 @@
 #!/usr/bin/env bash
-# XO Cowork API process manager
-# Usage: ./cowork-api.sh {install|start|stop|restart|status|logs}
+# XO Cowork API local runner and process manager
+# Usage: ./cowork-api.sh {dev|install|start|stop|restart|status|logs}
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
 PID_FILE="/tmp/xo-cowork-api.pid"
 LOG_FILE="/tmp/xo-cowork-api.log"
 LOCK_FILE="/tmp/xo-cowork-api.lock"
 LOCK_PID_FILE="${LOCK_FILE}/pid"
-PORT="${PORT:-5002}"
-HOST="${HOST:-0.0.0.0}"
+
+# Read only the simple scalar values needed by this shell wrapper. The server
+# still uses python-dotenv for the complete configuration. Avoid sourcing .env:
+# it may contain secrets or values that are valid dotenv but unsafe shell.
+read_dotenv_value() {
+    local key="$1"
+    local line
+    local value
+
+    [ -f "$ENV_FILE" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "$key="*)
+                value="${line#*=}"
+                value="${value%%[[:space:]]#*}"
+                value="${value#"${value%%[![:space:]]*}"}"
+                value="${value%"${value##*[![:space:]]}"}"
+                case "$value" in
+                    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+                    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+                esac
+                printf '%s\n' "$value"
+                return 0
+                ;;
+        esac
+    done < "$ENV_FILE"
+}
+
+CONFIGURED_HOST="${HOST:-$(read_dotenv_value HOST)}"
+CONFIGURED_PORT="${PORT:-$(read_dotenv_value PORT)}"
+HOST="${CONFIGURED_HOST:-0.0.0.0}"
+PORT="${CONFIGURED_PORT:-5002}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -114,9 +146,59 @@ is_running() {
     fi
 }
 
-find_port_pids() {
+find_port_pids_for() {
+    local target_port="$1"
     # lsof works on macOS/Linux and is the safest way to identify listeners.
-    lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true
+    lsof -tiTCP:"$target_port" -sTCP:LISTEN 2>/dev/null || true
+}
+
+find_port_pids() {
+    find_port_pids_for "$PORT"
+}
+
+port_is_in_use() {
+    local target_port="$1"
+
+    if command -v lsof >/dev/null 2>&1; then
+        [ -n "$(find_port_pids_for "$target_port")" ]
+        return
+    fi
+    if command -v nc >/dev/null 2>&1; then
+        nc -z 127.0.0.1 "$target_port" >/dev/null 2>&1
+        return
+    fi
+
+    # The Python server performs the same bind check before native startup.
+    # Docker will still return an actionable bind error when neither probe is
+    # available on the host.
+    return 1
+}
+
+select_local_port() {
+    local preferred_port="${1:-5002}"
+
+    if [ "$preferred_port" != "5002" ]; then
+        if port_is_in_use "$preferred_port"; then
+            log_error "Configured local port $preferred_port is already in use" >&2
+            return 1
+        fi
+        printf '%s\n' "$preferred_port"
+        return 0
+    fi
+
+    if ! port_is_in_use "5002"; then
+        printf '5002\n'
+        return 0
+    fi
+
+    if ! port_is_in_use "5003"; then
+        log_warn "Local port 5002 is already in use; using 5003" >&2
+        printf '5003\n'
+        return 0
+    fi
+
+    log_error "Local ports 5002 and 5003 are both in use; set PORT to another port" >&2
+    return 1
 }
 
 find_orphan_server_pids() {
@@ -302,7 +384,12 @@ install_deps() {
     fi
 
     if ! command -v python3 >/dev/null 2>&1; then
-        log_error "python3 not found; install Python 3 first"
+        log_error "python3 not found; install Python 3.12 or newer first"
+        return 1
+    fi
+
+    if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+        log_error "Python 3.12 or newer is required"
         return 1
     fi
 
@@ -312,6 +399,11 @@ install_deps() {
             log_error "Failed to create venv. On Debian/Ubuntu try: sudo apt-get install -y python3-venv"
             return 1
         fi
+    fi
+
+    if ! "$venv_dir/bin/python" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+        log_error "Existing venv uses Python older than 3.12; recreate venv with a supported interpreter"
+        return 1
     fi
 
     log "Installing dependencies from requirements.txt..."
@@ -326,7 +418,40 @@ install_deps() {
     log_success "Dependencies installed (venv: $venv_dir)"
 }
 
+run_dev() {
+    local dev_host="${CONFIGURED_HOST:-127.0.0.1}"
+    local preferred_port="${CONFIGURED_PORT:-5002}"
+    local dev_port
+    local python_cmd
+
+    install_deps || return 1
+    dev_port="$(select_local_port "$preferred_port")" || return 1
+    python_cmd="$(resolve_python_cmd || true)"
+    if [ -z "$python_cmd" ]; then
+        log_error "No Python interpreter found after installation"
+        return 1
+    fi
+
+    log_success "Local environment is ready"
+    if [ -f "$ENV_FILE" ]; then
+        log "Using project configuration from $ENV_FILE"
+    else
+        log_warn "No .env found; using safe local defaults"
+        log "Copy .env.example to .env when you need runtime or connector settings"
+    fi
+    log "Starting development server at http://${dev_host}:${dev_port}/space/"
+    log "Press Ctrl+C to stop"
+
+    cd "$SCRIPT_DIR" || return 1
+    HOST="$dev_host" \
+    PORT="$dev_port" \
+    STAGE=local \
+    UVICORN_RELOAD=true \
+    exec "$python_cmd" server.py
+}
+
 case "${1:-restart}" in
+    dev)     run_dev ;;
     install) install_deps ;;
     start)   start_api ;;
     stop)    stop_api ;;
@@ -334,7 +459,7 @@ case "${1:-restart}" in
     status)  status_api ;;
     logs)    show_logs ;;
     *)
-        echo "Usage: $0 {install|start|stop|restart|status|logs}"
+        echo "Usage: $0 {dev|install|start|stop|restart|status|logs}"
         exit 1
         ;;
 esac

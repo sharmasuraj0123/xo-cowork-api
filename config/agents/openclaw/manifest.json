@@ -27,6 +27,34 @@
     "max_context": 200000,
     "max_output": 16384
   },
+  "runtime_setup": {
+    "installs_cli": true,
+    "session_globs": [
+      "agents/*/sessions/*.jsonl"
+    ],
+    "secrets": [
+      {
+        "key": "OPENCLAW_GATEWAY_TOKEN",
+        "label": "Gateway token",
+        "description": "Authenticates Quirq to the local OpenClaw gateway."
+      },
+      {
+        "key": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API key",
+        "description": "Enables Anthropic models."
+      },
+      {
+        "key": "OPENAI_API_KEY",
+        "label": "OpenAI API key",
+        "description": "Enables OpenAI models."
+      },
+      {
+        "key": "OPENROUTER_API_KEY",
+        "label": "OpenRouter API key",
+        "description": "Enables models routed through OpenRouter."
+      }
+    ]
+  },
   "commands": {
     "config_set":       ["{binary}", "config", "set", "{path}", "{value}"],
     "config_set_batch": ["{binary}", "config", "set", "--batch-json", "{batch_json}"],

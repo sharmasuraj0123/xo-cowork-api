@@ -173,10 +173,14 @@ The project venv is `venv/bin/python` (it has fastapi/uvicorn; the system
 
 ```bash
 # Run
-python server.py                                   # http://localhost:5002
-uvicorn server:app --port 5002 --reload            # dev auto-reload
-AGENT_NAME=hermes python server.py                 # boot a specific backend
+./quirq                                            # Docker on localhost:5003
+./cowork-api.sh dev                                # native venv + reload
+PORT=5010 ./cowork-api.sh dev                      # choose another native port
+AGENT_NAME=hermes venv/bin/python server.py        # boot a specific backend
 ```
+
+The full local setup and configuration guide is in
+[`INSTALLATION.md`](INSTALLATION.md).
 
 **Validation playbook — run before every commit:**
 

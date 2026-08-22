@@ -26,6 +26,40 @@
     "max_context": 200000,
     "max_output": 16384
   },
+  "runtime_setup": {
+    "installs_cli": true,
+    "session_globs": [
+      "state.db",
+      "profiles/*/state.db"
+    ],
+    "secrets": [
+      {
+        "key": "API_SERVER_KEY",
+        "label": "Hermes gateway key",
+        "description": "Protects and authenticates the local Hermes API."
+      },
+      {
+        "key": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API key",
+        "description": "Enables Anthropic models."
+      },
+      {
+        "key": "OPENAI_API_KEY",
+        "label": "OpenAI API key",
+        "description": "Enables OpenAI models."
+      },
+      {
+        "key": "OPENROUTER_API_KEY",
+        "label": "OpenRouter API key",
+        "description": "Enables models routed through OpenRouter."
+      },
+      {
+        "key": "KIMI_API_KEY",
+        "label": "Kimi API key",
+        "description": "Enables Kimi Coding models."
+      }
+    ]
+  },
   "commands": {
     "config_set": ["{binary}", "config", "set", "{path}", "{value}"]
   },

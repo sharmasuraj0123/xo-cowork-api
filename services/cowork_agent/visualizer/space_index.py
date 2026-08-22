@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +55,13 @@ MAX_LEAVES_PER_GROUP = 40             # bigger dirs split into per-subdir groups
 _MAX_GROUP_SPLIT_DEPTH = 4            # deepest path segment the split recurses to
 MAX_TIES = 60                         # cross-tie output bound
 
+# Per-project git-history bounds (the timeline's "By project" mode). One
+# entry per day with commits, so the payload grows with project age, not
+# commit volume; both axes are capped anyway.
+MAX_HISTORY_DAYS = 730                # newest day-entries kept per project
+_HISTORY_SUBJECTS_PER_DAY = 3         # commit subjects sampled per day
+_HISTORY_SUBJECT_CHARS = 80           # subject truncation
+
 # Cross-tie derivation bounds. Ties are derived facts, never editorial:
 # files that share commits, docs that name a file's path, test_x <-> x.
 _TIE_MIN_COCHANGES = 3                # pairs must share >= this many commits
@@ -83,11 +91,6 @@ def _shape_for(filename: str) -> str:
     return "diamond"
 
 
-def _mtime_date(path: Path) -> str:
-    ts = path.stat().st_mtime
-    return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
-
-
 def _iter_files_pruned(base: Path):
     """Yield files under ``base``, pruning hidden/junk dirs DURING traversal.
 
@@ -103,44 +106,69 @@ def _iter_files_pruned(base: Path):
 
 
 _GIT_TIMEOUT_S = 5
+_HEADER_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def _git_facts(pdir: Path) -> tuple[dict[str, str], Optional[str], list[list[str]]]:
-    """Per-file first-appearance date, the project's first-commit date, and
-    each commit's file list (oldest first), from one ``git log``. Any failure
-    (not a repo, no git binary, no commits, timeout) → empty facts, and
-    callers fall back to mtime dates.
+def _git_facts(pdir: Path) -> tuple[
+    dict[str, str], Optional[str], list[list[str]], list[tuple[str, str]]
+]:
+    """Per-file first-appearance date, the project's first-commit date, each
+    commit's file list, and each commit's (date, subject), all oldest first,
+    from one ``git log``. Any failure (not a repo, no git binary, no commits,
+    timeout) → empty facts, and the project's leaves stay undated.
 
-    The full history (no ``--diff-filter``) serves two consumers at once: a
-    path's first appearance is its add date, and the per-commit file lists
-    feed co-change ties. ``%x01`` makes git emit a control byte prefix on
-    each commit-date line so file-path lines can never be confused with
-    dates."""
+    The full history (no ``--diff-filter``) serves three consumers at once: a
+    path's first appearance is its add date, the per-commit file lists feed
+    co-change ties, and the (date, subject) stream feeds the timeline's
+    per-project git history. ``%x01`` makes git emit a control byte prefix on
+    each commit header line so file-path lines can never be confused with
+    headers; ``%x02`` splits date from subject inside the header.
+
+    Subjects are attacker-ish input (any byte but NUL/newline): the stream is
+    framed on ``\\n`` only (``splitlines()`` also splits on VT/FF/NEL/U+2028,
+    letting a subject fabricate lines), every header date must be an ISO day
+    before it is trusted, remaining control bytes are stripped from stored
+    subjects, and the decode is non-strict so one legacy non-UTF-8 subject
+    cannot wipe the whole project's facts."""
     try:
+        # A project's facts must come from its own repo. Without this gate a
+        # plain folder nested in some enclosing repo (a dotfiles $HOME, the
+        # projects root itself) inherits the parent's entire history, and
+        # the timeline would render that foreign log as the project's lane.
+        if not (pdir / ".git").exists():
+            return {}, None, [], []
         out = subprocess.run(
             [
                 "git", "-C", str(pdir), "log",
                 "--reverse", "--date=short",
-                "--pretty=format:%x01%ad", "--name-only",
+                "--pretty=format:%x01%ad%x02%s", "--name-only",
             ],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT_S,
+            capture_output=True, text=True, errors="replace",
+            timeout=_GIT_TIMEOUT_S,
         )
     except Exception:
-        return {}, None, []
+        return {}, None, [], []
     if out.returncode != 0:
-        return {}, None, []
+        return {}, None, [], []
 
     created: dict[str, str] = {}
     first_commit: Optional[str] = None
     current: Optional[str] = None
     commits: list[list[str]] = []
+    history: list[tuple[str, str]] = []
     files: list[str] = []
-    for line in out.stdout.splitlines():
+    for line in out.stdout.split("\n"):
         if line.startswith("\x01"):
+            date_part, _, subject = line[1:].partition("\x02")
+            date_part = date_part.strip()
+            if not _HEADER_DATE_RE.match(date_part):
+                continue  # fabricated header: a control byte inside a subject
             if current is not None:
                 commits.append(files)
-            current = line[1:].strip()
+            current = date_part
             files = []
+            history.append((current, _CTRL_RE.sub(" ", subject).strip()))
             if first_commit is None:
                 first_commit = current
         elif line.strip() and current:
@@ -151,7 +179,23 @@ def _git_facts(pdir: Path) -> tuple[dict[str, str], Optional[str], list[list[str
             files.append(rel)
     if current is not None:
         commits.append(files)
-    return created, first_commit, commits
+    return created, first_commit, commits, history
+
+
+def _aggregate_history(history: list[tuple[str, str]]) -> list[dict]:
+    """Collapse an oldest-first (date, subject) commit stream into per-day
+    entries ``{"d", "n", "s"}`` (day, commit count, sampled subjects),
+    chronological, capped to the newest MAX_HISTORY_DAYS days."""
+    days: dict[str, dict] = {}
+    for day, subject in history:
+        entry = days.setdefault(day, {"d": day, "n": 0, "s": []})
+        entry["n"] += 1
+        if subject and len(entry["s"]) < _HISTORY_SUBJECTS_PER_DAY:
+            entry["s"].append(subject[:_HISTORY_SUBJECT_CHARS])
+    out = [days[key] for key in sorted(days)]
+    if len(out) > MAX_HISTORY_DAYS:
+        out = out[-MAX_HISTORY_DAYS:]
+    return out
 
 
 def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], list[dict]]:
@@ -165,13 +209,17 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
     scanned = 0
 
     def add_leaf(group_id: str, rel: str, f: Path) -> None:
+        # Dates come from git only: a file's first-appearance commit day.
+        # Files git does not know (and whole non-git projects) get null and
+        # sit out the timeline; an mtime would stamp them all "touched
+        # recently" and pile every undated artifact onto today.
         leaves.append({
             "id": f"{pid}:{rel}",
             "group": group_id,
             "shape": _shape_for(f.name),
             "tag": (f.suffix.lstrip(".").upper() or "FILE"),
             "label": f.name,
-            "date": created_dates.get(rel) or _mtime_date(f),
+            "date": created_dates.get(rel),
             "blurb": rel,
             "path": f"{pid}/{rel}",
         })
@@ -239,7 +287,8 @@ def _walk_project(pid: str, cat: str, created_dates: dict) -> tuple[list[dict], 
 
     if len(leaves) > MAX_LEAVES_PER_PROJECT:
         dropped = len(leaves) - MAX_LEAVES_PER_PROJECT
-        leaves.sort(key=lambda leaf: leaf["date"], reverse=True)
+        # Undated (non-git) leaves sort as oldest, so they are trimmed first.
+        leaves.sort(key=lambda leaf: leaf["date"] or "", reverse=True)
         leaves = leaves[:MAX_LEAVES_PER_PROJECT]
         print(f"space_index: {pid}: dropped {dropped} oldest leaves (cap {MAX_LEAVES_PER_PROJECT})")
 
@@ -332,6 +381,7 @@ def build_space_data() -> dict:
     leaves: list[dict] = []
     milestones: list[dict] = []
     commits_by_pid: dict[str, list[list[str]]] = {}
+    git_history: dict[str, list[dict]] = {}
 
     n = max(len(projects), 1)
     deadline = time.monotonic() + BUILD_DEADLINE_S
@@ -343,7 +393,8 @@ def build_space_data() -> dict:
         pid = str(meta["name"])
         cat = f"p_{pid}"
         display = str(meta.get("display_name") or pid)
-        created_dates, first_commit, p_commits = _git_facts(project_dir(pid))
+        created_dates, first_commit, p_commits, p_history = _git_facts(
+            project_dir(pid))
 
         try:
             p_groups, p_leaves = _walk_project(pid, cat, created_dates)
@@ -363,12 +414,14 @@ def build_space_data() -> dict:
         groups.extend(p_groups)
         leaves.extend(p_leaves)
         commits_by_pid[pid] = p_commits
+        if p_history:
+            git_history[cat] = _aggregate_history(p_history)
         if first_commit:
             milestones.append({"d": first_commit, "t": f"{display} first commit"})
 
     if len(leaves) > MAX_TOTAL_LEAVES:
         dropped = len(leaves) - MAX_TOTAL_LEAVES
-        leaves.sort(key=lambda leaf: leaf["date"], reverse=True)
+        leaves.sort(key=lambda leaf: leaf["date"] or "", reverse=True)
         leaves = leaves[:MAX_TOTAL_LEAVES]
         kept_groups = {leaf["group"] for leaf in leaves}
         groups = [g for g in groups if g["id"] in kept_groups]
@@ -378,8 +431,14 @@ def build_space_data() -> dict:
     ties = _build_ties(leaves, commits_by_pid)
 
     today = date.today()
-    if leaves:
-        dates = sorted(leaf["date"] for leaf in leaves)
+    # The axis must hold both modes: leaf dates (By file) and commit days
+    # (By project); a commit can predate every kept leaf. Undated leaves
+    # (files git does not know) do not stretch the axis.
+    dates = sorted(
+        [leaf["date"] for leaf in leaves if leaf["date"]]
+        + [day["d"] for hist in git_history.values() for day in hist]
+    )
+    if dates:
         start = (date.fromisoformat(dates[0]) - timedelta(days=7)).isoformat()
         end = (date.fromisoformat(dates[-1]) + timedelta(days=7)).isoformat()
     else:
@@ -406,6 +465,7 @@ def build_space_data() -> dict:
         "leaves": leaves,
         "ties": ties,
         "milestones": milestones,
+        "gitHistory": git_history,
     }
 
 

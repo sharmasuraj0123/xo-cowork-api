@@ -255,6 +255,14 @@ def list_projects() -> list[dict]:
     ``.xo/project.json``. Hidden directories are skipped. Missing or
     malformed metadata yields a minimal entry with just ``name`` and
     ``path`` so the UI can still surface the folder.
+
+    **The directory name is the project id.** Every other helper here
+    resolves paths as ``xo_projects_root() / name``, so a stale
+    ``name`` inside ``.xo/project.json`` (left behind when a folder is
+    renamed) must never win: it would point consumers at the wrong
+    folder — or at another project's — and two folders carrying the
+    same stored name would collide into one id. ``project.json`` is
+    therefore read for descriptive fields only.
     """
     root = xo_projects_root()
     out: list[dict] = []
@@ -273,10 +281,14 @@ def list_projects() -> list[dict]:
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
-        if not meta.get("name"):
-            meta["name"] = entry.name
-        if not meta.get("display_name"):
-            meta["display_name"] = meta["name"]
+        stored_name = str(meta.get("name") or "")
+        meta["name"] = entry.name
+        display = str(meta.get("display_name") or "")
+        # A display name that merely echoes a stale stored name is stale
+        # too; only a deliberately different label survives the rename.
+        if not display or (stored_name != entry.name and display == stored_name):
+            display = entry.name
+        meta["display_name"] = display
         meta["path"] = str(entry)
         out.append(meta)
 
@@ -332,10 +344,26 @@ def list_project_tree(name: str, relative_path: str = "") -> dict | None:
     files: list[dict] = []
     for entry in sorted(target.iterdir()):
         entry_rel = str(entry.relative_to(root_resolved)).replace("\\", "/")
-        info = {"name": entry.name, "relative_path": entry_rel}
+        info: dict = {"name": entry.name, "relative_path": entry_rel}
+        # stat() is best-effort: a broken symlink or a race with a delete
+        # must degrade to a listed entry with no detail, never a 500.
+        try:
+            st = entry.stat()
+            info["modified_at"] = st.st_mtime
+        except OSError:
+            st = None
         if entry.is_dir():
+            if st is not None:
+                try:
+                    # Cheap one-level count so the UI can say "12 items"
+                    # without a second request per folder.
+                    info["entries"] = sum(1 for _ in os.scandir(entry))
+                except OSError:
+                    pass
             dirs.append(info)
         else:
+            if st is not None:
+                info["size_bytes"] = st.st_size
             files.append(info)
 
     parent_rel: str | None
@@ -351,6 +379,67 @@ def list_project_tree(name: str, relative_path: str = "") -> dict | None:
         "parent_relative_path": parent_rel,
         "dirs": dirs,
         "files": files,
+    }
+
+
+def read_project_file(name: str, relative_path: str, *, max_bytes: int) -> dict | None:
+    """Read one text file from inside a project, for preview.
+
+    Returns ``None`` when the project or the file does not exist. Raises
+    ``ValueError`` for an unsafe ``relative_path`` — the same rules as
+    :func:`list_project_tree`, which is the only path validation in this
+    module and must stay the only one.
+
+    Reads at most ``max_bytes`` and reports ``truncated`` rather than
+    streaming a 200 MB file into a browser. Decoding is non-strict: a preview
+    of a file with one bad byte is more useful than an error.
+    """
+    project_id = normalize_agent_id(name)
+    root = project_dir(project_id)
+    if not root.is_dir():
+        return None
+    root_resolved = root.resolve()
+
+    rel = (relative_path or "")
+    if not rel:
+        raise ValueError("relative_path is required")
+    if "\x00" in rel:
+        raise ValueError("relative_path must not contain null bytes")
+    if rel.startswith("/") or rel.startswith("\\"):
+        raise ValueError("relative_path must not start with a path separator")
+    rel = rel.replace("\\", "/").strip("/")
+    parts = rel.split("/")
+    if any(p in ("..", ".") or p == "" for p in parts):
+        raise ValueError("relative_path must not contain '..' or '.' segments")
+
+    target = root_resolved / rel
+    try:
+        target = target.resolve()
+        target.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError("relative_path escapes project root") from None
+
+    # is_file() follows symlinks; the relative_to() check above already
+    # rejected a link pointing out of the project, so this only excludes
+    # directories and specials.
+    if not target.is_file():
+        return None
+
+    size = target.stat().st_size
+    with open(target, "rb") as fh:
+        raw = fh.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[:max_bytes]
+
+    return {
+        "project_id": project_id,
+        "relative_path": rel,
+        "name": target.name,
+        "size_bytes": size,
+        "modified_at": target.stat().st_mtime,
+        "truncated": truncated,
+        "content": raw.decode("utf-8", errors="replace"),
     }
 
 

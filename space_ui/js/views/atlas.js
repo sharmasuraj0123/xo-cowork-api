@@ -1,38 +1,78 @@
-/* The atlas trio — Graph, Timeline, Six Degrees: three lenses over one
-   dataset (space.json). They share the model, camera, selection state and
-   cross-view actions inside one boot() closure, so they live in one module
-   exporting three views (splitting them would force cross-imports, which the
-   view contract forbids). Cross-view jumps go through ctx.switchTo (`go`).
-   All graph content comes from ./data/space.json; nothing is embedded here —
-   the data lives on disk, next to this page. */
-import {apiFetch} from '../core/api.js';
+/* The atlas views (Dashboard, Graph, Timeline): lenses over one selected
+   graph dataset. Dashboard uses dashboard.json while Graph uses space.json.
+   They share the model, camera, selection state and cross-view actions
+   inside one boot() closure, so they live in one module exporting three
+   views (splitting them would force cross-imports, which the view contract
+   forbids). Cross-view jumps go through ctx.switchTo (`go`). All graph
+   content comes from the workspace's .xo/space.json, served at /xo/space.json;
+   nothing is embedded here. */
+import {API_BASE,apiFetch} from '../core/api.js';
 import {toast} from '../core/ui.js';
 
 let go=()=>{};   /* ctx.switchTo, captured on first mount */
 const hooks={};  /* boot() assigns lifecycle hooks here once it has run */
 let bootPromise=null;
+let bootDataset=null;
+
+/* Cross-lens focus: the List's "Map" action and the previewer's Graph button
+   dispatch space:focus-project; if the graph has not booted yet the request is
+   parked until boot consumes it. (The lens switch itself is shell chrome —
+   core/lens-switch.js — so it cannot move when the lens changes.) */
+let pendingFocus=null;
+addEventListener('space:focus-project',e=>{
+  pendingFocus=String(e.detail||'');
+  if(hooks.focusProject)hooks.focusProject();
+});
+
+const DATASETS={
+  dashboard:{url:API_BASE+'/xo/dashboard.json',label:'Dashboard'},
+  graph:{url:API_BASE+'/xo/space.json',label:'Graph'}
+};
+const DATASET_KEY='space.atlasDataset';
+
+function savedDataset(){
+  try{
+    const value=localStorage.getItem(DATASET_KEY);
+    return DATASETS[value]?value:'graph';
+  }catch(_err){return'graph';}
+}
+
+function rememberDataset(dataset){
+  try{localStorage.setItem(DATASET_KEY,dataset);}catch(_err){}
+}
 
 /* boot() runs exactly once, no matter which atlas lens mounts first or how
-   many mount concurrently — the cached promise is the single-flight guard. */
-function ensureBoot(){
+   many mount concurrently. Switching between the two graph projections
+   reloads once, matching main's dataset switch and resetting the simulation. */
+function ensureBoot(requestedDataset){
+  const dataset=DATASETS[requestedDataset]?requestedDataset:savedDataset();
+  if(bootPromise&&bootDataset!==dataset){
+    rememberDataset(dataset);
+    location.reload();
+    return new Promise(()=>{});
+  }
+  bootDataset=dataset;
+  rememberDataset(dataset);
   if(!bootPromise)bootPromise=(async()=>{
-    const res=await apiFetch('data/space.json');
+    const source=DATASETS[dataset];
+    const res=await apiFetch(source.url);
     if(!res.ok){
-      console.warn('Space could not load data/space.json:',res.error);
+      console.warn('Space could not load '+source.url+':',res.error);
       throw new Error(res.error);
     }
-    boot(res.data,'local file');
+    boot(res.data,source.label);
   })();
   return bootPromise;
 }
 
-function renderNoData(el){
+function renderNoData(el,dataset){
   if(!el)return;
+  const source=DATASETS[dataset]||DATASETS[savedDataset()];
   const box=document.createElement('div');
   box.className='nodata';
   box.innerHTML='<div class="eyebrow">No data source</div>'+
     '<h1>Space reads its map from a local file.</h1>'+
-    '<p>This page loads <b>data/space.json</b> from the folder it is served from, so the data stays on this machine. Serve the folder with the workspace server:</p>'+
+    '<p>This page loads <b>'+source.url+'</b> — a file in the workspace <b>.xo</b> directory — from this local server, so the data stays on this machine. Start the workspace server:</p>'+
     '<pre>cd xo-cowork-api && ./cowork-api.sh start</pre>'+
     '<p>then open <b>http://localhost:5002/space/</b></p>'+
     '<button id="nodata-retry">Retry</button>';
@@ -40,35 +80,55 @@ function renderNoData(el){
   box.querySelector('#nodata-retry').addEventListener('click',()=>location.reload());
 }
 
-function atlasView(id,label,order,lens){
+function atlasView(id,label,order,lens,dataset=null){
   return{
     id,label,order,
     async mount(el,ctx){
       go=ctx.switchTo;
-      try{await ensureBoot();}
-      catch(err){renderNoData(el);}
+      el.querySelectorAll('[data-atlas-lens]').forEach(button=>{
+        button.addEventListener('click',()=>go(button.dataset.atlasLens));
+      });
+      try{await ensureBoot(dataset);}
+      catch(err){renderNoData(el,dataset);}
     },
     show(){if(hooks.setActiveView)hooks.setActiveView(lens);},
     hide(){if(hooks.setActiveView)hooks.setActiveView(null);}
   };
 }
-export const graphView=atlasView('graph','Graph',1,'graph');
-export const timeView=atlasView('time','Timeline',2,'time');
-export const sixView=atlasView('six','Six&nbsp;Degrees',3,'six');
+export const dashboardView={
+  ...atlasView('dashboard','Dashboard',0,'graph','dashboard'),
+  section:'graph'
+};
+/* Files lands on the List lens (the projects view owns the nav tab); the
+   Graph is its second lens, reachable from the pill or #/graph. */
+export const graphView={
+  ...atlasView('graph','Graph',1,'graph','graph'),
+  nav:false,parent:'projects'
+};
+/* Timeline is pinned to the workspace dataset (space.json): plotting the
+   Dashboard's 5-environment projection there has no git history and reads
+   as broken. Arriving from Dashboard costs one dataset-switch reload, the
+   same hop Dashboard ↔ Files already makes. */
+export const timeView=atlasView('time','Timeline',2,'time','graph');
 
 function boot(DATA,DATA_SOURCE){
 /* ============================== MODEL FROM LOCAL DATA ==============================
-   All graph content comes from ./data/space.json, loaded at the bottom of this file.
-   Nothing is embedded here: the data lives on disk, next to this page. */
+   All graph content comes from .xo/space.json (GET /xo/space.json); nothing is
+   embedded here. */
 const CAT=DATA.categories;
 const ACCENT='#a8d94f', ACCENT_DEEP='#83d63a';
+const graphRoute=bootDataset==='dashboard'?'dashboard':'graph';
+const hubLabel=DATA.meta.hubLabel||'Department';
 const NODES=[];
 NODES.push({id:DATA.root.id,type:'root',label:DATA.root.label,blurb:DATA.root.blurb});
 DATA.hubs.forEach(h=>NODES.push({id:h.id,type:'hub',cat:h.cat,label:h.label,blurb:h.blurb}));
 DATA.groups.forEach(g=>NODES.push({id:g.id,type:'group',cat:g.cat,label:g.label,blurb:g.blurb}));
-DATA.leaves.forEach(l=>NODES.push({id:l.id,type:'leaf',group:l.group,shape:l.shape,tag:l.tag,label:l.label,date:l.date,blurb:l.blurb,path:l.path}));
+DATA.leaves.forEach(l=>NODES.push({
+  id:l.id,type:'leaf',group:l.group,shape:l.shape,tag:l.tag,label:l.label,
+  date:l.date,blurb:l.blurb,path:l.path,clusters:l.clusters||[],xotype:l.xotype
+}));
 const EDGES=[];
-DATA.hubs.forEach(h=>EDGES.push({s:DATA.root.id,t:h.id,kind:'root',label:'a department of XO'}));
+DATA.hubs.forEach(h=>EDGES.push({s:DATA.root.id,t:h.id,kind:'root',label:DATA.meta.rootEdgeLabel||'a department of XO'}));
 DATA.groups.forEach(g=>EDGES.push({s:g.cat,t:g.id,kind:'hg',label:'part of'}));
 DATA.leaves.forEach(l=>EDGES.push({s:l.group,t:l.id,kind:'rg',label:'part of'}));
 DATA.ties.forEach(x=>EDGES.push({s:x.s,t:x.t,kind:'x',label:x.label}));
@@ -85,11 +145,17 @@ const LEAVES=NODES.filter(n=>n.type==='leaf');
 const GROUPS=NODES.filter(n=>n.type==='group');
 const HUBS=NODES.filter(n=>n.type==='hub');
 const XCOUNT=EDGES.filter(e=>e.kind==='x').length;
-document.getElementById('q').placeholder=`Search ${LEAVES.length} artifacts…`;
+const noun=DATA.meta.noun||'artifacts';
+const collectionLabel=DATA.meta.collectionLabel||'clusters';
+document.getElementById('q').placeholder=`Search ${LEAVES.length} ${noun}…`;
 document.getElementById('fmeta').textContent=
-  `${LEAVES.length} artifacts · ${GROUPS.length} clusters · ${EDGES.length} links · mapped ${DATA.meta.mappedOn} · data: ${DATA_SOURCE}`;
-document.getElementById('intro-p').textContent=
-  `Wander through ${LEAVES.length} artifacts across four departments of XO: the repos, papers, decks, and experiments that bind thirteen months of work together.`;
+  `${LEAVES.length} ${noun} · ${GROUPS.length} ${collectionLabel} · ${EDGES.length} links · mapped ${DATA.meta.mappedOn} · data: ${DATA_SOURCE}`;
+if(DATA.meta.timelineTitle){
+  document.querySelector('#view-time .thead h2').textContent=DATA.meta.timelineTitle;
+}
+if(DATA.meta.timelineSub){
+  document.getElementById('tsub').textContent=DATA.meta.timelineSub;
+}
 
 const colorOf=n=>n.type==='root'?'#e9e4d9':CAT[n.cat].color;
 function radiusOf(n){
@@ -108,15 +174,16 @@ const REDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
 /* expansion + filter state */
 const expanded=new Map(GROUPS.map(g=>[g.id,true]));
 let deptFilter=null;
+const belongsToCategory=(n,cat)=>n.cat===cat||(n.clusters||[]).includes(cat);
 const isShown=n=>{
   if(n.type==='leaf'){
     if(!expanded.get(n.group))return false;
-    if(deptFilter&&n.cat!==deptFilter)return false;
+    if(deptFilter&&!belongsToCategory(n,deptFilter))return false;
     return true;
   }
   return true;
 };
-const dimByFilter=n=>deptFilter&&n.cat&&n.cat!==deptFilter;
+const dimByFilter=n=>deptFilter&&n.cat&&!belongsToCategory(n,deptFilter);
 const shownNodes=()=>NODES.filter(isShown);
 const shownEdges=()=>EDGES.filter(e=>isShown(byId.get(e.s))&&isShown(byId.get(e.t)));
 
@@ -152,7 +219,12 @@ LEAVES.forEach((l,i)=>{
 /* ============================== SIMULATION ============================== */
 let simAlpha=1;
 let rootId=DATA.root.id,rootDepths=null;
-const SPR={root:{d:HUB_R,k:.02},hg:{d:175,k:.05},rg:{d:62,k:.08},x:{d:210,k:.005}};
+const SPR={
+  root:{d:HUB_R,k:.02},
+  hg:{d:175,k:.05},
+  rg:{d:62,k:.08},
+  x:DATA.meta.tieSpring||{d:210,k:.005}
+};
 const CHG={root:-3400,hub:-2600,group:-1000,leaf:-235};
 function simTick(){
   const vs=shownNodes(),es=shownEdges();
@@ -255,7 +327,70 @@ function neighborhood(id,depth){
 function drawShape(c,x,y,r,shape){
   c.beginPath();
   if(shape==='diamond'){const s=r*1.25;c.moveTo(x,y-s);c.lineTo(x+s,y);c.lineTo(x,y+s);c.lineTo(x-s,y);c.closePath();}
+  else if(shape==='slab'){const w=r*1.55,h=r*.95;c.rect(x-w,y-h,w*2,h*2);}
+  else if(shape==='stack'){const s=r*.92,o=r*.38;c.rect(x-s-o,y-s+o,s*2,s*2);c.rect(x-s+o,y-s-o,s*2,s*2);}
   else c.arc(x,y,r,0,Math.PI*2);
+}
+function convexHull(points){
+  const pts=[...points].sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  if(pts.length<=1)return pts;
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[];
+  for(const point of pts){
+    while(lower.length>=2&&cross(lower.at(-2),lower.at(-1),point)<=0)lower.pop();
+    lower.push(point);
+  }
+  const upper=[];
+  for(let i=pts.length-1;i>=0;i--){
+    const point=pts[i];
+    while(upper.length>=2&&cross(upper.at(-2),upper.at(-1),point)<=0)upper.pop();
+    upper.push(point);
+  }
+  lower.pop();upper.pop();
+  return lower.concat(upper);
+}
+function drawEnclosures(k){
+  const PAD=42;
+  for(const group of GROUPS){
+    if(deptFilter&&group.cat!==deptFilter)continue;
+    const points=[[group.x,group.y]];
+    for(const leaf of LEAVES){
+      if(isShown(leaf)&&belongsToCategory(leaf,group.cat)){
+        points.push([leaf.x,leaf.y]);
+      }
+    }
+    if(points.length<2)continue;
+    const col=CAT[group.cat]?.color||'#888888';
+    const cx=points.reduce((sum,point)=>sum+point[0],0)/points.length;
+    const cy=points.reduce((sum,point)=>sum+point[1],0)/points.length;
+    gc.beginPath();
+    if(points.length===2){
+      const radius=Math.hypot(points[1][0]-points[0][0],points[1][1]-points[0][1])/2+PAD;
+      gc.arc(cx,cy,radius,0,Math.PI*2);
+    }else{
+      const hull=convexHull(points).map(point=>{
+        const dx=point[0]-cx,dy=point[1]-cy;
+        const distance=Math.hypot(dx,dy)||1;
+        return [point[0]+dx/distance*PAD,point[1]+dy/distance*PAD];
+      });
+      const first=hull[0],last=hull.at(-1);
+      gc.moveTo((last[0]+first[0])/2,(last[1]+first[1])/2);
+      for(let i=0;i<hull.length;i++){
+        const point=hull[i],next=hull[(i+1)%hull.length];
+        gc.quadraticCurveTo(
+          point[0],point[1],
+          (point[0]+next[0])/2,(point[1]+next[1])/2
+        );
+      }
+      gc.closePath();
+    }
+    gc.fillStyle=hexA(col,.055);gc.fill();
+    gc.setLineDash([5/k,4/k]);
+    gc.strokeStyle=hexA(col,.32);
+    gc.lineWidth=1.2/Math.sqrt(k);
+    gc.stroke();
+    gc.setLineDash([]);
+  }
 }
 function drawGraph(now){
   gc.setTransform(dpr,0,0,dpr,0,0);
@@ -272,7 +407,9 @@ function drawGraph(now){
   const k=cam.k;
   gc.setTransform(dpr*k,0,0,dpr*k,dpr*(GW/2-cam.x*k),dpr*(GH/2-cam.y*k));
   const es=shownEdges(),vs=shownNodes();
+  layoutSats(now);
   const inFocus=id=>!focusSet||focusSet.has(id);
+  if(DATA.meta.enclose)drawEnclosures(k);
   /* path reveal progress */
   let revealSeg=1e9;
   if(pathIds){
@@ -281,6 +418,7 @@ function drawGraph(now){
   }
   /* ---- edges ---- */
   for(const e of es){
+    if(DATA.meta.enclose&&deptFilter&&e.kind==='root')continue;
     const a=byId.get(e.s),b=byId.get(e.t);
     let alpha,width,color;
     if(pathIds){
@@ -306,9 +444,11 @@ function drawGraph(now){
     }else{gc.moveTo(a.x,a.y);gc.lineTo(b.x,b.y);}
     gc.strokeStyle=hexA(color,alpha);gc.lineWidth=width;gc.lineCap='round';gc.stroke();
   }
+  drawSatOrbits(k);
   /* ---- nodes ---- */
   const drawOrder=pathIds?[...vs].sort((a,b)=>(pathIds.includes(a.id)?1:0)-(pathIds.includes(b.id)?1:0)):vs;
   for(const n of drawOrder){
+    if(DATA.meta.enclose&&deptFilter&&n.type==='root')continue;
     const col=colorOf(n);
     let a=1;
     if(pathIds)a=pathIds.includes(n.id)?1:.10;
@@ -371,6 +511,7 @@ function drawGraph(now){
     }
     gc.globalAlpha=1;
   }
+  drawSatDots(now,k);
   /* ---- labels (screen space) ---- */
   gc.setTransform(dpr,0,0,dpr,0,0);
   gc.textAlign='center';
@@ -386,13 +527,15 @@ function drawGraph(now){
       gc.font='500 17px '+SERIF;
       halo(n.label,sx,sy-n.r*k-12,`rgba(233,228,217,${.94*a})`);
       gc.font='400 8.5px '+MONO;
-      halo(`${LEAVES.filter(l=>l.cat===n.cat).length} ARTIFACTS`,sx,sy+n.r*k+16,`rgba(125,120,109,${a})`,.14);
+      const hubCount=LEAVES.filter(l=>belongsToCategory(l,n.cat)).length;
+      const hubNoun=hubCount===1?noun.replace(/s$/,''):noun;
+      halo(`${hubCount} ${hubNoun.toUpperCase()}`,sx,sy+n.r*k+16,`rgba(125,120,109,${a})`,.14);
     }else if(n.type==='group'){
       const on=n.id===hoverId||n.id===selId||(focusSet&&focusSet.has(n.id));
       if(!(on||k>.8))continue;
       const closed=!expanded.get(n.id);
       gc.font='400 9px '+MONO;
-      const t=n.label.toUpperCase()+(closed?` +${LEAVES.filter(l=>l.group===n.id).length}`:'');
+      const t=n.label.toUpperCase()+(closed?` +${LEAVES.filter(l=>belongsToCategory(l,n.cat)).length}`:'');
       halo(t,sx,sy-n.r*k-7,`rgba(179,173,160,${.72*a})`,.1);
     }else if(n.type==='leaf'){
       const on=n.id===hoverId||n.id===selId||n.id===rootId||(focusSet&&focusSet.has(n.id))||(pathIds&&pathIds.includes(n.id));
@@ -401,6 +544,7 @@ function drawGraph(now){
       halo(n.label,sx,sy-n.r*k-7,on?`rgba(233,228,217,${.94*a})`:`rgba(179,173,160,${.62*a})`);
     }
   }
+  drawSatLabels(k);
   gc.globalAlpha=1;
   /* pulse ring */
   if(pulseN){
@@ -447,8 +591,8 @@ function pick(mx,my){
 }
 gcv.addEventListener('pointerdown',e=>{
   gcv.setPointerCapture(e.pointerId);
-  dismissIntro();
   downX=lastX=e.clientX;downY=lastY=e.clientY;moved=false;
+  if(pickSat(...evXY(e))){camAnim=null;return;} /* satellites are not bodies */
   const n=pick(...evXY(e));
   if(n&&n.type!=='root'){drag=n;n.fx=n.x;n.fy=n.y;}
   else pan=true;
@@ -466,6 +610,14 @@ gcv.addEventListener('pointermove',e=>{
     lastX=e.clientX;lastY=e.clientY;
     hideHC();
   }else{
+    const s=pickSat(...evXY(e));
+    if(s){
+      if(satHover!==s.key)satHover=s.key;
+      hoverId=null;gcv.style.cursor='pointer';
+      showSatHC(s,e.clientX,e.clientY);
+      return;
+    }
+    satHover=null;
     const n=pick(...evXY(e));
     hoverId=n?n.id:null;
     gcv.style.cursor=n?'pointer':'default';
@@ -481,6 +633,8 @@ gcv.addEventListener('pointerup',e=>{
   }
   pan=false;
   if(moved)return;
+  const sat=pickSat(...evXY(e));
+  if(sat){revealTodoRow(sat);return;}
   const n=pick(...evXY(e));
   const now=performance.now();
   if(now-lastUp<300){
@@ -517,6 +671,7 @@ function select(id,depth,fly=true){
   document.getElementById('crumb-depth').textContent=`${depth} hop${depth>1?'s':''} · ${focusSet.size} nodes`;
   document.getElementById('crumb').classList.add('is-on');
   openPanel(n);
+  syncSats(n);
   if(fly){
     const kT=Math.max(cam.k,1.6);
     const off=GW>760?PANEL_W/2/kT:0;
@@ -527,6 +682,7 @@ function clearFocus(){
   selId=null;focusSet=null;focusDepth=0;
   document.getElementById('crumb').classList.remove('is-on');
   closePanel();
+  clearSats();
 }
 function clearPath(){pathIds=null;pathEdges=null;}
 function setExp(g,v){
@@ -547,7 +703,7 @@ function toggleGroup(g){
   if(focusSet&&selId)focusSet=neighborhood(selId,focusDepth);
 }
 gcv.addEventListener('wheel',e=>{
-  e.preventDefault();dismissIntro();camAnim=null;
+  e.preventDefault();camAnim=null;
   const f=Math.exp(-e.deltaY*.0016);
   const nk=Math.max(.22,Math.min(5,cam.k*f));
   const [mx,my]=evXY(e);
@@ -557,13 +713,6 @@ gcv.addEventListener('wheel',e=>{
   cam.k=nk;
 },{passive:false});
 document.getElementById('crumb-clear').addEventListener('click',()=>{clearFocus();clearPath();});
-document.getElementById('intro-cta').addEventListener('click',dismissIntro);
-let introGone=false;
-function dismissIntro(){
-  if(introGone)return;introGone=true;
-  document.getElementById('intro').classList.add('is-gone');
-  document.getElementById('view-graph').classList.remove('intro-dim');
-}
 
 /* ============================== RE-ROOT ============================== */
 const rootdd=document.getElementById('rootdd');
@@ -594,7 +743,7 @@ function setRoot(id){
   clearFocus();clearPath();
   document.getElementById('root-name').textContent=r.label;
   reheat(.8);
-  go('graph');
+  go(graphRoute);
   flyTo(r.fx,r.fy,Math.min(Math.max(cam.k,.55),.9),900);
   toast(id===DATA.root.id?'Back to the full space':'Rooted on '+r.label);
   closeRootDD();
@@ -615,55 +764,53 @@ addEventListener('click',e=>{
   if(!e.target.closest('.rootpick'))closeRootDD();
 });
 
-/* dept chips */
-const chipsEl=document.getElementById('chips');
-const chipDefs=[{id:null,label:'All'},...Object.entries(CAT).map(([id,c])=>({id,label:c.name}))];
-chipDefs.forEach(d=>{
-  const b=document.createElement('button');
-  b.textContent=d.label;
-  if(d.id===null)b.classList.add('is-on');
-  b.addEventListener('click',()=>{
-    deptFilter=d.id;
-    [...chipsEl.children].forEach(x=>x.classList.remove('is-on'));
-    b.classList.add('is-on');
-    if(selId&&!isShown(byId.get(selId))){clearFocus();}
-    if(focusSet&&selId)focusSet=neighborhood(selId,focusDepth);
-    reheat(.4);
-  });
-  chipsEl.appendChild(b);
-});
 /* legend + counts */
 {
   const lg=document.getElementById('legend');
-  lg.innerHTML=Object.values(CAT).map(c=>`<span class="li"><span class="sw" style="background:${c.color}"></span>${c.name}</span>`).join('')+
-   `<span class="li" style="margin-left:6px"><svg width="10" height="10"><circle cx="5" cy="5" r="3.6" fill="#b3ada0"/></svg>code</span>
-    <span class="li"><svg width="10" height="10"><circle cx="5" cy="5" r="3.1" fill="none" stroke="#b3ada0" stroke-width="1.4"/></svg>document</span>
-    <span class="li"><svg width="10" height="10"><rect x="5" y="0.9" width="5.8" height="5.8" fill="#b3ada0" transform="rotate(45 5 5)"/></svg>experiment</span>`;
+  const glyph={
+    disc:'<svg width="10" height="10"><circle cx="5" cy="5" r="3.6" fill="#b3ada0"/></svg>',
+    ring:'<svg width="10" height="10"><circle cx="5" cy="5" r="3.1" fill="none" stroke="#b3ada0" stroke-width="1.4"/></svg>',
+    diamond:'<svg width="10" height="10"><path d="M5 .9 9.1 5 5 9.1.9 5Z" fill="#b3ada0"/></svg>',
+    stack:'<svg width="11" height="10"><rect x="1" y="3" width="6" height="6" fill="none" stroke="#b3ada0"/><rect x="4" y="1" width="6" height="6" fill="#b3ada0"/></svg>',
+    slab:'<svg width="12" height="10"><rect x=".5" y="2.7" width="11" height="4.6" fill="#b3ada0"/></svg>'
+  };
+  const shapeDefs=DATA.meta.shapeLegend||[
+    {shape:'disc',label:'code'},
+    {shape:'ring',label:'document'},
+    {shape:'diamond',label:'experiment'}
+  ];
+  const typeDefs=DATA.meta.typeLegend||[];
+  lg.innerHTML=
+    Object.values(CAT).map(c=>`<span class="li"><span class="sw" style="background:${c.color}"></span>${esc(c.name)}</span>`).join('')+
+    shapeDefs.map((d,i)=>`<span class="li"${i===0?' style="margin-left:6px"':''}>${glyph[d.shape]||glyph.disc}${esc(d.label)}</span>`).join('')+
+    typeDefs.map((d,i)=>`<span class="li${d.weight==='dim'?' li-dim':''}"${i===0?' style="margin-left:6px"':''}><span class="sw sw-ring"></span>${esc(d.label.toLowerCase())}</span>`).join('');
   document.getElementById('counts').textContent=
-    `${LEAVES.length} artifacts · ${GROUPS.length} clusters · ${EDGES.length} links · ${XCOUNT} cross-ties`;
+    `${LEAVES.length} ${noun} · ${GROUPS.length} ${collectionLabel} · ${EDGES.length} links · ${XCOUNT} cross-ties`;
 }
 
 /* ============================== HOVER CARD ============================== */
 const hc=document.getElementById('hc');
 function showHC(n,mx,my){
   const col=n.type==='root'?ACCENT_DEEP:CAT[n.cat].color;
-  const kick=n.type==='hub'?'Department':n.type==='group'?'Cluster':n.type==='root'?'The center':`${CAT[n.cat].name} · ${n.tag}`;
+  const kick=n.type==='hub'?hubLabel:n.type==='group'?'Cluster':n.type==='root'?'The center':`${CAT[n.cat].name} · ${n.tag}`;
   const art=`linear-gradient(155deg, ${hexA(col,.24)}, ${hexA(col,.03)} 68%)`;
   let rows='';
   if(n.type==='leaf'){
     rows=`<dl>
-      <dt>Born</dt><dd>${fmtDate(n.date)}</dd>
+      ${n.date?`<dt>Born</dt><dd>${fmtDate(n.date)}</dd>`:''}
       <dt>Where</dt><dd class="mono">${esc(n.path)}</dd>
       <dt>Ties</dt><dd>${n.degree-1} connection${n.degree-1===1?'':'s'} · ${esc(byId.get(n.group).label)}</dd>
     </dl>`;
   }else if(n.type==='group'){
-    const kids=LEAVES.filter(l=>l.group===n.id);
-    const d0=kids.reduce((m,x)=>x.date<m?x.date:m,'9999'),d1=kids.reduce((m,x)=>x.date>m?x.date:m,'0000');
-    rows=`<dl><dt>Holds</dt><dd>${kids.length} artifacts</dd>
-      <dt>Span</dt><dd>${fmtMY(+new Date(d0))} to ${fmtMY(+new Date(d1))}</dd></dl>`;
+    const kids=LEAVES.filter(l=>belongsToCategory(l,n.cat));
+    const dates=kids.map(x=>x.date).filter(Boolean).sort();
+    const span=dates.length
+      ?`<dt>Span</dt><dd>${fmtMY(+new Date(dates[0]))} to ${fmtMY(+new Date(dates.at(-1)))}</dd>`
+      :'';
+    rows=`<dl><dt>Holds</dt><dd>${kids.length} ${noun}</dd>${span}</dl>`;
   }else{
-    const kids=n.type==='hub'?LEAVES.filter(l=>l.cat===n.cat):LEAVES;
-    rows=`<dl><dt>Holds</dt><dd>${kids.length} artifacts</dd></dl>`;
+    const kids=n.type==='hub'?LEAVES.filter(l=>belongsToCategory(l,n.cat)):LEAVES;
+    rows=`<dl><dt>Holds</dt><dd>${kids.length} ${noun}</dd></dl>`;
   }
   hc.innerHTML=`
     <div class="art" style="background:${art}">
@@ -673,6 +820,9 @@ function showHC(n,mx,my){
     </div>
     ${rows}
     <div class="foot">${n.type==='group'?'Click to focus · Double-click to open or close':'Click to focus · Double-click to expand'}</div>`;
+  placeHC(mx,my);
+}
+function placeHC(mx,my){
   hc.classList.add('is-on');
   const r=hc.getBoundingClientRect();
   let x=mx+18,y=my+18;
@@ -680,14 +830,14 @@ function showHC(n,mx,my){
   if(y+r.height>innerHeight-8)y=my-r.height-18;
   hc.style.left=Math.max(8,x)+'px';hc.style.top=Math.max(64,y)+'px';
 }
-function hideHC(){hc.classList.remove('is-on');hoverId=null;}
+function hideHC(){hc.classList.remove('is-on');hoverId=null;satHover=null;}
 
 /* ============================== DETAIL PANEL ============================== */
 const panel=document.getElementById('panel');
 function openPanel(n){
   const col=n.type==='root'?ACCENT_DEEP:CAT[n.cat].color;
-  const kick=n.type==='hub'?`Department · ${LEAVES.filter(l=>l.cat===n.cat).length} artifacts`
-    :n.type==='group'?`${CAT[n.cat].name} · cluster`
+  const kick=n.type==='hub'?`${hubLabel} · ${LEAVES.filter(l=>belongsToCategory(l,n.cat)).length} ${noun}`
+    :n.type==='group'?`${CAT[n.cat].name} · environment`
     :n.type==='root'?'The center'
     :`${CAT[n.cat].name} · ${n.tag}`;
   const conns=n.adj
@@ -714,15 +864,18 @@ function openPanel(n){
       ${n.path?`<div class="path">${esc(n.path)}</div>`:''}
     </div>
     <div class="psec"><h4>About</h4><p>${esc(n.blurb||'')}</p></div>
+    ${todoSectionHTML(n)}
     ${conns?`<div class="psec"><h4>Connections</h4>${conns}</div>`:''}
     <div class="pacts">
       ${n.type==='leaf'||n.type==='group'?`<button data-act="timeline">Show on timeline</button>`:''}
-      <button data-act="from">Path from here</button>
-      <button data-act="to">Path to here</button>
+      ${previewable(n)?`<button data-act="preview">Preview file</button>`:''}
     </div>`;
   panel.classList.add('is-open');
   panel.dataset.id=n.id;
 }
+/* Only in the graph dataset: there a leaf is a file with a
+   "<project>/<relative path>" path. A dashboard leaf is a whole project. */
+const previewable=n=>bootDataset==='graph'&&n.type==='leaf'&&!!n.path&&n.path.includes('/');
 function closePanel(){panel.classList.remove('is-open');}
 document.getElementById('panel-close').addEventListener('click',()=>{clearFocus();clearPath();});
 panel.addEventListener('click',e=>{
@@ -730,27 +883,293 @@ panel.addEventListener('click',e=>{
   if(c){
     const n=byId.get(c.dataset.id);
     ensureShown(n);
-    go('graph');
+    go(graphRoute);
     select(n.id,1);
     pulseN={id:n.id,t0:performance.now()};
+    return;
+  }
+  const row=e.target.closest('.ptodo');
+  if(row){
+    satPulse={key:row.dataset.todo,t0:performance.now()};
     return;
   }
   const a=e.target.closest('[data-act]');
   if(!a)return;
   const n=byId.get(panel.dataset.id);
-  if(a.dataset.act==='timeline'){traceOnTimeline(n);}
-  else if(a.dataset.act==='from'){document.getElementById('six-a').value=n.label;sixA=n;go('six');}
-  else if(a.dataset.act==='to'){document.getElementById('six-b').value=n.label;sixB=n;go('six');}
+  if(a.dataset.act==='timeline'){traceOnTimeline(n);return;}
+  if(a.dataset.act==='preview'){
+    const cut=n.path.indexOf('/');
+    dispatchEvent(new CustomEvent('space:preview-file',{detail:{
+      project:n.path.slice(0,cut),path:n.path.slice(cut+1),name:n.label}}));
+    return;
+  }
+  if(a.dataset.act==='todos'){
+    const pid=satHost;
+    if(!pid)return;
+    satCache.delete(pid);
+    satHost=null;            /* defeat syncSats' same-project early return */
+    syncSats(byId.get(pid));
+  }
 });
 function ensureShown(n){
   if(n.type==='leaf'){
-    if(deptFilter&&n.cat!==deptFilter){
-      deptFilter=null;
-      [...chipsEl.children].forEach((x,i)=>x.classList.toggle('is-on',i===0));
-      toast('Filter cleared to reach '+n.label);
-    }
     if(!expanded.get(n.group)){setExp(byId.get(n.group),true);reheat(.4);}
   }
+}
+
+/* ============================== TODO SATELLITES ==============================
+   Dashboard only: there a leaf IS an xo-project (leaf id == project id), so
+   selecting one can show its live todos. In the Graph dataset leaves are files
+   and the whole feature stays switched off.
+
+   Satellites are UI state, never graph data: nothing is pushed into NODES /
+   EDGES / byId / LEAVES. The model is built once from the dataset (:136-161)
+   and half a dozen subsystems read it as a snapshot — LEAVES-derived counts,
+   the timeline's lanes and axis, search, the re-root walk. A todo injected
+   there would invent a timeline lane and inflate "N projects"; keeping them
+   out of the model means none of those need to know this feature exists.
+   The cost is that they get no adjacency, so hover/click/label are handled
+   explicitly below. Positions are recomputed from the host each frame, so the
+   constellation follows drags and settling for free without any force. */
+const SAT_DOTS=28;    /* dots drawn — beyond this the orbit reads as noise */
+const SAT_ROWS=40;    /* rows listed in the panel */
+const SAT_TTL=20000;  /* ms a fetched list stays fresh (re-click is instant) */
+const SAT_MIN_K=.55;  /* below this zoom, dots would collide with sibling nodes */
+/* Same order the Files tab lists todos in (projects.js:28). Duplicated rather
+   than imported: views never import each other (see the registry contract). */
+const ST_ORDER={in_progress:0,pending:1,blocked:2,completed:3,cancelled:4};
+const ST_DONE=new Set(['completed','cancelled']);
+const ST_COLOR={in_progress:ACCENT,blocked:'#e0b04c',pending:'#b3ada0',
+  completed:'#7d786d',cancelled:'#7d786d'};
+let satHost=null;    /* project id the constellation belongs to, or null */
+let satRows=[];      /* every todo, ST_ORDER-sorted — the panel's source */
+let satDots=[];      /* satRows.slice(0,SAT_DOTS) — the canvas's source */
+let satState='idle'; /* idle | loading | ready | error */
+let satNote='';      /* one-line reason when state is error */
+let satToken=0;      /* race guard: bumped whenever the selection changes */
+let satT0=0;         /* grow-in start */
+let satHover=null;   /* key of the hovered dot */
+let satPulse=null;   /* {key,t0} — panel row clicked, flash its dot */
+const satCache=new Map();
+
+/* The one gate. Everything else early-returns on a null host. */
+const todoProjectId=n=>bootDataset==='dashboard'&&n&&n.type==='leaf'?n.id:null;
+
+function shapeTodos(res){
+  if(!res.ok){
+    return{rows:[],state:'error',
+      note:res.notImplemented?'todos are not available for the active agent'
+        :res.offline?'xo-cowork-api is unreachable':String(res.error||'could not read todos')};
+  }
+  const rows=[];
+  for(const [sid,sess] of Object.entries(res.data.sessions||{})){
+    for(const t of sess.todos||[]){
+      rows.push({key:sid+'/'+t.id,sid,runtime:sess.runtime||'',
+        status:t.status||'pending',content:t.content||'',
+        st:ST_ORDER[t.status]??9});
+    }
+  }
+  rows.sort((a,b)=>a.st-b.st||a.content.localeCompare(b.content));
+  rows.forEach((r,i)=>{r.i=i;});
+  return{rows,state:'ready',note:'',updated:res.data.updated_at||null};
+}
+function tallyText(){
+  const by=new Map();
+  for(const r of satRows)by.set(r.status,(by.get(r.status)||0)+1);
+  return Object.keys(ST_ORDER)
+    .filter(s=>by.get(s))
+    .map(s=>`${by.get(s)} ${s.replace('_',' ')}`)
+    .join(' · ').toUpperCase();
+}
+
+function syncSats(n){
+  const pid=todoProjectId(n);
+  if(pid&&pid===satHost)return; /* same project re-selected: keep what we have */
+  clearSats();
+  if(!pid)return;
+  satHost=pid;satT0=performance.now();
+  const hit=satCache.get(pid);
+  if(hit&&performance.now()-hit.t<SAT_TTL){applySats(pid,hit,satToken);return;}
+  satState='loading';renderTodoSection();
+  loadSats(pid,satToken);
+}
+async function loadSats(pid,tok){
+  const res=await apiFetch(API_BASE+'/api/xo-projects/'+encodeURIComponent(pid)+'/todos');
+  if(tok!==satToken)return; /* a newer selection owns the screen */
+  const shaped=shapeTodos(res);
+  if(shaped.state==='ready'){
+    if(satCache.size>40)satCache.clear();
+    satCache.set(pid,{t:performance.now(),...shaped});
+  }
+  applySats(pid,shaped,tok);
+}
+function applySats(pid,shaped,tok){
+  /* Two guards, not one: the token catches an A→B→A sequence where the host
+     id alone would let A's older response paint over A's newer one. */
+  if(tok!==satToken||satHost!==pid)return;
+  satRows=shaped.rows;satDots=satRows.slice(0,SAT_DOTS);
+  satState=shaped.state;satNote=shaped.note;
+  renderTodoSection();
+  reheat(.12); /* nudge the loop so the grow-in animates from a settled layout */
+}
+function clearSats(){
+  satToken++;satHost=null;satRows=[];satDots=[];
+  satState='idle';satNote='';satHover=null;satPulse=null;
+}
+
+/* Concentric shells at roughly constant arc spacing: 10, 16, 22, … */
+function satSlot(i){
+  let shell=0,base=0;
+  for(;;){const cap=10+shell*6;if(i<base+cap)return{shell,slot:i-base,cap};base+=cap;shell++;}
+}
+/* The host must exist, be selected, and be on screen. A group can be collapsed
+   out from under a live selection (double-clicking its hub, :654) — without
+   this the constellation would hang in empty space. */
+function satAnchor(){
+  if(!satHost||!satDots.length)return null;
+  const host=byId.get(satHost);
+  return host&&isShown(host)?host:null;
+}
+function layoutSats(now){
+  const host=satAnchor();
+  if(!host)return;
+  const grow=REDUCED?1:easeCubicInOut(Math.min(1,(now-satT0)/380));
+  for(const s of satDots){
+    const{shell,slot,cap}=satSlot(s.i);
+    const a=slot/cap*Math.PI*2+shell*.31; /* fixed angle: hit-testing stays exact */
+    const rr=(host.r+26+shell*19)*grow;
+    s.x=host.x+Math.cos(a)*rr;s.y=host.y+Math.sin(a)*rr;
+    s.r=s.status==='in_progress'?4.2:s.status==='blocked'?3.6:ST_DONE.has(s.status)?2.4:3.2;
+  }
+}
+function drawSatOrbits(k){
+  const host=satAnchor();
+  if(!host||k<SAT_MIN_K)return;
+  const col=CAT[host.cat]?.color||'#b3ada0';
+  const shells=new Set(satDots.map(s=>satSlot(s.i).shell));
+  for(const shell of shells){
+    gc.beginPath();gc.arc(host.x,host.y,host.r+26+shell*19,0,Math.PI*2);
+    gc.strokeStyle=hexA(col,.10);gc.lineWidth=.7/k;gc.stroke();
+  }
+  /* One spoke per in-progress todo only: 28 spokes is a starburst, but the
+     handful of things actually in flight deserve a line back to the project. */
+  for(const s of satDots){
+    if(s.status!=='in_progress')continue;
+    const dx=s.x-host.x,dy=s.y-host.y,d=Math.hypot(dx,dy)||1;
+    gc.beginPath();
+    gc.moveTo(host.x+dx/d*(host.r+5),host.y+dy/d*(host.r+5));
+    gc.lineTo(s.x,s.y);
+    gc.strokeStyle=hexA(ACCENT,.34);gc.lineWidth=.9/k;gc.stroke();
+  }
+}
+function drawSatDots(now,k){
+  const host=satAnchor();
+  if(!host||k<SAT_MIN_K)return;
+  for(const s of satDots){
+    const col=ST_COLOR[s.status]||'#b3ada0';
+    const done=ST_DONE.has(s.status);
+    const on=s.key===satHover;
+    if(s.status==='in_progress'&&!REDUCED){
+      const b=.5+.5*Math.sin(now/520);
+      gc.beginPath();gc.arc(s.x,s.y,s.r+2.6+b*1.4,0,Math.PI*2);
+      gc.fillStyle=hexA(ACCENT,.10+b*.08);gc.fill();
+    }
+    gc.beginPath();gc.arc(s.x,s.y,s.r+(on?1.2:0),0,Math.PI*2);
+    if(s.status==='pending'){
+      gc.strokeStyle=hexA(col,on?.95:.6);gc.lineWidth=1.2/Math.sqrt(k);gc.stroke();
+    }else{
+      gc.fillStyle=hexA(col,done?.34:on?1:.88);gc.fill();
+    }
+    if(satPulse&&satPulse.key===s.key){
+      const t=(now-satPulse.t0)/900;
+      if(t>1)satPulse=null;
+      else{
+        gc.beginPath();gc.arc(s.x,s.y,s.r+2+t*16,0,Math.PI*2);
+        gc.strokeStyle=hexA(ACCENT,(1-t)*.8);gc.lineWidth=1.6/Math.sqrt(k);gc.stroke();
+      }
+    }
+  }
+}
+/* Screen space — called with the label transform already set. */
+function drawSatLabels(k){
+  const host=satAnchor();
+  if(!host)return;
+  const sx=(host.x-cam.x)*k+GW/2,sy=(host.y-cam.y)*k+GH/2;
+  gc.font='400 8.5px '+MONO;
+  const total=satRows.length;
+  /* Clear of the outermost shell, not of the node: the caption sitting inside
+     the orbit collides with the dots at the bottom of the constellation. */
+  const shells=Math.max(...satDots.map(s=>satSlot(s.i).shell))+1;
+  const out=(host.r+26+(shells-1)*19)*k+15;
+  halo(`${total} TODO${total===1?'':'S'}`,sx,sy+out,'rgba(168,217,79,.9)',.14);
+  const s=satDots.find(d=>d.key===satHover);
+  if(!s||k<SAT_MIN_K)return;
+  gc.font='400 10.5px '+SANS;
+  const t=s.content.length>44?s.content.slice(0,43)+'…':s.content;
+  halo(t,(s.x-cam.x)*k+GW/2,(s.y-cam.y)*k+GH/2-s.r*k-7,'rgba(233,228,217,.95)');
+}
+function pickSat(mx,my){
+  const host=satAnchor();
+  if(!host||cam.k<SAT_MIN_K)return null;
+  const w=toWorld(mx,my);
+  let best=null,bd=1e9;
+  for(const s of satDots){
+    const d=Math.hypot(s.x-w.x,s.y-w.y);
+    /* Deliberately tighter than pick()'s 12/k floor: a generous satellite
+       radius would swallow clicks meant for a neighbouring project. */
+    const hit=Math.max(s.r+2.5/cam.k,7/cam.k);
+    if(d<hit&&d<bd){bd=d;best=s;}
+  }
+  return best;
+}
+function showSatHC(s,mx,my){
+  const col=ST_COLOR[s.status]||'#b3ada0';
+  hc.innerHTML=`
+    <div class="art" style="background:linear-gradient(155deg, ${hexA(col,.24)}, ${hexA(col,.03)} 68%)">
+      <div class="kicker">Todo · ${esc(s.status.replace('_',' '))}</div>
+      <h5>${esc(s.content)}</h5>
+    </div>
+    <dl><dt>Project</dt><dd>${esc(satHost||'')}</dd>
+      ${s.runtime?`<dt>Runtime</dt><dd>${esc(s.runtime)}</dd>`:''}</dl>
+    <div class="foot">Click to find it in the list</div>`;
+  placeHC(mx,my);
+}
+/* Canvas → panel. The list is where the full text lives, so a dot click
+   scrolls to its row and flashes it rather than opening anything new. */
+function revealTodoRow(s){
+  const row=panel.querySelector(`[data-todo="${CSS.escape(s.key)}"]`);
+  if(!row)return;
+  row.scrollIntoView({block:'nearest'});
+  row.classList.add('is-flash');
+  setTimeout(()=>row.classList.remove('is-flash'),900);
+}
+
+function todoSectionHTML(n){
+  return todoProjectId(n)?`<div class="psec" id="panel-todos">${todoBodyHTML()}</div>`:'';
+}
+function todoBodyHTML(){
+  const head=`<h4>Todos<button class="tref" data-act="todos" title="Re-fetch todos">&#8635;</button></h4>`;
+  if(satState==='loading')return head+`<div class="prj-note">loading…</div>`;
+  if(satState==='error')return head+`<div class="prj-note">${esc(satNote)}</div>`;
+  if(!satRows.length)return head+`<div class="prj-note">no todos recorded yet</div>`;
+  const shown=satRows.slice(0,SAT_ROWS);
+  return head
+    +`<div class="ptally">${esc(tallyText())}</div>`
+    +`<div class="prj-todos">`+shown.map(t=>
+      `<button class="prj-todo ptodo" data-todo="${esc(t.key)}">
+        <span class="tchip st-${esc(t.status)}">${esc(t.status.replace('_',' '))}</span>
+        <span class="tcontent${ST_DONE.has(t.status)?' done':''}">${esc(t.content)}</span>
+        ${t.runtime?`<span class="truntime">${esc(t.runtime)}</span>`:''}
+      </button>`).join('')+`</div>`
+    +(satRows.length>shown.length?`<div class="prj-note">+${satRows.length-shown.length} more</div>`:'')
+    +(satRows.length>SAT_DOTS?`<div class="prj-note">${SAT_DOTS} of ${satRows.length} shown on the map</div>`:'');
+}
+/* Patch only this subtree: re-rendering the whole panel would reset its
+   scroll position and give the section two sources of truth. */
+function renderTodoSection(){
+  const el=document.getElementById('panel-todos');
+  if(!el||panel.dataset.id!==satHost)return;
+  el.innerHTML=todoBodyHTML();
 }
 
 /* ============================== SEARCH ============================== */
@@ -784,7 +1203,7 @@ function acRow(n,idx,q){
 function wireAC(input,acEl,onPick){
   let items=[],act=-1;
   const render=q=>{
-    if(!items.length&&q){acEl.innerHTML=`<div class="empty">No match in this workspace<small>${LEAVES.length} artifacts mapped</small></div>`;acEl.classList.add('is-open');return;}
+    if(!items.length&&q){acEl.innerHTML=`<div class="empty">No match in this workspace<small>${LEAVES.length} ${noun} mapped</small></div>`;acEl.classList.add('is-open');return;}
     acEl.innerHTML=items.map(([sc,n,idx],i)=>{
       const r=acRow(n,idx,q);
       return `<button class="${i===act?'is-active':''}" data-i="${i}">
@@ -814,7 +1233,7 @@ function wireAC(input,acEl,onPick){
 }
 wireAC(document.getElementById('q'),document.getElementById('qac'),n=>{
   ensureShown(n);
-  go('graph');
+  go(graphRoute);
   clearPath();
   select(n.id,1,false);
   const kT=n.type==='leaf'?2.2:1.3;
@@ -833,8 +1252,23 @@ document.getElementById('root-q').addEventListener('keydown',e=>{
    its internal notion of which of its lenses is active — it gates the sim
    loop and timeline rebuilds — plus the search-focus and clear keys. */
 let view='graph';
+/* List → Graph jump: focus the project's hub (graph dataset, `p_<id>`) or
+   its project node (dashboard dataset, plain id). Unknown ids no-op. */
+hooks.focusProject=()=>{
+  if(!pendingFocus)return;
+  const n=byId.get('p_'+pendingFocus)||byId.get(pendingFocus);
+  pendingFocus=null;
+  if(!n)return;
+  ensureShown(n); /* a leaf handed over from the Tree lens may sit in a closed group */
+  clearPath();
+  select(n.id,1);
+  pulseN={id:n.id,t0:performance.now()};
+};
 hooks.setActiveView=v=>{
   view=v;
+  document.querySelectorAll('[data-atlas-lens]').forEach(button=>{
+    button.classList.toggle('is-on',button.dataset.atlasLens===v);
+  });
   hideHC();
   if(v==='graph'&&GW<50)resize(); /* booted while hidden (deep link): size the canvas now */
   if(v==='time'){requestAnimationFrame(()=>{buildTimeline();if(tTrace)drawTrace();});}
@@ -847,78 +1281,225 @@ addEventListener('keydown',e=>{
 });
 
 /* ============================== TIMELINE ============================== */
-const T0=+new Date(DATA.timeline.start+'T00:00:00'),T1=+new Date(DATA.timeline.end+'T00:00:00');
+const T0G=+new Date(DATA.timeline.start+'T00:00:00'),T1G=+new Date(DATA.timeline.end+'T00:00:00');
+let T0=T0G,T1=T1G;
 const SVGNS='http://www.w3.org/2000/svg';
-let tNow=T1,tPlaying=false,tTrace=null;
+let tNow=T1G,tPlaying=false,tTrace=null;
 const tplot=document.getElementById('tplot');
 const tsvg=document.createElementNS(SVGNS,'svg');
 tplot.appendChild(tsvg);
 const MILES=DATA.milestones;
+/* Two modes over one axis: 'file' plots every dated artifact as a beeswarm;
+   'project' plots each project's git commit history in parallel lanes (one
+   dot per day, sized by commits). The mode survives reloads; the toggle only
+   appears when the dataset carries git history (the Dashboard projection
+   and static fallback files do not). */
+const GITHIST=DATA.gitHistory||{};
+const histLanes=Object.keys(CAT).filter(cat=>(GITHIST[cat]||[]).length);
+const hasHist=histLanes.length>0;
+/* Both modes plot git dates only, so a project with no repository has no
+   lane at all. Files counts every project; without this note the Timeline
+   silently shows fewer and reads as broken data rather than as the absence
+   of git history it actually is. */
+const fileLanes=()=>Object.keys(CAT).filter(cat=>LEAVES.some(n=>n.cat===cat&&n.date));
+function coverageNote(){
+  const total=Object.keys(CAT).length;
+  const shown=(tMode==='project'?histLanes:fileLanes()).length;
+  const blank=total-shown;
+  if(!total||blank<=0)return'';
+  /* Every project has a lane now, so this counts the empty ones rather than
+     claiming a subset is "shown" — the dark columns are visible evidence. */
+  return ` ${blank} of ${total} project${total===1?'':'s'} ${blank===1?'has':'have'} no git history to plot; their lanes are dark.`;
+}
+const TMODE_KEY='space.timelineMode';
+let tMode='file';
+try{if(localStorage.getItem(TMODE_KEY)==='project'&&hasHist)tMode='project';}catch(_err){}
+let histDots=[];
+{
+  const tmodeEl=document.getElementById('tmode');
+  if(tmodeEl&&hasHist)tmodeEl.hidden=false;
+}
+document.querySelectorAll('#tmode [data-tmode]').forEach(button=>{
+  button.addEventListener('click',()=>setTMode(button.dataset.tmode));
+});
+function defaultSub(){
+  if(tMode==='project'){
+    return'Every project’s git history in parallel · newest at the top · dot size = commits that day.'
+      +coverageNote();
+  }
+  return(DATA.meta.timelineSub||
+    'Scrub through the workspace as it grew, newest at the top. Open any cluster from the graph to watch its run unfold here.')
+    +coverageNote();
+}
+function syncTModeUI(){
+  document.querySelectorAll('#tmode [data-tmode]').forEach(button=>{
+    button.classList.toggle('is-on',button.dataset.tmode===tMode);
+  });
+  if(!tTrace)document.getElementById('tsub').textContent=defaultSub();
+}
+function setTMode(mode){
+  if(mode===tMode||(mode==='project'&&!hasHist))return;
+  tMode=mode;
+  try{localStorage.setItem(TMODE_KEY,mode);}catch(_err){}
+  hideHC();
+  if(mode==='project'&&tTrace)clearTrace(); /* traces are a By-file tool */
+  syncTModeUI();
+  buildTimeline();
+  if(tMode==='file'&&tTrace)drawTrace();
+}
+syncTModeUI();
+/* Each mode gets its own axis, spanning only what it actually plots: the
+   file plot spans the kept leaves' git dates, the project plot spans commit
+   history. One shared axis would leave Play sweeping months of empty space
+   whenever one mode's data starts far earlier than the other's. */
+function computeRange(){
+  const stamps=tMode==='project'
+    ?histLanes.flatMap(cat=>(GITHIST[cat]||[]).map(day=>+new Date(day.d+'T00:00:00')))
+    :LEAVES.filter(n=>n.date).map(n=>+new Date(n.date+'T00:00:00'));
+  if(!stamps.length){T0=T0G;T1=T1G;}
+  else{
+    const pad=86400000*7;
+    let lo=Infinity,hi=-Infinity;
+    for(const t of stamps){if(t<lo)lo=t;if(t>hi)hi=t;}
+    T0=lo-pad;T1=hi+pad;
+  }
+  tNow=Math.min(Math.max(tNow,T0),T1);
+  const ticks=document.querySelector('#view-time .ticks');
+  if(ticks){
+    const fmtTick=(t,withYear)=>new Date(t).toLocaleDateString('en-US',
+      withYear?{month:'short',year:'numeric'}:{month:'short'}).toUpperCase();
+    ticks.innerHTML=[0,.25,.5,.75,1].map((f,i)=>
+      `<span>${fmtTick(T0+f*(T1-T0),i===0||i===4)}</span>`).join('');
+  }
+}
 function buildTimeline(){
   const W=tplot.clientWidth,H=tplot.clientHeight;
   if(W<50||H<50)return;
+  computeRange();
   tsvg.setAttribute('viewBox',`0 0 ${W} ${H}`);
   tsvg.innerHTML='';
-  const M={t:26,r:20,b:24,l:96};
-  const xOf=t=>M.l+(t-T0)/(T1-T0)*(W-M.l-M.r);
-  const lanes=Object.keys(CAT);
-  const laneH=(H-M.t-M.b)/lanes.length;
-  /* lane bands + labels */
+  histDots=[];
+  /* Only lanes with something to plot: projects whose files are all undated
+     (nothing committed) would render as dead empty columns. */
+  /* Every project gets a lane, including the ones with nothing to plot.
+     Dropping them made the Timeline disagree with Files about how many
+     projects exist, and a reader cannot tell "no history" from "missing".
+     An empty lane is drawn dark and labelled instead. */
+  const allLanes=Object.keys(CAT);
+  const hasData=cat=>tMode==='project'
+    ?(GITHIST[cat]||[]).length>0
+    :LEAVES.some(n=>n.cat===cat&&n.date);
+  const lanes=allLanes;
+  const colW=(W-64-16)/Math.max(1,lanes.length);
+  /* Time runs vertically: newest at the top, oldest at the bottom. Narrow
+     columns rotate their headers, which needs a taller top margin. */
+  const rotated=colW<64;
+  const M={t:rotated?76:34,r:16,b:18,l:64};
+  const yOf=t=>M.t+(T1-t)/(T1-T0)*(H-M.t-M.b);
+  /* column bands + headers */
   lanes.forEach((cat,i)=>{
-    const y=M.t+i*laneH;
+    const x=M.l+i*colW;
     const band=document.createElementNS(SVGNS,'rect');
-    band.setAttribute('x',M.l-8);band.setAttribute('y',y+3);
-    band.setAttribute('width',W-M.l-M.r+16);band.setAttribute('height',laneH-6);
-    band.setAttribute('fill',hexA(CAT[cat].color,.04));band.setAttribute('rx',8);
+    band.setAttribute('x',x+2);band.setAttribute('y',M.t-6);
+    band.setAttribute('width',Math.max(2,colW-4));band.setAttribute('height',H-M.t-M.b+12);
+    const live=hasData(cat);
+    /* darker than the workspace background, so an empty lane reads as a
+       deliberate blank rather than as a gap in the layout */
+    band.setAttribute('fill',live?hexA(CAT[cat].color,.04):'rgba(0,0,0,.22)');
+    band.setAttribute('rx',8);
+    if(!live){
+      band.setAttribute('stroke','rgba(233,228,217,.05)');
+      band.setAttribute('stroke-dasharray','2 4');
+    }
     tsvg.appendChild(band);
+    const name=CAT[cat].name;
+    const label=name.length>18?name.slice(0,17)+'…':name;
     const lb=document.createElementNS(SVGNS,'text');
-    lb.setAttribute('x',M.l-16);lb.setAttribute('y',y+laneH/2+4);
-    lb.setAttribute('text-anchor','end');
-    lb.setAttribute('style',`font:italic 500 13px ${SERIF};fill:${hexA(CAT[cat].color,.95)}`);
-    lb.textContent=CAT[cat].name;
+    if(rotated){
+      const ax=x+colW/2+4,ay=M.t-10;
+      lb.setAttribute('x',ax);lb.setAttribute('y',ay);
+      lb.setAttribute('text-anchor','start');
+      lb.setAttribute('transform',`rotate(-40 ${ax} ${ay})`);
+      lb.setAttribute('style',`font:italic 500 10.5px ${SERIF};fill:${live?hexA(CAT[cat].color,.95):'rgba(125,120,109,.85)'}`);
+    }else{
+      lb.setAttribute('x',x+colW/2);lb.setAttribute('y',M.t-14);
+      lb.setAttribute('text-anchor','middle');
+      lb.setAttribute('style',`font:italic 500 13px ${SERIF};fill:${live?hexA(CAT[cat].color,.95):'rgba(125,120,109,.85)'}`);
+    }
+    lb.textContent=label;
     tsvg.appendChild(lb);
+    if(!live){
+      /* one line, centred in the empty column, saying why it is empty */
+      const why=document.createElementNS(SVGNS,'text');
+      why.setAttribute('x',x+colW/2);why.setAttribute('y',(M.t+H-M.b)/2);
+      why.setAttribute('text-anchor','middle');
+      why.setAttribute('style',`font:400 8.5px ${MONO};letter-spacing:.1em;fill:#56534b`);
+      why.textContent=colW>=104?'NO GIT HISTORY':colW>=64?'NO HISTORY':'—';
+      tsvg.appendChild(why);
+    }
+    if(tMode==='project'&&live){
+      const total=(GITHIST[cat]||[]).reduce((sum,day)=>sum+day.n,0);
+      const sub=document.createElementNS(SVGNS,'text');
+      sub.setAttribute('x',x+colW/2);sub.setAttribute('y',H-4);
+      sub.setAttribute('text-anchor','middle');
+      sub.setAttribute('style',`font:400 8.5px ${MONO};letter-spacing:.06em;fill:#56534b`);
+      sub.textContent=colW>=70?`${total} COMMIT${total===1?'':'S'}`:String(total);
+      tsvg.appendChild(sub);
+    }
   });
-  /* month grid */
-  let d=new Date(T0);
-  while(+d<T1){
-    const x=xOf(+d);
-    const ln=document.createElementNS(SVGNS,'line');
-    ln.setAttribute('x1',x);ln.setAttribute('x2',x);
-    ln.setAttribute('y1',M.t-4);ln.setAttribute('y2',H-M.b);
-    ln.setAttribute('stroke',d.getMonth()===0?'rgba(233,228,217,.13)':'rgba(233,228,217,.05)');
-    ln.setAttribute('stroke-dasharray','1 4');
-    tsvg.appendChild(ln);
-    const tx=document.createElementNS(SVGNS,'text');
-    tx.setAttribute('x',x);tx.setAttribute('y',M.t-10);
-    tx.setAttribute('text-anchor','middle');
-    tx.setAttribute('style',`font:400 8.5px ${MONO};letter-spacing:.08em;fill:#56534b`);
-    tx.textContent=d.toLocaleDateString('en-US',{month:'short'}).toUpperCase();
-    tsvg.appendChild(tx);
-    d=new Date(d.getFullYear(),d.getMonth()+1,1);
+  /* month grid: horizontal rules, labeled in the left margin */
+  {
+    const monthCount=Math.max(1,Math.round((T1-T0)/2592000000));
+    const labelEvery=monthCount>26?3:1;
+    let d=new Date(T0),mi=0;
+    while(+d<T1){
+      const y=yOf(+d);
+      const ln=document.createElementNS(SVGNS,'line');
+      ln.setAttribute('x1',M.l-6);ln.setAttribute('x2',W-M.r);
+      ln.setAttribute('y1',y);ln.setAttribute('y2',y);
+      ln.setAttribute('stroke',d.getMonth()===0?'rgba(233,228,217,.13)':'rgba(233,228,217,.05)');
+      ln.setAttribute('stroke-dasharray','1 4');
+      tsvg.appendChild(ln);
+      if(mi%labelEvery===0){
+        const tx=document.createElementNS(SVGNS,'text');
+        tx.setAttribute('x',M.l-12);tx.setAttribute('y',y+3);
+        tx.setAttribute('text-anchor','end');
+        tx.setAttribute('style',`font:400 8.5px ${MONO};letter-spacing:.08em;fill:#56534b`);
+        const opts=d.getMonth()===0?{month:'short',year:'2-digit'}:{month:'short'};
+        tx.textContent=d.toLocaleDateString('en-US',opts).toUpperCase();
+        tsvg.appendChild(tx);
+      }
+      mi++;
+      d=new Date(d.getFullYear(),d.getMonth()+1,1);
+    }
   }
-  /* milestone pips */
+  /* milestone pips: far-left margin, at their moment in time */
   MILES.forEach(m=>{
-    const x=xOf(+new Date(m.d+'T00:00:00'));
+    const t=+new Date(m.d+'T00:00:00');
+    if(t<T0||t>T1)return; /* outside this mode's axis */
+    const y=yOf(t);
     const c=document.createElementNS(SVGNS,'circle');
-    c.setAttribute('cx',x);c.setAttribute('cy',H-M.b+10);c.setAttribute('r',2.4);
+    c.setAttribute('cx',8);c.setAttribute('cy',y);c.setAttribute('r',2.4);
     c.setAttribute('fill','#3a4136');c.dataset.milestone='1';c.dataset.t=+new Date(m.d+'T00:00:00');
     tsvg.appendChild(c);
   });
-  /* beeswarm dots */
+  if(tMode==='file'){
+  /* beeswarm: the date sets the row (y); collisions fan sideways inside the
+     column, spilling downward (older) when a column is packed */
   lanes.forEach((cat,li)=>{
-    const ns=LEAVES.filter(n=>n.cat===cat).sort((a,b)=>a.date<b.date?-1:1);
+    const ns=LEAVES.filter(n=>n.cat===cat&&n.date).sort((a,b)=>a.date<b.date?-1:1);
     const placed=[];
-    const baseY=M.t+li*laneH+laneH/2;
-    const maxRow=Math.max(1,Math.floor((laneH/2-10)/13));
+    const baseX=M.l+li*colW+colW/2;
+    const maxRow=Math.max(1,Math.floor((colW/2-5)/9));
     ns.forEach(n=>{
-      n.tx=xOf(+new Date(n.date+'T00:00:00'));
-      const hit=r=>placed.some(p=>Math.abs(p.tx-n.tx)<14&&p.row===r);
+      n.ty=yOf(+new Date(n.date+'T00:00:00'));
+      const hit=r=>placed.some(p=>Math.abs(p.ty-n.ty)<12&&p.row===r);
       let row=0,guard=0;
       while(hit(row)&&guard++<200){
         row=row>0?-row:-row+1;
-        if(Math.abs(row)>maxRow){n.tx+=12;row=0;}
+        if(Math.abs(row)>maxRow){n.ty+=10;row=0;}
       }
-      n.row=row;n.ty=baseY+row*13;
+      n.row=row;n.tx=baseX+row*9;
       placed.push(n);
     });
   });
@@ -926,6 +1507,7 @@ function buildTimeline(){
   dotsG.setAttribute('id','tdots');
   tsvg.appendChild(dotsG);
   LEAVES.forEach(n=>{
+    if(!n.date){n.tEl=null;return;} /* git-dated artifacts only */
     const col=CAT[n.cat].color;
     const r=3.2+Math.min(2.6,(n.degree-1)*.5);
     let el;
@@ -950,24 +1532,52 @@ function buildTimeline(){
     dotsG.appendChild(el);
     n.tEl=el;
   });
-  /* trace layer + sweep */
+  /* trace layer */
   const traceG=document.createElementNS(SVGNS,'g');
   traceG.setAttribute('id','ttrace');
   tsvg.insertBefore(traceG,dotsG);
+  }else{
+  /* parallel git histories: one column per project, one dot per commit-day.
+     Radius grows with the square root of that day's commit count, capped so
+     tight column packing never bleeds across bands. */
+  lanes.forEach((cat,li)=>{
+    const baseX=M.l+li*colW+colW/2;
+    const col=CAT[cat].color;
+    const base=document.createElementNS(SVGNS,'line');
+    base.setAttribute('x1',baseX);base.setAttribute('x2',baseX);
+    base.setAttribute('y1',M.t-6);base.setAttribute('y2',H-M.b+6);
+    base.setAttribute('stroke',hexA(col,.18));base.setAttribute('stroke-width',1);
+    tsvg.appendChild(base);
+    (GITHIST[cat]||[]).forEach(day=>{
+      const t=+new Date(day.d+'T00:00:00');
+      const dot=document.createElementNS(SVGNS,'circle');
+      const r=Math.max(2,Math.min(colW*.42,2+Math.sqrt(day.n)*1.6));
+      dot.setAttribute('cx',baseX);dot.setAttribute('cy',yOf(t));
+      dot.setAttribute('r',r);dot.setAttribute('fill',col);
+      dot.dataset.hist=String(histDots.length);
+      dot.style.cursor='pointer';
+      tsvg.appendChild(dot);
+      histDots.push({el:dot,t,cat,day});
+    });
+  });
+  }
+  /* sweep: a horizontal rule at the scrubbed moment */
   const sweep=document.createElementNS(SVGNS,'line');
   sweep.setAttribute('id','tsweep');
-  sweep.setAttribute('y1',M.t-6);sweep.setAttribute('y2',H-M.b);
+  sweep.setAttribute('x1',M.l-6);sweep.setAttribute('x2',W-M.r);
   sweep.setAttribute('stroke',ACCENT);sweep.setAttribute('stroke-width',1.2);
   sweep.setAttribute('stroke-dasharray','2 4');sweep.setAttribute('opacity',.55);
   tsvg.appendChild(sweep);
-  tsvg._xOf=xOf;
+  tsvg._yOf=yOf;
   renderTimelineState();
 }
 function renderTimelineState(){
-  const xOf=tsvg._xOf;if(!xOf)return;
-  document.getElementById('tsweep')?.setAttribute('x1',xOf(tNow));
-  document.getElementById('tsweep')?.setAttribute('x2',xOf(tNow));
-  LEAVES.forEach(n=>{
+  const yOf=tsvg._yOf;if(!yOf)return;
+  document.getElementById('tsweep')?.setAttribute('y1',yOf(tNow));
+  document.getElementById('tsweep')?.setAttribute('y2',yOf(tNow));
+  if(tMode==='project'){
+    histDots.forEach(d=>d.el.setAttribute('opacity',d.t<=tNow?.85:.08));
+  }else LEAVES.forEach(n=>{
     if(!n.tEl)return;
     const born=+new Date(n.date+'T00:00:00')<=tNow;
     let op=born?.8:.06;
@@ -989,17 +1599,23 @@ function renderTimelineState(){
   document.getElementById('tscrub').value=Math.round((tNow-T0)/(T1-T0)*1000);
 }
 function traceOnTimeline(n){
-  const ids=n.type==='group'?LEAVES.filter(l=>l.group===n.id):
-            n.type==='hub'?LEAVES.filter(l=>l.cat===n.cat):[n];
-  const list=ids.slice().sort((a,b)=>a.date<b.date?-1:1);
+  if(tMode!=='file')setTMode('file'); /* traces live on the By-file plot */
+  const ids=n.type==='group'||n.type==='hub'
+    ?LEAVES.filter(l=>belongsToCategory(l,n.cat)):[n];
+  const list=ids.filter(l=>l.date).sort((a,b)=>a.date<b.date?-1:1);
   tTrace={ids:new Set(list.map(x=>x.id)),list,label:n.label};
   go('time');
   requestAnimationFrame(()=>{
+    if(!list.length){
+      document.getElementById('tsub').textContent=`${n.label} has no git-dated ${noun} to trace.`;
+      document.getElementById('tclear').hidden=false;
+      return;
+    }
     drawTrace();
     document.getElementById('tclear').hidden=false;
     const m0=fmtMY(+new Date(list[0].date)),m1=fmtMY(+new Date(list[list.length-1].date));
     document.getElementById('tsub').textContent=
-      `${n.label}: ${list.length} artifact${list.length===1?'':'s'}, ${m0===m1?m0:m0+' to '+m1}.`;
+      `${n.label}: ${list.length} ${noun}, ${m0===m1?m0:m0+' to '+m1}.`;
     if(!REDUCED){
       tNow=+new Date(list[0].date+'T00:00:00')-86400000*7;
       startPlay();
@@ -1015,24 +1631,24 @@ function drawTrace(){
   let path=`M ${pts[0][0]} ${pts[0][1]}`;
   for(let i=1;i<pts.length;i++){
     const [x0,y0]=pts[i-1],[x1,y1]=pts[i];
-    const mx=(x0+x1)/2;
-    path+=` C ${mx} ${y0}, ${mx} ${y1}, ${x1} ${y1}`;
+    const my=(y0+y1)/2;
+    path+=` C ${x0} ${my}, ${x1} ${my}, ${x1} ${y1}`;
   }
   const p=document.createElementNS(SVGNS,'path');
   p.setAttribute('d',path);p.setAttribute('fill','none');
   p.setAttribute('stroke',ACCENT);p.setAttribute('stroke-width',1.3);p.setAttribute('opacity',.7);
   g.appendChild(p);
-  /* labels: alternate above/below, and step outward when several share an x window */
+  /* labels: alternate left/right, and step outward when several share a y window */
   const win=[];
   tTrace.list.forEach((n,i)=>{
-    const near=win.filter(w=>Math.abs(w-n.tx)<74).length;
-    win.push(n.tx);
-    const up=i%2===0;
+    const near=win.filter(w=>Math.abs(w-n.ty)<24).length;
+    win.push(n.ty);
+    const left=i%2===0;
     const step=Math.floor(near/2)*11;
     const t=document.createElementNS(SVGNS,'text');
-    t.setAttribute('x',n.tx);
-    t.setAttribute('y',up?n.ty-10-step:n.ty+16+step);
-    t.setAttribute('text-anchor','middle');
+    t.setAttribute('x',left?n.tx-10-step:n.tx+10+step);
+    t.setAttribute('y',n.ty+3);
+    t.setAttribute('text-anchor',left?'end':'start');
     t.setAttribute('style',`font:400 9.5px ${SERIF};fill:#b3ada0`);
     t.textContent=n.label;
     g.appendChild(t);
@@ -1042,7 +1658,7 @@ function drawTrace(){
 function clearTrace(){
   tTrace=null;
   document.getElementById('tclear').hidden=true;
-  document.getElementById('tsub').textContent='Scrub through the workspace as it grew. Open any cluster from the graph to watch its run unfold here.';
+  document.getElementById('tsub').textContent=defaultSub();
   const g=tsvg.querySelector('#ttrace');if(g)g.innerHTML='';
   renderTimelineState();
 }
@@ -1073,9 +1689,24 @@ document.getElementById('tplay').addEventListener('click',()=>{
   if(tNow>=T1-3600000)tNow=T0;
   startPlay();
 });
+function showHistHC(d,mx,my){
+  if(!d)return;
+  const col=CAT[d.cat].color;
+  const subjects=(d.day.s||[]).map(s=>`<dt>·</dt><dd>${esc(s)}</dd>`).join('');
+  hc.innerHTML=`
+    <div class="art" style="background:linear-gradient(155deg, ${hexA(col,.24)}, ${hexA(col,.03)} 68%)">
+      <div class="kicker">${esc(CAT[d.cat].name)} · git</div>
+      <h5>${fmtDate(d.day.d)}</h5>
+      <div class="sub">${d.day.n} commit${d.day.n===1?'':'s'} this day</div>
+    </div>
+    ${subjects?`<dl>${subjects}</dl>`:''}
+    <div class="foot">Click to open this project on the graph</div>`;
+  placeHC(mx,my);
+}
 tsvg.addEventListener('pointermove',e=>{
   const t=e.target;
   if(t.dataset&&t.dataset.id){showHC(byId.get(t.dataset.id),e.clientX,e.clientY);}
+  else if(t.dataset&&t.dataset.hist){showHistHC(histDots[+t.dataset.hist],e.clientX,e.clientY);}
   else hideHC();
 });
 tsvg.addEventListener('pointerleave',hideHC);
@@ -1084,107 +1715,18 @@ tsvg.addEventListener('click',e=>{
   if(t.dataset&&t.dataset.id){
     const n=byId.get(t.dataset.id);
     ensureShown(n);
-    go('graph');
+    go(graphRoute);
     select(n.id,1);
     pulseN={id:n.id,t0:performance.now()};
+  }else if(t.dataset&&t.dataset.hist){
+    /* a commit dot names its project: jump to that hub on the graph */
+    const d=histDots[+t.dataset.hist];
+    if(!d||!byId.get(d.cat))return;
+    go(graphRoute);
+    select(d.cat,1);
+    pulseN={id:d.cat,t0:performance.now()};
   }
 });
-
-/* ============================== SIX DEGREES ============================== */
-let sixA=null,sixB=null,sixPath=null;
-wireAC(document.getElementById('six-a'),document.getElementById('six-aac'),n=>{sixA=n;});
-wireAC(document.getElementById('six-b'),document.getElementById('six-bac'),n=>{sixB=n;});
-const COST={x:1,rg:1.4,hg:2.4,root:4.5};
-function shortest(aId,bId){
-  const dist=new Map(),prev=new Map(),Q=new Set();
-  NODES.forEach(n=>{dist.set(n.id,1e9);Q.add(n.id);});
-  dist.set(aId,0);
-  while(Q.size){
-    let u=null,ud=1e9;
-    for(const id of Q){const dd=dist.get(id);if(dd<ud){ud=dd;u=id;}}
-    if(u===null||ud===1e9)break;
-    Q.delete(u);
-    if(u===bId)break;
-    for(const{e,other}of byId.get(u).adj){
-      if(!Q.has(other))continue;
-      const nd=ud+COST[e.kind];
-      if(nd<dist.get(other)){dist.set(other,nd);prev.set(other,{id:u,e});}
-    }
-  }
-  if(dist.get(bId)===1e9)return null;
-  const hops=[];let cur=bId;
-  while(cur!==aId){const p=prev.get(cur);hops.unshift({id:cur,e:p.e});cur=p.id;}
-  return[{id:aId,e:null},...hops];
-}
-function relText(e,fromId){
-  if(!e)return'';
-  if(e.kind==='x')return e.label;
-  if(e.kind==='root')return'a department of XO';
-  const child=byId.get(e.t),parent=byId.get(e.s);
-  return fromId===child.id?`part of ${parent.label}`:`holds ${child.label}`;
-}
-function runSix(){
-  const err=document.getElementById('sixerr');
-  err.textContent='';
-  if(!sixA||!sixB){err.textContent='Pick two artifacts first.';return;}
-  if(sixA.id===sixB.id){err.textContent='That is the same artifact. Try two different names.';return;}
-  sixPath=shortest(sixA.id,sixB.id);
-  if(!sixPath){err.textContent=`No route connects ${sixA.label} and ${sixB.label} in this space.`;return;}
-  const deg=sixPath.length-1;
-  const out=document.getElementById('sixout');
-  out.innerHTML=`
-    <div class="degline"><b>${deg}</b> degree${deg===1?'':'s'} of separation · ${esc(sixA.label)} to ${esc(sixB.label)}</div>
-    <div class="chain">${sixPath.map((h,i)=>{
-      const n=byId.get(h.id);
-      const col=n.cat?CAT[n.cat].color:'#e9e4d9';
-      const meta=n.type==='hub'?'department':n.type==='group'?'cluster':n.tag;
-      const card=`<div class="ncard" style="animation-delay:${i*130}ms">
-        <span class="cdot" style="background:${col}"></span>
-        <span class="nm">${esc(n.label)}</span><span class="meta">${esc(meta||'')}</span></div>`;
-      const link=h.e?`<div class="link" style="animation-delay:${(i-.5)*130}ms">
-        <span class="rule"></span><span class="rel">${esc(chainSentence(h.e))}</span></div>`:'';
-      return link+card;
-    }).join('')}</div>
-    <button id="sixtrace">Trace on the graph &rarr;</button>`;
-  document.getElementById('sixtrace').addEventListener('click',traceSixOnGraph);
-}
-function chainSentence(e){
-  const s=byId.get(e.s),t=byId.get(e.t);
-  if(e.kind==='x')return`${s.label} ${e.label} ${t.label}`;
-  if(e.kind==='root')return`${t.label} is a department of XO`;
-  return`${t.label} is part of ${s.label}`;
-}
-function traceSixOnGraph(){
-  if(!sixPath)return;
-  clearFocus();
-  pathIds=sixPath.map(h=>h.id);
-  pathEdges=sixPath.filter(h=>h.e).map(h=>h.e);
-  pathIds.forEach(id=>ensureShown(byId.get(id)));
-  reheat(.35);
-  go('graph');
-  pathReveal=performance.now()+350;
-  setTimeout(()=>fitNodes(pathIds,240),380);
-}
-document.getElementById('sixgo').addEventListener('click',runSix);
-document.getElementById('sixswap').addEventListener('click',()=>{
-  [sixA,sixB]=[sixB,sixA];
-  const a=document.getElementById('six-a'),b=document.getElementById('six-b');
-  [a.value,b.value]=[b.value,a.value];
-});
-document.getElementById('sixrand').addEventListener('click',()=>{
-  let a,b,p,tries=0;
-  do{
-    a=LEAVES[Math.floor(Math.random()*LEAVES.length)];
-    b=LEAVES[Math.floor(Math.random()*LEAVES.length)];
-    p=a!==b?shortest(a.id,b.id):null;
-    tries++;
-  }while(tries<30&&(!p||p.length<5||a.cat===b.cat));
-  sixA=a;sixB=b;
-  document.getElementById('six-a').value=a.label;
-  document.getElementById('six-b').value=b.label;
-  runSix();
-});
-
 
 /* ============================== BOOT ============================== */
 function resize(){
@@ -1199,13 +1741,13 @@ addEventListener('resize',resize);
 resize();
 for(let i=0;i<260;i++)simTick();
 simAlpha=.35;
-/* initial camera: fit everything, biased right so the intro sits over calm space */
+/* initial camera: fit everything, centered */
 {
   let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
   shownNodes().forEach(n=>{x0=Math.min(x0,n.x);y0=Math.min(y0,n.y);x1=Math.max(x1,n.x);y1=Math.max(y1,n.y);});
   const k=Math.max(.3,Math.min(1.6,.94*Math.min(GW/(x1-x0+140),GH/(y1-y0+140))));
   cam.k=k;
-  cam.x=(x0+x1)/2-GW*.11/k;
+  cam.x=(x0+x1)/2;
   cam.y=(y0+y1)/2;
 }
 function frame(now){
@@ -1214,5 +1756,6 @@ function frame(now){
 }
 requestAnimationFrame(frame);
 renderTimelineState();
+hooks.focusProject(); /* consume a List→Graph jump parked before boot */
 
 }

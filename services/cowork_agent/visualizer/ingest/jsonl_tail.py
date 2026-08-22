@@ -1,7 +1,7 @@
 """Seek-tail reader with offset persistence.
 
 Tails one ``.jsonl`` file from a saved byte offset. Survives process
-restarts via a single ``~/.xo-cowork/watcher/offsets.json`` file
+restarts via a single ``~/.quirq/watcher/offsets.json`` file
 shared across all tailed files. Detects inode change (rotation /
 truncation) and re-reads from byte 0 in that case.
 
@@ -16,13 +16,13 @@ Design:
 
 Why a single shared file rather than one offset file per jsonl:
 
-* Tens of session logs ⇒ tens of tiny files in ``.xo-cowork`` is
+* Tens of session logs ⇒ tens of tiny files in ``.quirq`` is
   noisy.
 * Atomic rewrites of one small JSON beat dozens of separate file
   syncs.
 * One round-trip to load all offsets at startup.
 
-Offsets live under ``~/.xo-cowork/`` (the existing per-machine
+Offsets live under ``~/.quirq/`` (the per-machine
 state dir) rather than any ``.xo/`` — they are per-machine, not
 per-project, and would NEVER be shipped via a future sync layer.
 """
@@ -34,8 +34,13 @@ import os
 from pathlib import Path
 from typing import Iterator, Optional
 
+from services.cowork_agent.visualizer.state import (
+    legacy_watcher_state_dir,
+    watcher_state_dir,
+)
 
-DEFAULT_OFFSETS_PATH = Path.home() / ".xo-cowork" / "watcher" / "offsets.json"
+DEFAULT_OFFSETS_PATH = watcher_state_dir() / "offsets.json"
+LEGACY_OFFSETS_PATH = legacy_watcher_state_dir() / "offsets.json"
 
 
 class OffsetStore:
@@ -46,8 +51,18 @@ class OffsetStore:
     BFF) never touch offsets.
     """
 
-    def __init__(self, store_path: Path = DEFAULT_OFFSETS_PATH) -> None:
+    def __init__(
+        self,
+        store_path: Path = DEFAULT_OFFSETS_PATH,
+        *,
+        legacy_store_path: Optional[Path] = None,
+    ) -> None:
         self.store_path = store_path
+        self.legacy_store_path = (
+            LEGACY_OFFSETS_PATH
+            if legacy_store_path is None and store_path == DEFAULT_OFFSETS_PATH
+            else legacy_store_path
+        )
         self._data: dict[str, dict] = {}
         self._dirty = False
         self._loaded = False
@@ -56,10 +71,15 @@ class OffsetStore:
         if self._loaded:
             return
         self._loaded = True
-        if not self.store_path.is_file():
+        source_path = self.store_path
+        loaded_legacy = False
+        if not source_path.is_file() and self.legacy_store_path is not None:
+            source_path = self.legacy_store_path
+            loaded_legacy = source_path.is_file()
+        if not source_path.is_file():
             return
         try:
-            raw = json.loads(self.store_path.read_text(encoding="utf-8"))
+            raw = json.loads(source_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
         offsets = raw.get("offsets") if isinstance(raw, dict) else None
@@ -72,6 +92,9 @@ class OffsetStore:
                 for k, v in offsets.items()
                 if isinstance(v, dict)
             }
+            # The next source flush copies the parsed cursor map into
+            # ~/.quirq without ever writing the legacy directory.
+            self._dirty = loaded_legacy
 
     def get(self, path: Path) -> Optional[tuple[int, int]]:
         """Return ``(offset, inode)`` for ``path`` or ``None``."""

@@ -19,14 +19,58 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 import httpx
 import uvicorn
 from config.models.claude_code import ClaudeCodeClient
 from config.models.codex import CodexCodeClient
+from utils.local_port import LocalPortsUnavailableError, resolve_server_port
 
-# Load environment variables
+# Load environment variables. Keys already exported by the shell (or by
+# docker -e / compose) are recorded first: they outrank every file below,
+# exactly as install.sh orders them.
+_shell_env_keys = frozenset(os.environ)
 load_dotenv()
+
+
+def _load_storage_roots() -> None:
+    """Apply ``<state root>/roots.env`` — the storage roots the Setup tab writes.
+
+    Precedence, mirroring install.sh: shell/container env > roots.env >
+    the checkout's .env. Loading it here is what makes the Setup tab's XO
+    root real for every reader (all of which resolve through
+    ``project_layout.xo_projects_root()``) after a restart, instead of only
+    when the Docker installer is re-run.
+
+    The file is anchored to the state root we can see right now; if it
+    relocates the state root, runtime.env and secrets are then read from the
+    new location.
+    """
+    anchor = Path(
+        (os.getenv("QUIRQ_STATE_ROOT", "") or "").strip() or Path.home() / ".quirq"
+    ).expanduser()
+    try:
+        values = dotenv_values(anchor / "roots.env")
+    except OSError:
+        return
+    for key in ("XO_PROJECTS_ROOT", "QUIRQ_STATE_ROOT"):
+        value = (values.get(key) or "").strip()
+        if value and key not in _shell_env_keys:
+            os.environ[key] = value
+
+
+_load_storage_roots()
+_quirq_state_root = Path(
+    (os.getenv("QUIRQ_STATE_ROOT", "") or "").strip() or Path.home() / ".quirq"
+).expanduser()
+_quirq_runtime_file = (
+    (os.getenv("QUIRQ_RUNTIME_FILE", "") or "").strip()
+    or str(_quirq_state_root / "runtime.env")
+)
+load_dotenv(_quirq_runtime_file, override=True)
+_quirq_secrets_file = (os.getenv("QUIRQ_SECRETS_FILE", "") or "").strip()
+if _quirq_secrets_file:
+    load_dotenv(_quirq_secrets_file, override=True)
 
 from routers.auth.auth import (
     XO_API_KEY,
@@ -128,8 +172,17 @@ STARTUP_WARMUP_ENABLED = os.getenv("STARTUP_WARMUP_ENABLED", "true").strip().low
     "yes",
     "on",
 }
+_STARTUP_WARMUP_URL_CONFIGURED = bool(
+    (os.getenv("STARTUP_WARMUP_URL", "") or "").strip()
+)
 STARTUP_WARMUP_URL = (
-    os.getenv("STARTUP_WARMUP_URL", "http://localhost:5002").strip().rstrip("/") + "/"
+    os.getenv(
+        "STARTUP_WARMUP_URL",
+        f"http://localhost:{os.getenv('PORT', '5002')}",
+    )
+    .strip()
+    .rstrip("/")
+    + "/"
 )
 STARTUP_WARMUP_DELAY_SECONDS = float(os.getenv("STARTUP_WARMUP_DELAY_SECONDS", "10"))
 
@@ -357,6 +410,62 @@ async def startup_warmup_request() -> None:
 # FastAPI Application
 # =============================================================================
 
+def _session_telemetry_daemons(action: str) -> None:
+    """Start or stop every session-telemetry provider's ingestion daemon.
+
+    Core never names a telemetry backend. Providers are discovered through the
+    capability loader, and each may optionally expose ``start_daemon`` /
+    ``stop_daemon``; one that does not is skipped, exactly as with
+    ``runtime_mounts`` in scripts/list_runtime_mounts.py.
+
+    Deliberately not gated by QUIRQ_SKIP_BOOT_INSTALL: starting a process that
+    pip already installed is not installing software.
+
+    Non-fatal in both directions — a provider that fails to start must not
+    block the boot, and one that fails to stop must not hang the shutdown.
+    """
+
+    try:
+        from services.cowork_agent.adapters.loader import (
+            list_capability_providers,
+            try_load_capability,
+        )
+    except Exception as exc:
+        print(f"⚠️ session telemetry daemon {action} skipped (non-fatal): {exc}")
+        return
+
+    for provider in list_capability_providers("session_telemetry"):
+        module = try_load_capability("session_telemetry", agent=provider)
+        hook = getattr(module, f"{action}_daemon", None) if module else None
+        if not callable(hook):
+            continue
+        try:
+            hook()
+        except Exception as exc:
+            print(
+                f"⚠️ {provider} telemetry daemon {action} failed (non-fatal): {exc}"
+            )
+
+
+def _boot_installs_disabled() -> bool:
+    """Whether the boot-time system-dependency installers are switched off.
+
+    Set QUIRQ_SKIP_BOOT_INSTALL=1 for deployments that must not download or
+    install anything beyond requirements.txt — the Docker-free native runner
+    does, because it runs on a user's own machine rather than a disposable
+    container. Defaults to off, so container and Coder boots are unchanged.
+
+    Callers still work when this is on: both installers are already non-fatal,
+    and every dependency they provide degrades a feature rather than breaking
+    startup.
+    """
+    return (os.getenv("QUIRQ_SKIP_BOOT_INSTALL", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def _run_agent_setup() -> None:
     """Run config/agents/<AGENT_NAME>/setup.sh once at boot.
 
@@ -367,6 +476,10 @@ def _run_agent_setup() -> None:
     Non-fatal: a failure here logs and returns so the API still comes
     up for debugging.
     """
+    if _boot_installs_disabled():
+        print("🔧 QUIRQ_SKIP_BOOT_INSTALL set — skipping agent bootstrap")
+        return
+
     agent = (os.getenv("AGENT_NAME", "") or "").strip()
     if not agent:
         print("🔧 AGENT_NAME unset — skipping agent bootstrap")
@@ -413,6 +526,10 @@ def _install_shared_deps() -> None:
     idempotent (skips deps already on PATH) and no-ops on non-apt hosts.
     Non-fatal: a failure logs and returns so the API still comes up.
     """
+    if _boot_installs_disabled():
+        print("🔧 QUIRQ_SKIP_BOOT_INSTALL set — skipping shared dep install")
+        return
+
     repo_root = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(repo_root, "scripts", "install_shared_deps.sh")
     if not os.path.isfile(script):
@@ -452,9 +569,45 @@ def _install_shared_deps() -> None:
         print(f"⚠️ Shared dep install failed (non-fatal): {e}")
 
 
+def _write_install_pointer() -> None:
+    """Record where this install lives so local clients (the Claude Code
+    plugin, support tooling) can find it without scanning the filesystem.
+
+    One fixed path, dynamic contents: ~/.config/quirq/install.json (XDG
+    honoured), rewritten on every boot because it is a last-known-location
+    hint, not configuration — port fallbacks and relocated roots must show
+    up here. Consumers verify the recorded paths still exist before
+    trusting them, so a stale file after an uninstall is harmless.
+    """
+    try:
+        from services.cowork_agent.local_state import quirq_state_dir
+        from services.cowork_agent.project_layout import xo_projects_root
+
+        config_home = Path(
+            os.getenv("XDG_CONFIG_HOME", "").strip() or Path.home() / ".config"
+        )
+        pointer_dir = config_home / "quirq"
+        pointer_dir.mkdir(parents=True, exist_ok=True)
+        pointer = {
+            "repo_dir": str(Path(__file__).resolve().parent),
+            "projects_root": str(xo_projects_root()),
+            "state_root": str(quirq_state_dir()),
+            "host": os.getenv("HOST", "127.0.0.1"),
+            "port": int(os.getenv("PORT", "5002")),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        (pointer_dir / "install.json").write_text(json.dumps(pointer, indent=2) + "\n")
+    except Exception as e:
+        print(f"⚠️ Could not write install pointer (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Written first: the pointer must exist even if a later boot step fails,
+    # so a half-started install is still discoverable.
+    _write_install_pointer()
+
     # Bootstrap the agent runtime (OpenClaw, etc.) before serving traffic.
     # Done synchronously so the API doesn't accept requests until the
     # agent it's meant to drive is installed and configured.
@@ -463,6 +616,11 @@ async def lifespan(app: FastAPI):
     # Install shared, agent-agnostic system deps (rclone, gh, gnupg) before the
     # connector + xo-projects-sync checks below rely on them being on PATH.
     _install_shared_deps()
+
+    # Session telemetry ingestion. Tied to this process's lifetime so the
+    # Sessions tab has fresh data whenever Quirq is up, and nothing is left
+    # running once it is down.
+    _session_telemetry_daemons("start")
 
     print("🚀 Starting XO Cowork API Server...")
     print(f"   Chat API: {CHAT_API_BASE_URL}")
@@ -560,19 +718,30 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️ Usage sync failed to start (non-fatal): {e}")
 
-    # Visualizer watcher — materialises <project>/.xo/* from the
-    # runtime logs Claude Code writes under ~/.claude/projects/.
-    # Non-fatal: BFF endpoints keep serving whatever is on disk.
-    try:
-        from services.cowork_agent.visualizer.watcher import start_watcher
-        _watcher_task = asyncio.create_task(start_watcher())
-        print("   Watcher: background task started")
-    except Exception as e:
-        print(f"⚠️ Watcher failed to start (non-fatal): {e}")
+    # Visualizer watcher — materialises portable project metadata from the
+    # active runtime's native session store. Non-fatal: BFF endpoints keep
+    # serving whatever is already on disk.
+    _watcher_enabled = (
+        os.getenv("QUIRQ_WATCHER_ENABLED", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if _watcher_enabled:
+        try:
+            from services.cowork_agent.visualizer.watcher import start_watcher
+            _watcher_task = asyncio.create_task(start_watcher())
+            print("   Watcher: background task started")
+        except Exception as e:
+            print(f"⚠️ Watcher failed to start (non-fatal): {e}")
+    else:
+        print("   Watcher: disabled by runtime configuration")
 
     _warmup_task = asyncio.create_task(startup_warmup_request())
 
     yield
+
+    # Stop ingestion first: the daemon is an external process, so leaving it
+    # behind outlives this server, unlike the asyncio tasks cancelled below.
+    _session_telemetry_daemons("stop")
 
     # Cleanup background task
     if _warmup_task and not _warmup_task.done():
@@ -647,7 +816,9 @@ for _r in cowork_agent_routers:
 
 # Space: local workspace knowledge graph (static UI + server control widget).
 from routers.space import router as space_router, mount_space
+from routers.xo_data import router as xo_data_router
 app.include_router(space_router)
+app.include_router(xo_data_router)
 mount_space(app)
 
 # =============================================================================
@@ -956,7 +1127,26 @@ async def ask_question_streaming(data: AskQuestionRequest):
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "5002"))
+    requested_port = int(os.getenv("PORT", "5002"))
+    try:
+        port = resolve_server_port(
+            host=host,
+            requested_port=requested_port,
+            stage=STAGE,
+        )
+    except LocalPortsUnavailableError as exc:
+        print(f"❌ {exc}")
+        raise SystemExit(1) from exc
+
+    if port != requested_port:
+        print(
+            f"⚠️ Local port {requested_port} is already in use; "
+            f"using http://{host}:{port} instead."
+        )
+        os.environ["PORT"] = str(port)
+        if not _STARTUP_WARMUP_URL_CONFIGURED:
+            STARTUP_WARMUP_URL = f"http://localhost:{port}/"
+
     reload = os.getenv("UVICORN_RELOAD", "").strip().lower() in ("1", "true", "yes")
 
     if reload:

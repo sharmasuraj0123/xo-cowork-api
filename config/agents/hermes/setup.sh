@@ -162,19 +162,23 @@ EOF
 }
 
 # ==============================================================
-# Step 4 — Materialise $REPO_ROOT/.env from environment vars if the
-# file isn't already present. Hermes-specific layout: user-tunable
-# values come from pod env; Hermes app defaults are baked in with
-# ${VAR:-default} so they remain overridable later via pod env.
-# Manual edits are preserved: never overwrites an existing .env.
+# Step 4 — Materialise $REPO_ROOT/.env from environment vars.
+# Hermes-specific layout: user-tunable values come from pod env; Hermes
+# app defaults are baked in with ${VAR:-default}. Hosted workspace edits
+# are preserved. Managed local Quirq refreshes the file on every boot so
+# values saved by the Setup tab in ~/.quirq/secrets.env take effect.
 # ==============================================================
 write_env_file() {
-    if [ -f "$ENV_FILE" ]; then
+    if [ -f "$ENV_FILE" ] && [ "${QUIRQ_MANAGED_CONTAINER:-false}" != "true" ]; then
         log ".env already exists at $ENV_FILE — leaving it untouched"
         return 0
     fi
 
-    log "Writing .env from environment (first time)"
+    if [ "${QUIRQ_MANAGED_CONTAINER:-false}" = "true" ]; then
+        log "Refreshing .env from managed Quirq configuration"
+    else
+        log "Writing .env from environment (first time)"
+    fi
     umask 077
     cat > "$ENV_FILE" <<ENVEOF
 # Channel toggles

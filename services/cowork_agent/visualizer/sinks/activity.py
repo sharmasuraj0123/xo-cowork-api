@@ -1,4 +1,4 @@
-"""``activity.json`` sink — live presence snapshot per project.
+"""Machine-local live-presence snapshot sink, one file per project.
 
 Consumes presence rows from ``Source.poll_presence()`` rather than
 events. Each tick the watcher passes the most recent presence rows
@@ -31,9 +31,6 @@ from typing import Optional
 from services.cowork_agent.visualizer.atomic_write import write_json_atomic
 
 
-_ACTIVITY_FILE = Path("activity.json")
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -58,14 +55,18 @@ def _resolve_user_id() -> str:
 
 
 def apply(
-    xo_dir: Path,
+    activity_path: Path,
     presence_rows: list[dict],
     *,
     model_by_session: dict[str, str],
     host: Optional[str] = None,
 ) -> bool:
-    """Write ``activity.json`` for one project. Returns ``True`` if
-    the file changed (or was created).
+    """Write the live-presence snapshot for one project.
+
+    ``activity_path`` is resolved by
+    :func:`services.cowork_agent.visualizer.state.project_activity_path`;
+    accepting the full path keeps this sink independent of the storage
+    layout. Returns ``True`` if the file changed (or was created).
 
     ``presence_rows`` is the source's ``poll_presence()`` output
     pre-filtered to this project. ``model_by_session`` maps native
@@ -107,7 +108,7 @@ def apply(
         "updated_at": _now_iso(),
         "open_sessions": open_sessions,
     }
-    write_json_atomic(xo_dir / _ACTIVITY_FILE, payload)
+    write_json_atomic(activity_path, payload)
     # Always claim "changed" — the sink is idempotent and writing
     # the same snapshot is cheap. (If we tracked equality we'd save
     # one fsync per tick when nothing changed; not worth the

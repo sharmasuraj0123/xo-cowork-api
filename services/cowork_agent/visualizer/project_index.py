@@ -12,6 +12,7 @@ to the adapter that needs it. See
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -31,10 +32,14 @@ def project_id_for_cwd(cwd: str) -> Optional[str]:
         p = p.resolve()
     except OSError:
         return None
-    root = xo_projects_root()
-    if not p.is_relative_to(root):
-        return None
-    rel = p.relative_to(root)
-    if not rel.parts:
-        return None
-    return rel.parts[0]
+    roots = [xo_projects_root()]
+    host_root = (os.getenv("QUIRQ_HOST_PROJECTS_ROOT", "") or "").strip()
+    if host_root:
+        roots.append(Path(host_root).expanduser().resolve())
+    for root in roots:
+        if not p.is_relative_to(root):
+            continue
+        rel = p.relative_to(root)
+        if rel.parts:
+            return rel.parts[0]
+    return None

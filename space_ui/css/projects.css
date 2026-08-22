@@ -1,25 +1,250 @@
-  /* ---------------- projects tab ---------------- */
+  /* ---------------- projects tab (Files → List lens) ---------------- */
   #view-projects{overflow-y:auto}
-  .prj{max-width:1180px;margin:0 auto;padding:26px 26px 60px;font-family:var(--sans)}
-  .prj-head{display:flex;align-items:center;margin-bottom:18px}
-  .prj-eyebrow{font:600 10.5px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3)}
+  /* Every Files lens uses the same centred column and the same top gap, so
+     the shell's lens switch sits in one place and the headers line up. */
+  .prj{max-width:1180px;margin:0 auto;padding:70px 26px 60px;font-family:var(--sans)}
+
+  /* header strip: lens pill · summary · filter · sort · refresh */
+  .prj-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  .prj-eyebrow{font:600 10.5px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);
+    text-transform:uppercase}
   .prj-spacer{flex:1}
-  .prj-rows{display:flex;flex-direction:column;gap:10px}
-  .prj-row{background:var(--bg-2);border:1px solid var(--line-soft);border-radius:12px}
-  .prj-row.is-open{border-color:var(--line)}
-  .prj-row-head{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;font-size:13.5px;color:var(--ink)}
-  .prj-row-head:hover b{color:var(--accent)}
-  .prj-row-head .caret{color:var(--ink-3);font-size:11px;width:12px;flex:none}
+  .prj-sort{display:flex;gap:2px;background:var(--bg-2);border:1px solid var(--line-soft);
+    border-radius:999px;padding:2px}
+  .prj-sort button{font:500 9.5px var(--mono);letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-3);border-radius:999px;padding:5px 10px;transition:all .16s var(--ease)}
+  .prj-sort button:hover{color:var(--ink)}
+  .prj-sort button.is-on{color:var(--bg);background:var(--accent)}
+
+  /* Column headers share the row's grid AND its box model — same tracks,
+     same padding, same trailing Map slot — so labels sit exactly over their
+     values instead of near them. */
+  .prj-cols-inner,.prj-row-head{
+    display:grid;
+    grid-template-columns:14px minmax(0,1fr) 68px 150px 132px;
+    align-items:center;gap:14px;
+  }
+  .prj-cols{display:flex;gap:8px;padding:0 14px 7px 0;font:600 10px var(--mono);
+    letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+  .prj-cols-inner{flex:1;min-width:0;padding:0 4px 0 17px}
+  .prj-cols-map{flex:none;min-width:62px}
+
+  .prj-rows{display:flex;flex-direction:column;gap:8px}
+  .prj-row{background:var(--bg-2);border:1px solid var(--line-soft);border-radius:12px;
+    transition:border-color .16s var(--ease),background .16s var(--ease)}
+  .prj-row:hover{border-color:var(--line)}
+  .prj-row.is-open{border-color:#2c3240;background:var(--bg-3)}
+  .prj-row.is-empty .prj-name b{color:var(--ink-2)}
+  .prj-line{display:flex;align-items:stretch;gap:8px;padding-right:14px}
+  .prj-row-head{flex:1;min-width:0;text-align:left;padding:12px 4px 12px 17px;
+    border-radius:12px 0 0 12px;color:var(--ink)}
+  .prj-row-head:hover .prj-name b{color:var(--accent)}
+  .prj-row-head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .prj-row-head .caret{color:var(--ink-4);font-size:10px;transition:color .16s var(--ease)}
+  .prj-row.is-open .prj-row-head .caret{color:var(--accent)}
+  .prj-cell{min-width:0;display:flex;align-items:baseline;gap:8px}
+  .prj-name{flex-wrap:wrap}
+  .prj-name b{font-size:14px;font-weight:500;color:var(--ink);overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .prj-name em{font:400 10.5px var(--mono);font-style:normal;color:var(--ink-3)}
+  .prj-name small{flex:1 0 100%;font-size:12px;color:var(--ink-3);overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  /* live dot: the only saturated thing in a row, because it is the only
+     thing that is happening right now */
+  .prj-live{font:600 9.5px var(--mono);letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);align-items:center}
+  .prj-live i{width:6px;height:6px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 3px rgba(168,217,79,.14)}
+  .prj-live.is-idle{min-height:6px}
+  .prj-num{font:400 11px var(--mono);color:var(--ink-2);white-space:nowrap;gap:7px}
+  .prj-num em{font-style:normal;color:var(--ink-3)}
+  .prj-num.is-none{color:var(--ink-3)}
+  .prj-when{font:400 10.5px var(--mono);letter-spacing:.04em;color:var(--ink-3);
+    white-space:nowrap}
+  .prj-when.is-none{color:var(--ink-3)}
+  .prj-map{align-self:center;font:600 9.5px var(--mono);letter-spacing:.1em;
+    text-transform:uppercase;color:var(--ink-3);background:var(--bg-3);
+    border:1px solid var(--line);border-radius:999px;padding:7px 13px;flex:none;
+    min-width:62px;transition:all .16s var(--ease)}
+  .prj-map:hover{color:var(--accent);border-color:var(--accent);background:transparent}
+  .prj-map:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* skeletons: a shaped placeholder says "loading" without the word */
+  .prj-skel{height:52px;border-radius:12px;background:linear-gradient(90deg,
+    var(--bg-2) 0%,var(--bg-3) 40%,var(--bg-2) 80%);background-size:280% 100%;
+    animation:prjshimmer 1.5s var(--ease) infinite}
+  .prj-skel.is-sm{height:15px;border-radius:5px;margin:0 0 7px;max-width:min(100%,420px)}
+  @keyframes prjshimmer{from{background-position:120% 0}to{background-position:-60% 0}}
+  @media (prefers-reduced-motion:reduce){.prj-skel{animation:none}}
+
+  .prj-empty{padding:46px 22px;text-align:center;border:1px dashed var(--line);
+    border-radius:12px;background:var(--bg-2)}
+  .prj-empty b{display:block;font:500 15px var(--serif);color:var(--ink);margin-bottom:7px}
+  .prj-empty p{font-size:12.5px;color:var(--ink-3);max-width:52ch;margin:0 auto;line-height:1.6}
+
+  /* drawer */
   .prj-desc{color:var(--ink-2);font-size:12.5px;margin:0 0 12px;max-width:70ch}
-  .prj-drawer{padding:2px 16px 16px 38px;border-top:1px solid var(--line-soft)}
-  .prj-panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;align-items:start}
-  .prj-panel{background:var(--bg-3);border:1px solid var(--line-soft);border-radius:9px;padding:12px 14px}
-  .prj-ptitle{font:600 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:9px}
+  .prj-drawer{padding:14px 16px 16px 17px;border-top:1px solid var(--line-soft)}
+  .prj-panels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .prj-panel{background:var(--bg-2);border:1px solid var(--line-soft);border-radius:10px;
+    padding:12px 14px;min-height:98px;display:flex;flex-direction:column}
+  .prj-row.is-open .prj-panel{background:var(--bg-2)}
+  .prj-ptitle{font:600 9.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:10px;flex:none}
+  .prj-pbody{flex:1;min-height:0}
+  /* one-line empty states sit centred so a 1-line and a 2-line note leave the
+     same box height — the ragged bottom edge was the loudest broken thing */
+  .prj-pbody>.prj-note:only-child{display:flex;align-items:center;min-height:44px}
   .prj-note{color:var(--ink-3);font-size:12px;line-height:1.5}
   .prj-todos,.prj-list{display:flex;flex-direction:column;gap:6px}
   .prj-todo,.prj-li{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:var(--ink-2)}
   .prj-todo .tcontent{min-width:0}
   .prj-todo .tcontent.done{color:var(--ink-3);text-decoration:line-through}
+  @media (max-width:1000px){
+    .prj-cols{display:none}
+    .prj-row-head{grid-template-columns:14px minmax(0,1fr) auto;
+      grid-template-areas:'c n live' '. files when';row-gap:6px;padding:12px 4px 12px 15px}
+    .prj-row-head .caret{grid-area:c}
+    .prj-name{grid-area:n}
+    .prj-live{grid-area:live}
+    .prj-num{grid-area:files}
+    .prj-when{grid-area:when;justify-content:flex-end}
+    .prj-panels{grid-template-columns:minmax(0,1fr)}
+  }
+
+  /* Tree lens — the workspace as a horizontal tree that grows left to right.
+     Root at the left, one column per level of depth, files as a card of
+     leaves hanging off the branch that holds them. Branch thickness carries
+     how much a limb holds, so the shape reads as growth rather than as an
+     indented list turned on its side. */
+  .tv{height:100%;display:flex;flex-direction:column;padding:70px 0 0;min-height:0}
+  .tv-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    width:100%;max-width:1180px;margin:0 auto;padding:0 26px 10px;
+    border-bottom:1px solid var(--line-soft)}
+  .tv-filter{width:190px;background:var(--bg-3);border:1px solid var(--line);border-radius:7px;
+    padding:5px 9px;font-size:12px;color:var(--ink)}
+  .tv-filter:focus{outline:none;border-color:#39404d}
+  /* The surface can be wider than the column, so the pane stays full width
+     and scrolls; its left gutter matches the centred header so the root chip
+     starts on the same line as everything else. */
+  .tv-scroll{flex:1;min-height:0;overflow:auto;
+    padding-left:max(26px,calc((100% - 1180px)/2 + 26px));padding-right:26px;
+    /* a faint vignette so the canvas reads as a surface you pan around */
+    background:radial-gradient(120% 90% at 8% 40%,rgba(168,217,79,.035),transparent 62%)}
+  .tv-surface{position:relative}
+
+  /* ---- branches ---- */
+  .tv-links{position:absolute;inset:0;pointer-events:none;overflow:visible}
+  .tv-link{fill:none;stroke:#39424f;stroke-linecap:round;opacity:.9}
+  .tv-link.is-leaf{stroke:#2f3742;stroke-dasharray:2.5 3.5}
+  /* new limbs draw themselves in, oldest trick in the book and the clearest
+     way to show that a branch just grew */
+  .tv-surface.is-growing .tv-link{animation:tvdraw .42s var(--ease) both}
+  @keyframes tvdraw{from{stroke-dashoffset:1;opacity:0}to{stroke-dashoffset:0;opacity:.9}}
+  .tv-surface.is-growing .tv-link{stroke-dasharray:1}
+  .tv-surface.is-growing .tv-link.is-leaf{stroke-dasharray:1}
+
+  /* ---- nodes ---- */
+  .tv-node{
+    position:absolute;display:grid;grid-template-columns:var(--bud,8px) minmax(0,1fr) 10px;
+    align-items:center;column-gap:9px;width:188px;height:34px;padding:0 10px 0 9px;
+    text-align:left;border-radius:9px;
+    /* deeper branches sit visually further back */
+    background:color-mix(in srgb,var(--bg-3) calc(100% - var(--depth,0)*9%),var(--bg-2));
+    border:1px solid var(--line-soft);
+    transition:border-color .16s var(--ease),background .16s var(--ease),
+      transform .16s var(--ease);
+  }
+  .tv-node:hover{border-color:#3c4655;transform:translateX(2px)}
+  .tv-node:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .tv-node.is-open{border-color:#39424f}
+  .tv-node.is-root{width:196px;height:38px;background:var(--bg-2);border-color:var(--line)}
+  /* the bud: sized by what the branch holds, filled once it is open */
+  .tv-bud{width:var(--bud,8px);height:var(--bud,8px);border-radius:50%;
+    border:1.5px solid var(--accent);opacity:.55;transition:all .16s var(--ease)}
+  .tv-node.is-open .tv-bud{background:var(--accent);opacity:1;
+    box-shadow:0 0 0 3px rgba(168,217,79,.12)}
+  .tv-node.is-empty .tv-bud{border-color:var(--ink-4);opacity:.4}
+  .tv-node:hover .tv-bud{opacity:1}
+  .tv-label{min-width:0;display:flex;flex-direction:column;gap:1px}
+  .tv-node .tv-name{font-size:12.5px;color:var(--ink);line-height:1.15;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tv-node.is-project .tv-name{color:var(--accent);font-weight:500}
+  .tv-node.is-root .tv-name{font:500 13.5px var(--serif);color:var(--ink)}
+  .tv-node .tv-count{font:400 9px var(--mono);letter-spacing:.06em;color:var(--ink-4);
+    line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tv-caret{color:var(--ink-4);font-size:8px;justify-self:end}
+  .tv-node.is-open .tv-caret{color:var(--accent)}
+
+  /* ---- leaf cards ---- */
+  .tv-stack{position:absolute;width:196px;padding:7px 0 8px;border-radius:9px;
+    background:rgba(16,19,24,.62);border:1px solid var(--line-soft)}
+  .tv-stack-head{font:600 8.5px var(--mono);letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-4);padding:0 10px 5px;margin-bottom:2px;
+    border-bottom:1px solid var(--line-soft)}
+  .tv-leaf{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:baseline;
+    width:100%;text-align:left;height:20px;padding:0 10px;border-radius:5px}
+  .tv-leaf:hover{background:var(--bg-3)}
+  .tv-leaf:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .tv-leaf .tv-name{font-size:11.5px;color:var(--ink-2);overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .tv-leaf:hover .tv-name{color:var(--ink)}
+  .tv-leaf .tv-tag{font:400 8.5px var(--mono);letter-spacing:.08em;color:var(--ink-4);
+    text-transform:uppercase}
+  .tv-leaf.is-more{color:var(--accent);font:500 9.5px var(--mono);letter-spacing:.1em;
+    text-transform:uppercase;margin-top:3px}
+
+  /* ---- growth ---- */
+  .tv-node.is-new,.tv-stack.is-new{animation:tvgrow .34s var(--ease) both}
+  @keyframes tvgrow{
+    from{opacity:0;transform:translateX(-16px) scale(.94)}
+    to{opacity:1;transform:none}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .tv-node.is-new,.tv-stack.is-new,.tv-surface.is-growing .tv-link{animation:none}
+    .tv-node:hover{transform:none}
+  }
+
+  /* file explorer (Files panel of a project drawer) */
+  .prj-panel-wide{grid-column:1/-1}
+  .fx-crumbs{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px;margin-bottom:6px;
+    font:500 12px var(--mono)}
+  .fx-crumb{color:var(--ink-3);padding:2px 4px;border-radius:4px}
+  .fx-crumb:hover{color:var(--ink);background:var(--bg-2)}
+  .fx-sep{color:var(--ink-4)}
+  .fx-here{color:var(--ink)}
+  .fx-meta{font:400 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:9px}
+  /* folders left, files right; on a narrow drawer they stack */
+  /* stretch, not start: sized to its own content the folders pane rendered
+     its divider as a 63px tick beside a 180px file list */
+  .fx-body{display:grid;grid-template-columns:minmax(190px,270px) minmax(0,1fr);gap:16px;
+    align-items:stretch}
+  .fx-body.is-files-only{grid-template-columns:minmax(0,1fr)}
+  @media (max-width:900px){.fx-body{grid-template-columns:minmax(0,1fr)}}
+  .fx-pane{display:flex;flex-direction:column;max-height:430px;min-height:0;
+    overflow-y:auto;padding-right:4px}
+  .fx-dirs{border-right:1px solid var(--line-soft);padding-right:12px}
+  @media (max-width:900px){.fx-dirs{border-right:0;padding-right:4px;max-height:220px}}
+  .fx-row{display:grid;grid-template-columns:14px minmax(0,1fr) auto auto;gap:10px;
+    align-items:baseline;width:100%;text-align:left;padding:5px 7px;border-radius:7px;
+    font-size:13px;color:var(--ink-2)}
+  /* cap the measure so size and date sit beside the name instead of 540px
+     away at the panel edge, and give the eye a rule to track along */
+  .fx-files .fx-row{grid-template-columns:14px minmax(0,460px) 78px 84px;
+    justify-content:start;column-gap:12px}
+  .fx-files .fx-row+.fx-row{box-shadow:inset 0 1px 0 var(--line-soft)}
+  .fx-files .fx-size{text-align:right}
+  .fx-dirs .fx-row{grid-template-columns:14px minmax(0,1fr) auto}
+  button.fx-row:hover{background:var(--bg-2);color:var(--ink)}
+  .fx-row.is-dir .fx-name{color:var(--ink)}
+  .fx-row.is-up .fx-name{color:var(--ink-3)}
+  .fx-ico{color:var(--ink-4);font-size:9px;line-height:1.5}
+  .fx-row.is-dir .fx-ico{color:var(--accent)}
+  .fx-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fx-size,.fx-when{font:400 11px var(--mono);color:var(--ink-3);white-space:nowrap}
+  .fx-when{min-width:70px;text-align:right}
+
   .tchip{font:500 10px/1 var(--mono);color:var(--ink-2);background:var(--bg-2);border:1px solid var(--line);border-radius:5px;padding:3px 6px;flex:none;white-space:nowrap}
   .tchip.st-in_progress{color:var(--accent);border-color:var(--accent)}
   .tchip.st-pending{color:var(--ink-2)}

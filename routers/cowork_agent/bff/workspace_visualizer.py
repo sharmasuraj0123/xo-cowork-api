@@ -619,31 +619,32 @@ def workspace_activity() -> ActivityResponse:
     Empty when no project has live presence yet. Each open-session
     row carries ``project_id`` so the UI can group by project.
     """
+    workspace = scopes.resolve_scope("xo-workspace-visualizer")
+    raw = workspace.read_activity() or {}
     open_sessions: list[OpenSession] = []
-    for pid in _all_projects():
-        scope = scopes.resolve_scope("xo-projects-visualizer", pid)
-        raw = scope.read_activity()
-        if not raw:
+    for s in raw.get("open_sessions") or []:
+        if not isinstance(s, dict):
             continue
-        for s in raw.get("open_sessions") or []:
-            if not isinstance(s, dict):
-                continue
-            try:
-                open_sessions.append(
-                    OpenSession(
-                        session_id=str(s["session_id"]),
-                        runtime=s.get("runtime"),
-                        agent=str(s["agent"]),
-                        user_id=str(s["user_id"]),
-                        opened_at=str(s["opened_at"]),
-                        last_activity_at=str(s["last_activity_at"]),
-                        host=s.get("host"),
-                        project_id=pid,
-                    )
+        try:
+            open_sessions.append(
+                OpenSession(
+                    session_id=str(s["session_id"]),
+                    runtime=s.get("runtime"),
+                    agent=str(s["agent"]),
+                    user_id=str(s["user_id"]),
+                    opened_at=str(s["opened_at"]),
+                    last_activity_at=str(s["last_activity_at"]),
+                    host=s.get("host"),
+                    project_id=s.get("project_id"),
                 )
-            except (KeyError, ValueError):
-                continue
-    return ActivityResponse(project_id=None, updated_at=None, open_sessions=open_sessions)
+            )
+        except (KeyError, ValueError):
+            continue
+    return ActivityResponse(
+        project_id=None,
+        updated_at=raw.get("updated_at"),
+        open_sessions=open_sessions,
+    )
 
 
 # ── /api/xo-projects/timeline ────────────────────────────────────────────────

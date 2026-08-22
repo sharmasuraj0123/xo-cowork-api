@@ -33,6 +33,33 @@
     "dangerously_skip_permissions": true,
     "output_format": "stream-json"
   },
+  "runtime_setup": {
+    "installs_cli": true,
+    "extra_mounts": [
+      "~/claude-cowork"
+    ],
+    "session_globs": [
+      "projects/**/*.jsonl",
+      "sessions/*.json"
+    ],
+    "secrets": [
+      {
+        "key": "CLAUDE_CODE_OAUTH_TOKEN",
+        "label": "Claude subscription token",
+        "description": "Use a Claude Code OAuth token when running without an interactive login."
+      },
+      {
+        "key": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API key",
+        "description": "Alternative API-key authentication for Claude."
+      },
+      {
+        "key": "ANTHROPIC_AUTH_TOKEN",
+        "label": "Anthropic-compatible gateway token",
+        "description": "Used with an Anthropic-compatible gateway such as OpenRouter."
+      }
+    ]
+  },
   "providers": {
     "openrouter": {
       "settings_env": {

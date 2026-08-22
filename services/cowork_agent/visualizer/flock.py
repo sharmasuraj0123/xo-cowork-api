@@ -13,7 +13,7 @@ race (logged WARN).
 **Lock files live OUTSIDE ``.xo/``.** They are per-machine
 infrastructure (coordination state) — not project data — so they
 sit alongside ``offsets.json`` under
-``~/.xo-cowork/watcher/locks/``. Keeping them out of ``.xo/`` means:
+``~/.quirq/watcher/locks/``. Keeping them out of ``.xo/`` means:
 
 * agents reading ``.xo/`` never trip over a 0-byte sentinel,
 * AGENTS.md's "everything in ``.xo/`` has a schema" contract stays
@@ -37,19 +37,23 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from services.cowork_agent.visualizer.state import watcher_state_dir
+
 logger = logging.getLogger(__name__)
 
 _DEADLINE_S = 2.0
 _RETRY_INTERVAL_S = 0.02   # 20 ms — gives ~100 retries per deadline window
 
-_LOCKS_ROOT = Path.home() / ".xo-cowork" / "watcher" / "locks"
+
+def _locks_root() -> Path:
+    return watcher_state_dir() / "locks"
 
 
 def _lock_path_for(data_path: Path) -> Path:
     """Map a data file path to its per-machine lock sentinel path.
 
     ``~/xo-projects/blackhole/.xo/todos.json``
-        → ``~/.xo-cowork/watcher/locks/todos.json.<8hex>.lock``
+        → ``~/.quirq/watcher/locks/todos.json.<8hex>.lock``
 
     The 8-hex suffix is the first 8 chars of ``sha256(abs_path)`` —
     short, stable, collision-free in practice. The data file's
@@ -58,14 +62,14 @@ def _lock_path_for(data_path: Path) -> Path:
     """
     abs_data = str(data_path.resolve()) if data_path.exists() else str(data_path.absolute())
     digest = hashlib.sha256(abs_data.encode("utf-8")).hexdigest()[:8]
-    return _LOCKS_ROOT / f"{data_path.name}.{digest}.lock"
+    return _locks_root() / f"{data_path.name}.{digest}.lock"
 
 
 @contextmanager
 def locked(path: Path) -> Iterator[None]:
     """Acquire an exclusive advisory lock for the data file at
     ``path``. The lock sentinel itself lives under
-    ``~/.xo-cowork/watcher/locks/`` (see module docstring).
+    ``~/.quirq/watcher/locks/`` (see module docstring).
 
     Bounded wait. If the lock can't be acquired in
     :data:`_DEADLINE_S` seconds the context yields anyway (logged

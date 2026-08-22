@@ -1,9 +1,11 @@
-"""Pure JSON readers for ``<project>/.xo/`` and ``~/xo-projects/.xo/``.
+"""Pure JSON readers for visualizer and watcher state.
 
 The only module under ``services/cowork_agent/visualizer/`` that the
 BFF routes' scope handles call. Returns plain dicts; never touches
-runtime storage (``~/.claude``, ``~/.openclaw``). Path resolution and
-clamping live in the caller (see ``services/cowork_agent/scopes.py``
+runtime storage (``~/.claude``, ``~/.openclaw``). It reads portable
+visualizer files from project/workspace ``.xo/`` and ephemeral activity
+from ``~/.quirq/watcher/``. Path resolution and clamping live in
+the caller (see ``services/cowork_agent/scopes.py``
 ``VisualizerScope`` / ``WorkspaceVisualizerScope``).
 
 Two non-trivial readers:

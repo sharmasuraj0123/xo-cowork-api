@@ -1,10 +1,9 @@
 """
-Secrets endpoints backed by the **active agent's** ``.env`` file.
+Legacy secrets endpoints backed by the active secrets store.
 
 GET parses the file into key/value entries, PUT overwrites it with a new list
-of entries. The parser/serializer lives in `agent_env` (resolved by
-``AGENT_NAME``) so other route files (e.g. the onboarding provider-key flow)
-share the same format and target the same file.
+of entries. New frontend code should use the curated ``/api/secrets`` BFF
+routes, which never return plaintext values from list operations.
 """
 
 from fastapi import APIRouter, Request
@@ -17,7 +16,7 @@ router = APIRouter()
 
 @router.get("/api/secrets/env")
 async def get_env_secrets():
-    """Return the OpenClaw .env file as a list of key-value entries."""
+    """Return the active secrets store as a list of key-value entries."""
     try:
         return {"entries": load_env_entries()}
     except Exception as e:
@@ -43,7 +42,7 @@ async def get_env_keys():
 
 @router.put("/api/secrets/env")
 async def put_env_secrets(request: Request):
-    """Overwrite the OpenClaw .env file with the provided key-value entries."""
+    """Overwrite the active secrets store with the provided entries."""
     body = await request.json()
     entries = body.get("entries", [])
     try:

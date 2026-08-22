@@ -8,7 +8,7 @@
   </picture>
 </a>
 
-# xo-cowork-api
+# xo-space
 
 **The local control plane for AI coding agents.**
 One workspace, many runtimes — Claude Code, OpenClaw, Codex, Hermes, Antigravity, and whatever comes next.
@@ -16,13 +16,13 @@ One workspace, many runtimes — Claude Code, OpenClaw, Codex, Hermes, Antigravi
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-A0A0A0?style=flat-square)](#license)
-[![Wiki](https://img.shields.io/badge/docs-wiki-2C2C2C?style=flat-square&logo=github)](https://github.com/sharmasuraj0123/xo-cowork-api/wiki)
+[![Wiki](https://img.shields.io/badge/docs-wiki-2C2C2C?style=flat-square&logo=github)](https://github.com/quirq-ai/xo-space/wiki)
 
 </div>
 
 ---
 
-`xo-cowork-api` is the FastAPI service that powers an **XO Cowork workspace**: a local control plane that runs inside every workspace, brokers chat to whichever coding agent runtime you've installed (Claude Code, OpenClaw, Codex), and owns the on-disk project model that travels with your work.
+`xo-space` is the FastAPI service that powers an **XO Cowork workspace**: a local control plane that runs inside every workspace, brokers chat to whichever coding agent runtime you've installed (Claude Code, OpenClaw, Codex), and owns the on-disk project model that travels with your work.
 
 It does **not** train models, run inference, or compete with the agents — it stitches them together, adds the boring-but-critical glue (sessions, files, secrets, OAuth flows, usage reporting), and exposes one cohesive HTTP/SSE surface that the Tauri UI and any B2B client can build on.
 
@@ -34,7 +34,7 @@ It does **not** train models, run inference, or compete with the agents — it s
                                          │ http://localhost:5002
                                          ▼
        ┌─────────────────────────────────────────────────────────────────┐
-       │                       xo-cowork-api  (FastAPI)                   │
+       │                          xo-space  (FastAPI)                    │
        │                                                                  │
        │   /api/chat/*         /api/sessions/*       /api/files/*         │
        │   /api/agents/*       /api/projects/*       /api/secrets/*       │
@@ -62,7 +62,7 @@ It does **not** train models, run inference, or compete with the agents — it s
 
 Every coding agent ships with its own session store, its own auth, its own todo list, its own way of organising a workspace. The moment you want to **combine** them — or share a project, or measure usage across all of them, or just see a single chat history — you hit five incompatible filesystems and three half-baked CLIs.
 
-`xo-cowork-api` is the part of the [XO Cowork](https://xo.builders) stack that puts a uniform API in front of all of them, keeps the project folder portable and sharing-safe by construction, and gives you back something you can build a product on.
+`xo-space` is the part of the [XO Cowork](https://xo.builders) stack that puts a uniform API in front of all of them, keeps the project folder portable and sharing-safe by construction, and gives you back something you can build a product on.
 
 - 🧠 **Pluggable runtimes** — one `BaseAgentAdapter` contract, one `/api/chat/*` surface. Claude Code, OpenClaw, Hermes, and Antigravity are first-class; Codex is partial; new runtimes plug in without router changes.
 - 🗂️ **Sharing-safe project model** — chat content stays in the runtime's own storage (`~/.claude/`, `~/.openclaw/`). The project folder at `~/xo-projects/<id>/` is pure metadata + work files, structurally safe to share, fork, or rebase.
@@ -77,27 +77,19 @@ Every coding agent ships with its own session store, its own auth, its own todo 
 ## Quick start
 
 ```bash
-# 1. Clone
-git clone https://github.com/sharmasuraj0123/xo-cowork-api.git
-cd xo-cowork-api
-
-# 2. Install dependencies (Python 3.12+)
-pip install -r requirements.txt
-
-# 3. Configure
-cp .env.example .env       # then edit — see Configuration below
-
-# 4. Boot a runtime (pick at least one)
-claude /login                                  # Claude Code
-# or
-bash config/agents/openclaw/agent.sh start     # OpenClaw gateway on :18789
-
-# 5. Run
-python server.py           # http://localhost:5002
-
-# or with auto-reload for development:
-uvicorn server:app --host 0.0.0.0 --port 5002 --reload
+curl -fsSL https://raw.githubusercontent.com/quirq-ai/xo-space/development/install.sh | bash
 ```
+
+Run it from the directory you want as your workspace: the checkout lands
+beside your projects, machine-local state goes to `./.quirq`, and the server
+runs **in your terminal** with a quiet screen — its output appends to
+`./.quirq/quirq.log`, Ctrl-C stops it, and re-running the same command
+updates and restarts it. Closing the terminal takes the server down with
+it; for an always-on server, run the same command under `tmux` or a
+supervisor of your choice.
+
+See the [Docker installation guide](INSTALLATION.md) for the container
+alternative.
 
 Verify it's up:
 
@@ -117,9 +109,20 @@ curl http://localhost:5002/health
 
 ### Process management
 
-`cowork-api.sh` wraps the server with PID-file management and log redirection:
+Ctrl-C stops the server; watch it with `tail -f .quirq/quirq.log`. If a
+stray server is holding the port and you can't find its terminal:
 
 ```bash
+lsof -i :5002   # find the PID, then kill it
+```
+
+(For the Docker install, `docker stop quirq`.)
+
+Backend contributors can still use the native process manager:
+
+```bash
+./cowork-api.sh dev        # native venv + reload
+./cowork-api.sh install    # dependencies only
 ./cowork-api.sh start      # daemon
 ./cowork-api.sh status
 ./cowork-api.sh logs       # tail -f
@@ -152,7 +155,7 @@ event: heartbeat         data: {}
 event: done              data: {"finish_reason":"stop","session_id":"9d4e..."}
 ```
 
-Full event vocabulary, reconnect semantics, and TypeScript example: see the [Frontend Chat API guide](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Chat-Api).
+Full event vocabulary, reconnect semantics, and TypeScript example: see the [Frontend Chat API guide](https://github.com/quirq-ai/xo-space/wiki/Frontend-Chat-Api).
 
 ---
 
@@ -171,7 +174,7 @@ Adapters live under `services/cowork_agent/adapters/<name>/`. The dispatch class
 
 The router layer (`routers/cowork_agent/chat.py`) doesn't know which adapter it's talking to. It picks based on either an explicit `agent_name` in the request, on-disk session-ownership detection (`find_session_backend`), or the `AGENT_NAME` env var. Adapters are **auto-discovered** — adding a runtime is dropping a folder, no registry edit and no core changes.
 
-Deep dive: [Claude Code vs OpenClaw](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Claude-Vs-Openclaw), [Streaming protocols compared](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Streaming-Claude-Vs-Openclaw).
+Deep dive: [Claude Code vs OpenClaw](https://github.com/quirq-ai/xo-space/wiki/Claude-Vs-Openclaw), [Streaming protocols compared](https://github.com/quirq-ai/xo-space/wiki/Streaming-Claude-Vs-Openclaw).
 
 ---
 
@@ -181,16 +184,16 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 
 | Family | Routes | Wiki guide |
 |---|---|---|
-| **Chat** | `/api/chat/{prompt,stream/{id},abort,respond}` + legacy `/ask_question*` | [Chat API](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Chat-Api) |
-| **Files** | `/api/files/{upload,list-directory,content,content-binary,save,mkdir}` | [Files API](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Files-Api) |
-| **Sessions** | `/api/sessions/*`, `/api/messages/{id}` | [Sessions & messages](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Sessions-Messages-Api) |
-| **Agents** | `/api/agents/*`, `/api/models`, `/api/config/*` | [Agents & config](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Agents-Config-Api) |
-| **Auth** | `/xo-auth/*`, `/connect/claude-code`, `/connect/codex`, `/connect/antigravity`, `/openclaw/usage/*` | [Auth & setup](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Auth-Api) |
-| **Connectors** | `/api/connectors/{gdrive,onedrive,github,vercel,manus}/*` | [Connectors](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Connectors-Api) |
-| **Secrets & misc** | `/api/secrets/*`, `/api/usage`, `/api/onboarding/*`, `/api/channels/add` | [Misc](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Misc-Api) |
-| **Server** | `/health`, `/sessions`, `/gateway/restart`, `/app/{restart,update}` | [Server & lifecycle](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Server-Api) |
+| **Chat** | `/api/chat/{prompt,stream/{id},abort,respond}` + legacy `/ask_question*` | [Chat API](https://github.com/quirq-ai/xo-space/wiki/Frontend-Chat-Api) |
+| **Files** | `/api/files/{upload,list-directory,content,content-binary,save,mkdir}` | [Files API](https://github.com/quirq-ai/xo-space/wiki/Frontend-Files-Api) |
+| **Sessions** | `/api/sessions/*`, `/api/messages/{id}` | [Sessions & messages](https://github.com/quirq-ai/xo-space/wiki/Frontend-Sessions-Messages-Api) |
+| **Agents** | `/api/agents/*`, `/api/models`, `/api/config/*` | [Agents & config](https://github.com/quirq-ai/xo-space/wiki/Frontend-Agents-Config-Api) |
+| **Auth** | `/xo-auth/*`, `/connect/claude-code`, `/connect/codex`, `/connect/antigravity`, `/openclaw/usage/*` | [Auth & setup](https://github.com/quirq-ai/xo-space/wiki/Frontend-Auth-Api) |
+| **Connectors** | `/api/connectors/{gdrive,onedrive,github,vercel,manus}/*` | [Connectors](https://github.com/quirq-ai/xo-space/wiki/Frontend-Connectors-Api) |
+| **Secrets & misc** | `/api/secrets/*`, `/api/usage`, `/api/onboarding/*`, `/api/channels/add` | [Misc](https://github.com/quirq-ai/xo-space/wiki/Frontend-Misc-Api) |
+| **Server** | `/health`, `/sessions`, `/gateway/restart`, `/app/{restart,update}` | [Server & lifecycle](https://github.com/quirq-ai/xo-space/wiki/Frontend-Server-Api) |
 
-📚 **Full wiki:** [github.com/sharmasuraj0123/xo-cowork-api/wiki](https://github.com/sharmasuraj0123/xo-cowork-api/wiki)
+📚 **Full wiki:** [github.com/quirq-ai/xo-space/wiki](https://github.com/quirq-ai/xo-space/wiki)
 
 ---
 
@@ -206,7 +209,7 @@ Roughly 100 endpoints. Every guide below is a full integration spec — request 
 
 Each connector exposes `connect`, `status`, `disconnect`, `reconnect` plus per-service extras (`/sessions/{id}/submit` for rclone OAuth code paste; `/oauth/start` for Vercel; `/cli/{start,poll,cancel}` for GitHub device flow). The Drive connector additionally ships folder management (`mkdir`, `rmdir`, `folders`) and streaming uploads with no disk spool or RAM buffer.
 
-A `:53682`-shared single-flight lock between Drive and OneDrive prevents concurrent rclone OAuth flows from colliding on the callback port. See the [Connectors guide](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Connectors-Api).
+A `:53682`-shared single-flight lock between Drive and OneDrive prevents concurrent rclone OAuth flows from colliding on the callback port. See the [Connectors guide](https://github.com/quirq-ai/xo-space/wiki/Frontend-Connectors-Api).
 
 ---
 
@@ -226,11 +229,24 @@ Every shared project is a folder under `~/xo-projects/<id>/` with a canonical la
 └── .xo/                ← metadata-only — safe to share
     ├── project.json
     ├── sessions/sessionslist.json   ← sessionId ↔ runtime, NO message content
-    ├── todos.json, stats.json, timeline.jsonl, activity.json
-    └── sync.json, peers.json, policy.json
+    ├── todos.json, stats.json, timeline.jsonl
+    └── sync.json, peers.json
 ```
 
 **The structural confidentiality guarantee:** no code path writes chat content into `~/xo-projects/`. Conversations live in the runtime's own home (`~/.claude/`, `~/.openclaw/`, `~/.codex/`), which never leaves the machine. A project folder can be `tar`'d, sync'd, or pushed to git without leaking session history or credentials.
+
+Live presence is intentionally machine-local rather than project metadata:
+the watcher writes per-project snapshots under
+`~/.quirq/watcher/activity/projects/` and exposes them through
+`GET /api/xo-projects/{id}/activity`.
+
+All Quirq installation state now lives under `~/.quirq/`: onboarding state,
+typed runtime settings and write-only credentials saved through the Setup tab,
+watcher cursors, advisory locks, and live presence. The local Docker watcher
+can combine every mounted runtime source while keeping one selected backend
+for new chats. Existing
+`~/.xo-cowork/` onboarding/cursor files are accepted as a read-only migration
+source, but every new write targets `~/.quirq/`.
 
 Create a project with the scaffolding endpoint:
 
@@ -276,11 +292,11 @@ agent, and the validation playbook.
 
 The wiki is the canonical reference for the API surface, kept in sync with the code:
 
-- 🏗️ [Architecture](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Architecture) — snapshot of the current state, route inventory, vision scorecard
-- 📑 [Frontend API index](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Frontend-Api-Index) — start here for integration
-- 🛠️ [Visualizer + peer-sync plan](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Visualizer-And-Sync-Plan) — the active roadmap
-- 🔒 [RBAC plan](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Rbac-Plan) — multi-user authorization design
-- 📊 [OpenClaw usage sync flow](https://github.com/sharmasuraj0123/xo-cowork-api/wiki/Openclaw-Usage-Sync-Flow)
+- 🏗️ [Architecture](https://github.com/quirq-ai/xo-space/wiki/Architecture) — snapshot of the current state, route inventory, vision scorecard
+- 📑 [Frontend API index](https://github.com/quirq-ai/xo-space/wiki/Frontend-Api-Index) — start here for integration
+- 🛠️ [Visualizer + peer-sync plan](https://github.com/quirq-ai/xo-space/wiki/Visualizer-And-Sync-Plan) — the active roadmap
+- 🔒 [RBAC plan](https://github.com/quirq-ai/xo-space/wiki/Rbac-Plan) — multi-user authorization design
+- 📊 [OpenClaw usage sync flow](https://github.com/quirq-ai/xo-space/wiki/Openclaw-Usage-Sync-Flow)
 
 19 pages in total. Every guide is a full integration spec, not a quick-start.
 
@@ -289,7 +305,7 @@ The wiki is the canonical reference for the API surface, kept in sync with the c
 ## Project structure
 
 ```
-xo-cowork-api/
+xo-space/
 ├── server.py                       FastAPI app — lifespan, CORS, router mounts, /ask_question (Plane A)
 ├── config/
 │   ├── models/<name>/              Plane-A model clients (claude_code/, codex/) — selected by AI_PROVIDER
@@ -318,10 +334,18 @@ xo-cowork-api/
 │   │   └── helpers.py project_layout.py skill_installer.py providers_status_lib.py …
 │   ├── usage_sync.py             daily background → /usage/report on swarm
 │   └── xo_manifest.py            builds ~/xo-projects/.xo/xo.json (capabilities + live status)
+│
+│   Space's own data is one document: ~/xo-projects/.xo/workspace.json holds the
+│   graph, dashboard and session-telemetry views. The watcher materialises it;
+│   /space/data/*.json read it and rebuild only when a view is missing or stale.
 ├── cowork-api.sh                   process manager (start|stop|restart|status|logs)
 ├── cowork-update.sh                git pull + restart in background
 ├── DEVELOPING.md                   engineering guide — architecture, adding an agent, validation
 ├── Dockerfile
+├── compose.local.yml               local Docker service and host mounts
+├── quirq                           one-command Docker launcher
+├── install.sh                      no-clone remote installer
+├── INSTALLATION.md                 short local installation guide
 └── requirements.txt
 ```
 
@@ -333,7 +357,7 @@ xo-cowork-api/
 
 ## Contributing
 
-Issues and PRs welcome on the [`development` branch](https://github.com/sharmasuraj0123/xo-cowork-api/tree/development). The codebase is deliberately small (a few thousand lines of Python); changes that touch the adapter contract, the session model, or the project-folder layout deserve a wiki update too.
+Issues and PRs welcome on the [`development` branch](https://github.com/quirq-ai/xo-space/tree/development). The codebase is deliberately small (a few thousand lines of Python); changes that touch the adapter contract, the session model, or the project-folder layout deserve a wiki update too.
 
 Conventions:
 
@@ -351,6 +375,6 @@ MIT. See [LICENSE](LICENSE) (forthcoming) or treat the badge above as authoritat
 
 <div align="center">
 
-Built for <a href="https://xo.builders">XO Cowork</a> · Part of the <a href="https://github.com/sharmasuraj0123">XO</a> stack
+Built for <a href="https://xo.builders">XO Cowork</a> · Maintained at <a href="https://github.com/quirq-ai/xo-space">quirq-ai/xo-space</a>
 
 </div>
