@@ -152,23 +152,25 @@ async def _drain_until_exit(proc: asyncio.subprocess.Process, sid: str) -> None:
     finally:
         async with _lock:
             session = _active.get(sid)
-            if not session:
-                return
-            if session.status not in ("pending",):
-                return  # already finalized (e.g. cancelled)
-            if proc.returncode == 0:
-                token = await _read_gh_token()
-                if token:
-                    session.status = "completed"
-                    session.token = token
+            # Finalize only a session that is still pending; a missing session or
+            # any other status means it was already resolved (e.g. cancelled).
+            # Guard rather than `return` here: returning from `finally` would
+            # discard an in-flight exception, including the CancelledError this
+            # background task is stopped with.
+            if session is not None and session.status in ("pending",):
+                if proc.returncode == 0:
+                    token = await _read_gh_token()
+                    if token:
+                        session.status = "completed"
+                        session.token = token
+                    else:
+                        session.status = "failed"
+                        session.error = "Login succeeded but `gh auth token` returned no token."
                 else:
                     session.status = "failed"
-                    session.error = "Login succeeded but `gh auth token` returned no token."
-            else:
-                session.status = "failed"
-                session.error = (
-                    f"`gh auth login` exited with status {proc.returncode}."
-                )
+                    session.error = (
+                        f"`gh auth login` exited with status {proc.returncode}."
+                    )
 
 
 async def _read_gh_token() -> str | None:
